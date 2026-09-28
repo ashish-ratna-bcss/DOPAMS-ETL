@@ -5,6 +5,10 @@ See `pipeline.md` for how the pipeline itself works. This file is setup/ops only
 ## One-time setup, before the first deploy
 
 1. Fill in `.env` — the 4 API URLs (see `cctnsv1/.env`) and Postgres credentials for `dopams-new`.
+   On first pipeline run (or manually: `python -m db.init_schema`), the ETL creates the
+   `cctns_v1` database if your role has `CREATEDB`, then applies `db/sql/init_schema.sql`
+   and `db/sql/init_etl_support.sql`. Greenfield only — an existing dopams-new DB is
+   left unchanged except for missing `updated_at` / audit / run-log objects.
 2. Run the safe dedupe on the live DB (removes only confirmed byte-identical duplicate rows):
    ```bash
    psql -h <dopams-new host> -U dopams_bcss -d cctns_v1 -f db/sql/000_dedupe_exact_only.sql
