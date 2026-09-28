@@ -42,7 +42,7 @@ Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
         "CCTNS V1 nightly: month-chunked Accused dossier API "
         "(date-range POST → Postgres cctns_accused, month-chunked full pull)"
     ),
-    schedule=SCHEDULE_DAILY_0030_UTC,
+    schedule=SCHEDULE_DAILY_0130_UTC,
     start_date=START_DATE,
     catchup=False,
     default_args=DEFAULT_ARGS,
