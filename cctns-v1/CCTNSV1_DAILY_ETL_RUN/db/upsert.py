@@ -18,6 +18,8 @@ until the ambiguous groups have been reviewed.
 """
 import logging
 
+from config.settings import PG_ETL_SCHEMA
+
 logger = logging.getLogger("cctns_v1_etl.db")
 
 
@@ -26,10 +28,10 @@ def get_insertable_columns(cur, table):
         """
         SELECT column_name, is_generated, column_default
         FROM information_schema.columns
-        WHERE table_name = %s AND table_schema = 'public'
+        WHERE table_name = %s AND table_schema = %s
         ORDER BY ordinal_position
         """,
-        (table,),
+        (table, PG_ETL_SCHEMA),
     )
     cols = []
     for name, is_generated, default in cur.fetchall():
@@ -45,17 +47,18 @@ def get_insertable_columns(cur, table):
 
 def upsert_records(cur, table: str, conflict_col: str, records: list) -> dict:
     columns = get_insertable_columns(cur, table)
+    fq = f"{PG_ETL_SCHEMA}.{table}"
     col_list = ", ".join(columns)
     placeholders = ", ".join(["%s"] * len(columns))
     update_set = ", ".join(
         [f"{c} = EXCLUDED.{c}" for c in columns if c != conflict_col] + ["updated_at = now()"]
     )
     sql = f"""
-        INSERT INTO {table} ({col_list})
+        INSERT INTO {fq} ({col_list})
         VALUES ({placeholders})
         ON CONFLICT ({conflict_col})
         DO UPDATE SET {update_set}
-        WHERE {table} IS DISTINCT FROM EXCLUDED
+        WHERE {fq} IS DISTINCT FROM EXCLUDED
         RETURNING (xmax = 0) AS inserted
     """
 

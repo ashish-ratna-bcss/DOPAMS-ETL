@@ -24,7 +24,9 @@ See `pipeline.md` for how the pipeline itself works. This file is setup/ops only
 
 Production-style settings (Postgres + LocalExecutor, no separate Airflow DB):
 
-- **One database:** `PG_DATABASE` (default `cctns_v1`) holds both ETL tables (`cctns_*`) and Airflow metadata (`dag`, `dag_run`, …).
+- **One database** `PG_DATABASE` (default `cctns_v1`), **two schemas:**
+  - `cctns` (or `PG_ETL_SCHEMA`) — `cctns_*`, audit/run log
+  - `airflow` (or `PG_AIRFLOW_SCHEMA`) — `dag`, `dag_run`, `ab_*`, …
 - **Auto-create:** PM2 `airflow_with_env.sh` creates the DB if missing, runs `airflow db migrate`, and creates `admin` on scheduler start. DAG task `bootstrap_database` runs ETL DDL + migrate too.
 
 **After every code pull:**

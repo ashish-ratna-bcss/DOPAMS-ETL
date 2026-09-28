@@ -1,11 +1,13 @@
--- Idempotent bootstrap for cctns_v1 (matches cctnsv1_live_schema.sql + ETL updated_at via init_etl_support.sql).
--- Safe to re-run on an existing database.
+-- Idempotent bootstrap for cctns_v1 — all ETL objects in schema `cctns` (not public).
+-- Airflow metadata uses schema `airflow` (see deploy/airflow_with_env.sh).
 
-CREATE SEQUENCE IF NOT EXISTS cctns_accused_accused_id_seq;
-CREATE SEQUENCE IF NOT EXISTS cctns_accused_details_accused_id_seq;
-CREATE SEQUENCE IF NOT EXISTS cctns_court_court_id_seq;
+CREATE SCHEMA IF NOT EXISTS cctns;
 
-CREATE TABLE IF NOT EXISTS public.cctns_fir (
+CREATE SEQUENCE IF NOT EXISTS cctns.cctns_accused_accused_id_seq;
+CREATE SEQUENCE IF NOT EXISTS cctns.cctns_accused_details_accused_id_seq;
+CREATE SEQUENCE IF NOT EXISTS cctns.cctns_court_court_id_seq;
+
+CREATE TABLE IF NOT EXISTS cctns.cctns_fir (
     fir_reg_num character varying(20) NOT NULL,
     fir_no character varying(50),
     reg_year integer,
@@ -21,8 +23,8 @@ CREATE TABLE IF NOT EXISTS public.cctns_fir (
     updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS public.cctns_accused (
-    accused_id bigint NOT NULL DEFAULT nextval('public.cctns_accused_accused_id_seq'::regclass),
+CREATE TABLE IF NOT EXISTS cctns.cctns_accused (
+    accused_id bigint NOT NULL DEFAULT nextval('cctns.cctns_accused_accused_id_seq'::regclass),
     district text,
     ps text,
     fir_no text,
@@ -167,8 +169,8 @@ CREATE TABLE IF NOT EXISTS public.cctns_accused (
     updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS public.cctns_accused_details (
-    accused_id bigint NOT NULL DEFAULT nextval('public.cctns_accused_details_accused_id_seq'::regclass),
+CREATE TABLE IF NOT EXISTS cctns.cctns_accused_details (
+    accused_id bigint NOT NULL DEFAULT nextval('cctns.cctns_accused_details_accused_id_seq'::regclass),
     fir_reg_num character varying(20) NOT NULL,
     person_code character varying(50),
     fir_no character varying(50),
@@ -195,8 +197,8 @@ CREATE TABLE IF NOT EXISTS public.cctns_accused_details (
     updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS public.cctns_court (
-    court_id bigint NOT NULL DEFAULT nextval('public.cctns_court_court_id_seq'::regclass),
+CREATE TABLE IF NOT EXISTS cctns.cctns_court (
+    court_id bigint NOT NULL DEFAULT nextval('cctns.cctns_court_court_id_seq'::regclass),
     fir_reg_num character varying(20) NOT NULL,
     fir_no character varying(50),
     reg_year integer,
@@ -217,63 +219,63 @@ CREATE TABLE IF NOT EXISTS public.cctns_court (
     updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
-ALTER SEQUENCE public.cctns_accused_accused_id_seq OWNED BY public.cctns_accused.accused_id;
-ALTER SEQUENCE public.cctns_accused_details_accused_id_seq OWNED BY public.cctns_accused_details.accused_id;
-ALTER SEQUENCE public.cctns_court_court_id_seq OWNED BY public.cctns_court.court_id;
+ALTER SEQUENCE cctns.cctns_accused_accused_id_seq OWNED BY cctns.cctns_accused.accused_id;
+ALTER SEQUENCE cctns.cctns_accused_details_accused_id_seq OWNED BY cctns.cctns_accused_details.accused_id;
+ALTER SEQUENCE cctns.cctns_court_court_id_seq OWNED BY cctns.cctns_court.court_id;
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cctns_fir_pkey') THEN
-        ALTER TABLE ONLY public.cctns_fir ADD CONSTRAINT cctns_fir_pkey PRIMARY KEY (fir_reg_num);
+        ALTER TABLE ONLY cctns.cctns_fir ADD CONSTRAINT cctns_fir_pkey PRIMARY KEY (fir_reg_num);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cctns_accused_pkey') THEN
-        ALTER TABLE ONLY public.cctns_accused ADD CONSTRAINT cctns_accused_pkey PRIMARY KEY (accused_id);
+        ALTER TABLE ONLY cctns.cctns_accused ADD CONSTRAINT cctns_accused_pkey PRIMARY KEY (accused_id);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cctns_accused_details_pkey') THEN
-        ALTER TABLE ONLY public.cctns_accused_details ADD CONSTRAINT cctns_accused_details_pkey PRIMARY KEY (accused_id);
+        ALTER TABLE ONLY cctns.cctns_accused_details ADD CONSTRAINT cctns_accused_details_pkey PRIMARY KEY (accused_id);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cctns_court_pkey') THEN
-        ALTER TABLE ONLY public.cctns_court ADD CONSTRAINT cctns_court_pkey PRIMARY KEY (court_id);
+        ALTER TABLE ONLY cctns.cctns_court ADD CONSTRAINT cctns_court_pkey PRIMARY KEY (court_id);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_accused_dossier_fir') THEN
-        ALTER TABLE ONLY public.cctns_accused
+        ALTER TABLE ONLY cctns.cctns_accused
             ADD CONSTRAINT fk_accused_dossier_fir FOREIGN KEY (fir_reg_num)
-            REFERENCES public.cctns_fir(fir_reg_num) ON DELETE CASCADE;
+            REFERENCES cctns.cctns_fir(fir_reg_num) ON DELETE CASCADE;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_accused_fir') THEN
-        ALTER TABLE ONLY public.cctns_accused_details
+        ALTER TABLE ONLY cctns.cctns_accused_details
             ADD CONSTRAINT fk_accused_fir FOREIGN KEY (fir_reg_num)
-            REFERENCES public.cctns_fir(fir_reg_num) ON DELETE CASCADE;
+            REFERENCES cctns.cctns_fir(fir_reg_num) ON DELETE CASCADE;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_court_fir') THEN
-        ALTER TABLE ONLY public.cctns_court
+        ALTER TABLE ONLY cctns.cctns_court
             ADD CONSTRAINT fk_court_fir FOREIGN KEY (fir_reg_num)
-            REFERENCES public.cctns_fir(fir_reg_num) ON DELETE CASCADE;
+            REFERENCES cctns.cctns_fir(fir_reg_num) ON DELETE CASCADE;
     END IF;
 END $$;
 
-CREATE INDEX IF NOT EXISTS idx_fir_status ON public.cctns_fir USING btree (fir_status);
-CREATE INDEX IF NOT EXISTS idx_fir_unit_ps ON public.cctns_fir USING btree (unit, ps_name);
-CREATE INDEX IF NOT EXISTS idx_fir_year ON public.cctns_fir USING btree (reg_year);
+CREATE INDEX IF NOT EXISTS idx_fir_status ON cctns.cctns_fir USING btree (fir_status);
+CREATE INDEX IF NOT EXISTS idx_fir_unit_ps ON cctns.cctns_fir USING btree (unit, ps_name);
+CREATE INDEX IF NOT EXISTS idx_fir_year ON cctns.cctns_fir USING btree (reg_year);
 
-CREATE INDEX IF NOT EXISTS idx_accused_dossier_district_ps ON public.cctns_accused USING btree (district, ps);
-CREATE INDEX IF NOT EXISTS idx_accused_dossier_fir_reg ON public.cctns_accused USING btree (fir_reg_num);
-CREATE INDEX IF NOT EXISTS idx_accused_dossier_mobile ON public.cctns_accused USING btree (mobile_1);
-CREATE INDEX IF NOT EXISTS idx_accused_dossier_name ON public.cctns_accused USING btree (accused_name);
-CREATE INDEX IF NOT EXISTS idx_accused_dossier_reg_dt ON public.cctns_accused USING btree (reg_dt);
+CREATE INDEX IF NOT EXISTS idx_accused_dossier_district_ps ON cctns.cctns_accused USING btree (district, ps);
+CREATE INDEX IF NOT EXISTS idx_accused_dossier_fir_reg ON cctns.cctns_accused USING btree (fir_reg_num);
+CREATE INDEX IF NOT EXISTS idx_accused_dossier_mobile ON cctns.cctns_accused USING btree (mobile_1);
+CREATE INDEX IF NOT EXISTS idx_accused_dossier_name ON cctns.cctns_accused USING btree (accused_name);
+CREATE INDEX IF NOT EXISTS idx_accused_dossier_reg_dt ON cctns.cctns_accused USING btree (reg_dt);
 
-CREATE INDEX IF NOT EXISTS idx_accused_arrest ON public.cctns_accused_details USING btree (is_arrested);
-CREATE INDEX IF NOT EXISTS idx_accused_fir_reg ON public.cctns_accused_details USING btree (fir_reg_num);
-CREATE INDEX IF NOT EXISTS idx_accused_mobile ON public.cctns_accused_details USING btree (mobile_1);
-CREATE INDEX IF NOT EXISTS idx_accused_name ON public.cctns_accused_details USING btree (accused_name);
-CREATE INDEX IF NOT EXISTS idx_accused_person_code ON public.cctns_accused_details USING btree (person_code);
+CREATE INDEX IF NOT EXISTS idx_accused_arrest ON cctns.cctns_accused_details USING btree (is_arrested);
+CREATE INDEX IF NOT EXISTS idx_accused_fir_reg ON cctns.cctns_accused_details USING btree (fir_reg_num);
+CREATE INDEX IF NOT EXISTS idx_accused_mobile ON cctns.cctns_accused_details USING btree (mobile_1);
+CREATE INDEX IF NOT EXISTS idx_accused_name ON cctns.cctns_accused_details USING btree (accused_name);
+CREATE INDEX IF NOT EXISTS idx_accused_person_code ON cctns.cctns_accused_details USING btree (person_code);
 
-CREATE INDEX IF NOT EXISTS idx_court_case_num ON public.cctns_court USING btree (court_case_num);
-CREATE INDEX IF NOT EXISTS idx_court_disposal ON public.cctns_court USING btree (court_disposal_type);
-CREATE INDEX IF NOT EXISTS idx_court_fir_reg ON public.cctns_court USING btree (fir_reg_num);
+CREATE INDEX IF NOT EXISTS idx_court_case_num ON cctns.cctns_court USING btree (court_case_num);
+CREATE INDEX IF NOT EXISTS idx_court_disposal ON cctns.cctns_court USING btree (court_disposal_type);
+CREATE INDEX IF NOT EXISTS idx_court_fir_reg ON cctns.cctns_court USING btree (fir_reg_num);
 
 -- Backfill columns when tables predate this bootstrap script.
-ALTER TABLE cctns_fir ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-ALTER TABLE cctns_court ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-ALTER TABLE cctns_accused_details ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-ALTER TABLE cctns_accused ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE cctns.cctns_fir ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE cctns.cctns_court ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE cctns.cctns_accused_details ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE cctns.cctns_accused ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;

@@ -21,7 +21,11 @@ from config.settings import PG_DATABASE, PG_HOST, PG_PASSWORD, PG_PORT, PG_USER,
 logger = logging.getLogger("cctns_v1_etl.db")
 
 SQL_DIR = Path(__file__).resolve().parent / "sql"
-INIT_SQL_FILES = ("init_schema.sql", "init_etl_support.sql")
+INIT_SQL_FILES = (
+    "002_migrate_etl_to_cctns_schema.sql",
+    "init_schema.sql",
+    "init_etl_support.sql",
+)
 
 _schema_applied = False
 
