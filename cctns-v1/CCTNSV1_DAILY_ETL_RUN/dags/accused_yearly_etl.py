@@ -3,9 +3,12 @@ DAG 2 of 2 — Accused dossier date-range API (month-chunked, adaptive halving).
 
 Graph (Airflow UI):
     bootstrap_database → sync_accused_dossier
+
+Same load pipeline as simple-apis DAG: extract → dedupe + FIR check → upsert → run/row logs.
 """
 import os
 import sys
+from datetime import timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -27,7 +30,7 @@ Separate DAG because this endpoint is **slow** and **Oracle-sensitive**
 | Task | CCTNS API | Target table | Load today? |
 |------|-----------|--------------|-------------|
 | `bootstrap_database` | — | `cctns_v1` DB + ETL + Airflow tables | always |
-| `sync_accused_dossier` | Accused POST date-range | `cctns_accused` | Fetch only — needs `natural_key` |
+| `sync_accused_dossier` | Accused POST date-range | `cctns_accused` | **Yes** — upsert on `natural_key` |
 
 Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
 """
@@ -37,7 +40,7 @@ Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
     dag_id="cctnsv1_accused_yearly_etl",
     description=(
         "CCTNS V1 nightly: month-chunked Accused dossier API "
-        "(date-range POST → Postgres cctns_v1, fetch-only until natural_key)"
+        "(date-range POST → Postgres cctns_accused, month-chunked full pull)"
     ),
     schedule=SCHEDULE_DAILY_0030_UTC,
     start_date=START_DATE,
@@ -63,10 +66,11 @@ def cctnsv1_accused_yearly_etl():
 
     @task(
         task_id="sync_accused_dossier",
+        execution_timeout=timedelta(hours=8),
         doc_md=(
-            "Accused date-range POST from 2002 → today, month-by-month with halving on "
-            "ORA-06502. Wide flat row (~140+ cols incl. INT_* relatives). "
-            "**Fetch logged only** until `natural_key` in `001_schema_fix.sql`."
+            "Accused date-range POST from ACCUSED_FULL_PULL_START_DATE → today, "
+            "month-by-month with halving on ORA-06502. Then validate + upsert + logs. "
+            "Check task log for `failed_windows` if any chunk never succeeded."
         ),
     )
     def sync_accused_dossier() -> dict:

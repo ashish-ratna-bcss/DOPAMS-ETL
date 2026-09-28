@@ -53,6 +53,13 @@ def record_key(entity: str, rec: dict) -> str:
                 _norm(ru.get("FATHER_NAME")),
                 _norm(ru.get("DOB")),
                 _norm(ru.get("MOBILE_1")),
+                _norm(ru.get("GENDER")),
+                _norm(ru.get("AGE")),
+                _norm(ru.get("PRESENT_ADDRESS")),
+                _norm(ru.get("PERMANENT_ADDRESS")),
+                _norm(ru.get("FROM_DT")),
+                _norm(ru.get("TO_DT")),
+                _norm(ru.get("ARREST_SURRENDER_DT")),
             ]
         )
     raise ValueError(f"unknown entity for record_key: {entity}")

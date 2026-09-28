@@ -23,7 +23,7 @@ Current upsert-ready status per entity (see db/sql/001_schema_fix.sql):
     fir              -- ready (real PK, 0 duplicates)
     court            -- ready (natural_key in 004_natural_keys_court_accused_details.sql)
     accused_details  -- ready (same)
-    accused          -- NOT ready (same)
+    accused          -- ready (natural_key in 006_natural_key_cctns_accused.sql)
 Entities that aren't ready are fetched and logged (row count only) but not
 written to Postgres -- see pipeline.md.
 """
@@ -54,7 +54,7 @@ SIMPLE_ENTITIES = {
 }
 
 ACCUSED_YEARLY_ENTITY = {
-    "accused": {"fetch": fetch_accused, "table": "cctns_accused", "conflict_col": "natural_key", "upsert_ready": False},
+    "accused": {"fetch": fetch_accused, "table": "cctns_accused", "conflict_col": "natural_key", "upsert_ready": True},
 }
 
 

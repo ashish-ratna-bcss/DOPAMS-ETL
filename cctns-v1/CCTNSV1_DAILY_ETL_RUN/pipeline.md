@@ -199,7 +199,7 @@ flowchart LR
 | **fir** | `apis/fir.py` | GET | ~7.3k rows | `fir_reg_num` (PK) | **Yes** |
 | **court** | `apis/court.py` | GET | ~7.7k rows | `natural_key` (pending) | Fetch only |
 | **accused_details** | `apis/accused_details.py` | GET | ~20k rows | `natural_key` (pending) | Fetch only |
-| **accused** | `apis/accused.py` | POST chunked | large, 2002→today | `natural_key` (pending) | Fetch only |
+| **accused** | `apis/accused.py` | POST chunked | large, 2002→today | `natural_key` (`006`) | **Yes** (slow; check `failed_windows`) |
 
 Registry and flags: **`dags/pipeline_run.py`** (`SIMPLE_ENTITIES`, `ACCUSED_YEARLY_ENTITY`, `upsert_ready`).
 
