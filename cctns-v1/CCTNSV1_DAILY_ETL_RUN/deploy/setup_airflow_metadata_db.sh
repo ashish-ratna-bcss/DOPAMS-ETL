@@ -36,11 +36,12 @@ export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 
 echo "==> Running airflow db migrate (metadata → Postgres)"
 cd "$ETL_DIR"
-./venv/bin/airflow db migrate
+chmod +x "${ETL_DIR}/deploy/airflow_with_env.sh"
+"${ETL_DIR}/deploy/airflow_with_env.sh" db migrate
 
-if ! ./venv/bin/airflow users list 2>/dev/null | grep -q admin; then
+if ! "${ETL_DIR}/deploy/airflow_with_env.sh" users list 2>/dev/null | grep -q admin; then
   echo "==> Creating Airflow admin user (admin / admin — change password in UI)"
-  ./venv/bin/airflow users create \
+  "${ETL_DIR}/deploy/airflow_with_env.sh" users create \
     --username admin --password admin \
     --firstname CCTNS --lastname Admin --role Admin --email admin@example.com
 fi
