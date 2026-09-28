@@ -14,13 +14,13 @@ from airflow.decorators import dag, task
 
 from dags.cctnsv1_dag_common import (
     DEFAULT_ARGS,
-    SCHEDULE_DAILY_0030_UTC,
+    SCHEDULE_SIMPLE_APIS_IST,
     START_DATE,
     TAGS_BASE,
 )
 
 DAG_DOC = """
-## CCTNS V1 — simple APIs (daily **06:00 IST** / 00:30 UTC)
+## CCTNS V1 — simple APIs (daily **00:30 IST**)
 
 Full pull every run; Postgres upsert decides insert / update / skip.
 
@@ -42,7 +42,7 @@ See `db/sql/001_schema_fix.sql` for the pending upsert keys.
         "CCTNS V1 nightly: FIR upsert + Court & Accused Details fetch "
         "(unfiltered GET APIs → Postgres cctns_v1)"
     ),
-    schedule=SCHEDULE_DAILY_0030_UTC,
+    schedule=SCHEDULE_SIMPLE_APIS_IST,
     start_date=START_DATE,
     catchup=False,
     default_args=DEFAULT_ARGS,

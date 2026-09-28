@@ -16,13 +16,13 @@ from airflow.decorators import dag, task
 
 from dags.cctnsv1_dag_common import (
     DEFAULT_ARGS,
-    SCHEDULE_DAILY_0130_UTC,
+    SCHEDULE_ACCUSED_DOSSIER_IST,
     START_DATE,
     TAGS_BASE,
 )
 
 DAG_DOC = """
-## CCTNS V1 — accused dossier (daily **07:00 IST** / 01:30 UTC, after simple-apis DAG)
+## CCTNS V1 — accused dossier (daily **01:30 IST**, after simple-apis DAG)
 
 Separate DAG because this endpoint is **slow** and **Oracle-sensitive**
 (ORA-06502 buffer errors → month chunks + adaptive day splitting).
@@ -42,7 +42,7 @@ Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
         "CCTNS V1 nightly: month-chunked Accused dossier API "
         "(date-range POST → Postgres cctns_accused, month-chunked full pull)"
     ),
-    schedule=SCHEDULE_DAILY_0130_UTC,
+    schedule=SCHEDULE_ACCUSED_DOSSIER_IST,
     start_date=START_DATE,
     catchup=False,
     default_args=DEFAULT_ARGS,

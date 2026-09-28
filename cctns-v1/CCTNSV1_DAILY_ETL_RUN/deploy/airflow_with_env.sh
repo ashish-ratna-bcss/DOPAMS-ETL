@@ -34,6 +34,7 @@ SEARCH_PATH_QUERY="$("${ETL_DIR}/venv/bin/python3" -c "import os, urllib.parse; 
 export AIRFLOW_HOME="${ETL_DIR}/airflow_home"
 export AIRFLOW__CORE__DAGS_FOLDER="${ETL_DIR}/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
+export AIRFLOW__CORE__DEFAULT_UI_TIMEZONE=Asia/Kolkata
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 export AIRFLOW__CORE__PARALLELISM=4
 export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://${PG_USER}:${ENC_PASS}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}?${SEARCH_PATH_QUERY}"

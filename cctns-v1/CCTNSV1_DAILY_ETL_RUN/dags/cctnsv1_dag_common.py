@@ -2,10 +2,10 @@
 from datetime import datetime, timedelta
 
 # Airflow cron is UTC. India (IST = UTC+5:30):
-#   06:00 IST → 00:30 UTC — simple APIs (FIR, court, accused details)
-SCHEDULE_DAILY_0030_UTC = "30 0 * * *"
-#   07:00 IST → 01:30 UTC — accused dossier (date-range POST; runs after simple APIs)
-SCHEDULE_DAILY_0130_UTC = "30 1 * * *"
+#   00:30 IST → 19:00 UTC (previous calendar day in UTC) — simple APIs
+SCHEDULE_SIMPLE_APIS_IST = "0 19 * * *"
+#   01:30 IST → 20:00 UTC — accused dossier (1 hour after simple APIs)
+SCHEDULE_ACCUSED_DOSSIER_IST = "0 20 * * *"
 START_DATE = datetime(2026, 9, 28)
 
 DEFAULT_ARGS = {
