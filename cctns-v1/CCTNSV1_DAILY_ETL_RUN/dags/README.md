@@ -34,7 +34,7 @@ flowchart LR
 
 | Setting | Value |
 |--------|--------|
-| **Schedule** | Simple APIs: `30 0 * * *` (00:30 UTC). Accused dossier: `30 1 * * *` (01:30 UTC) — avoids overlap with the 3 GET DAG. |
+| **Schedule (IST)** | Simple APIs **06:00 IST** (`30 0 * * *` UTC). Accused dossier **07:00 IST** (`30 1 * * *` UTC). |
 | **Executor** | `LocalExecutor` (tasks run as local Airflow worker processes) |
 | **DAG folder** | `CCTNSV1_DAILY_ETL_RUN/dags/` |
 | **Config** | Project root `.env` (loaded by `config/settings.py` and `deploy/airflow_with_env.sh`) |

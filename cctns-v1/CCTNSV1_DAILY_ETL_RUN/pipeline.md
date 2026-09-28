@@ -5,12 +5,14 @@ Nightly pipeline: pull data from **four CCTNS V1 HTTP APIs** on dopams infrastru
 - **DAG behavior and task graphs:** [`dags/README.md`](dags/README.md)  
 - **Deploy, PM2, Airflow UI:** [`deploy/README.md`](deploy/README.md)
 
-### Nightly schedule (UTC)
+### Nightly schedule (India **IST** — Airflow cron is **UTC**)
 
-| DAG | Cron | Local (IST) | Why |
-|-----|------|-------------|-----|
-| `cctnsv1_simple_apis_etl` | `30 0 * * *` | 06:00 | Fast 3× GET + FIR should load first |
-| `cctnsv1_accused_yearly_etl` | `30 1 * * *` | 07:00 | Long date-range POST; starts **1 hour later** so it does not compete with simple APIs |
+| DAG | **IST (India)** | UTC (cron in code) | Why |
+|-----|-----------------|---------------------|-----|
+| `cctnsv1_simple_apis_etl` | **06:00** | `30 0 * * *` | Fast 3× GET; FIR loads first for FK checks |
+| `cctnsv1_accused_yearly_etl` | **07:00** | `30 1 * * *` | Long date-range POST; **1 hour after** simple APIs |
+
+IST = UTC + 5 hours 30 minutes (no DST).
 
 Both still do a **full pull** each run (no incremental mode yet).
 
@@ -330,7 +332,7 @@ flowchart TB
 2. Review ambiguous groups (query at top of **`db/sql/001_schema_fix.sql`**).
 3. Finalize **`natural_key`** expressions in that file; uncomment and run the migration.
 4. In **`dags/pipeline_run.py`**, set `"upsert_ready": True` for `court`, `accused_details`, and/or `accused`.
-5. Trigger DAGs or wait for 00:30 UTC; verify counts in `cctns_*` and task logs (`inserted=` / `updated=`).
+5. Trigger DAGs or wait for **06:00 IST** (simple) / **07:00 IST** (accused); verify counts in `cctns_*` and task logs.
 
 ---
 

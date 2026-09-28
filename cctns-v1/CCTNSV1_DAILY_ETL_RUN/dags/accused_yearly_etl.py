@@ -22,7 +22,7 @@ from dags.cctnsv1_dag_common import (
 )
 
 DAG_DOC = """
-## CCTNS V1 — accused dossier (daily 01:30 UTC, after simple-apis DAG)
+## CCTNS V1 — accused dossier (daily **07:00 IST** / 01:30 UTC, after simple-apis DAG)
 
 Separate DAG because this endpoint is **slow** and **Oracle-sensitive**
 (ORA-06502 buffer errors → month chunks + adaptive day splitting).

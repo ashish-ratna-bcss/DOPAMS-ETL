@@ -1,8 +1,10 @@
 """Shared Airflow defaults for CCTNS V1 DAGs."""
 from datetime import datetime, timedelta
 
+# Airflow cron is UTC. India (IST = UTC+5:30):
+#   06:00 IST → 00:30 UTC — simple APIs (FIR, court, accused details)
 SCHEDULE_DAILY_0030_UTC = "30 0 * * *"
-# Accused dossier runs after simple-apis DAG (long month-chunked POST pull).
+#   07:00 IST → 01:30 UTC — accused dossier (date-range POST; runs after simple APIs)
 SCHEDULE_DAILY_0130_UTC = "30 1 * * *"
 START_DATE = datetime(2026, 9, 28)
 

@@ -20,7 +20,7 @@ from dags.cctnsv1_dag_common import (
 )
 
 DAG_DOC = """
-## CCTNS V1 — simple APIs (daily 00:30 UTC)
+## CCTNS V1 — simple APIs (daily **06:00 IST** / 00:30 UTC)
 
 Full pull every run; Postgres upsert decides insert / update / skip.
 
