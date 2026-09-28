@@ -68,15 +68,21 @@ def upsert_records(
     # schema.table — otherwise Postgres treats "cctns" as a missing FROM alias.
     col_list = ", ".join(columns)
     placeholders = ", ".join(["%s"] * len(columns))
-    update_set = ", ".join(
-        [f"{c} = EXCLUDED.{c}" for c in columns if c != conflict_col] + ["updated_at = now()"]
+    data_cols = [c for c in columns if c != conflict_col]
+    update_set = ", ".join([f"{c} = EXCLUDED.{c}" for c in data_cols] + ["updated_at = now()"])
+    # Compare only payload columns — full-row IS DISTINCT FROM is wrong because EXCLUDED
+    # omits natural_key / updated_at / serials and would "update" every row every run.
+    change_check = " OR ".join(
+        f"{table}.{c} IS DISTINCT FROM EXCLUDED.{c}" for c in data_cols
     )
+    if not change_check:
+        change_check = "FALSE"
     sql = f"""
         INSERT INTO {fq} ({col_list})
         VALUES ({placeholders})
         ON CONFLICT ({conflict_col})
         DO UPDATE SET {update_set}
-        WHERE {table} IS DISTINCT FROM EXCLUDED
+        WHERE ({change_check})
         RETURNING (xmax = 0) AS inserted
     """
 
