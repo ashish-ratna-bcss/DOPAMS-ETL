@@ -50,7 +50,6 @@ _ensure_cctns_database() {
 _ensure_airflow_tables() {
   _ensure_cctns_database
   _ensure_postgres_schemas
-  PYTHONPATH="${ETL_DIR}" "${ETL_DIR}/venv/bin/python3" -c "from db.init_schema import apply_schema_migrations; apply_schema_migrations()"
   "${AF}" db migrate
 }
 
