@@ -1,6 +1,7 @@
 # Deploying CCTNSV1_DAILY_ETL_RUN
 
-See `pipeline.md` for how the pipeline itself works. This file is setup/ops only.
+**ETL design:** [`../pipeline.md`](../pipeline.md) · **DAG tasks & graphs:** [`../dags/README.md`](../dags/README.md)  
+This file is setup/ops only.
 
 ## One-time setup, before the first deploy
 

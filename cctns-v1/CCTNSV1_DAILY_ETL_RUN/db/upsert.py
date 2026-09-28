@@ -52,7 +52,16 @@ def get_insertable_columns(cur, table):
     return cols
 
 
-def upsert_records(cur, table: str, conflict_col: str, records: list) -> dict:
+def upsert_records(
+    cur,
+    table: str,
+    conflict_col: str,
+    records: list,
+    *,
+    entity: str | None = None,
+    run_id: str | None = None,
+    log_actions: bool = True,
+) -> dict:
     columns = get_insertable_columns(cur, table)
     fq = f"{PG_ETL_SCHEMA}.{table}"
     # ON CONFLICT DO UPDATE must reference the target row by bare table name, not
@@ -71,6 +80,9 @@ def upsert_records(cur, table: str, conflict_col: str, records: list) -> dict:
         RETURNING (xmax = 0) AS inserted
     """
 
+    from db.natural_key import record_key as compute_record_key
+    from db.run_log import log_row_action
+
     inserted = updated = unchanged = 0
     for rec in records:
         rec_upper = {k.upper(): v for k, v in rec.items()}
@@ -81,8 +93,22 @@ def upsert_records(cur, table: str, conflict_col: str, records: list) -> dict:
             unchanged += 1
         elif row[0]:
             inserted += 1
+            if log_actions and run_id and entity:
+                key = (
+                    compute_record_key(entity, rec)
+                    if conflict_col == "natural_key"
+                    else _sanitize_value(rec_upper.get(conflict_col.upper()))
+                )
+                log_row_action(cur, run_id, entity, table, key or "?", "insert")
         else:
             updated += 1
+            if log_actions and run_id and entity:
+                key = (
+                    compute_record_key(entity, rec)
+                    if conflict_col == "natural_key"
+                    else _sanitize_value(rec_upper.get(conflict_col.upper()))
+                )
+                log_row_action(cur, run_id, entity, table, key or "?", "update")
 
     logger.info("table=%s inserted=%d updated=%d unchanged=%d", table, inserted, updated, unchanged)
     return {"inserted": inserted, "updated": updated, "unchanged": unchanged}

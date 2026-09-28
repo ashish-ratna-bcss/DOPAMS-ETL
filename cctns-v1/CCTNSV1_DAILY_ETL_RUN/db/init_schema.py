@@ -27,6 +27,7 @@ INIT_SQL_FILES = (
     "init_schema.sql",
     "init_etl_support.sql",
     "004_natural_keys_court_accused_details.sql",
+    "005_etl_row_action_log.sql",
 )
 
 _schema_applied = False

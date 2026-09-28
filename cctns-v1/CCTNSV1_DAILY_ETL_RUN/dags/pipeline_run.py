@@ -9,11 +9,9 @@ separate DAGs in this folder:
                              against the flaky Oracle backend)
 
 Data goes straight from the API into Postgres in memory -- no intermediate
-JSON files, and no local log files either. Logging goes to stdout/stderr
-only: under Airflow that's captured automatically as the task's own log
-(Airflow UI -> DAG -> task -> Logs), and the durable structured record of
-every run (rows fetched/inserted/updated/unchanged, failed windows, status)
-lives in cctns_v1_etl_run_log in Postgres itself -- see db/sql/001_schema_fix.sql.
+JSON files. Stages: extract → validate (dedupe + FIR FK) → upsert → Postgres logs
+(cctns_v1_etl_run_log, cctns_v1_etl_row_action, cctns_v1_audit_log on field updates).
+Airflow also captures stdout in task logs.
 A separate local log file would just be a third copy of the same
 information, so there isn't one.
 
@@ -42,7 +40,9 @@ from apis.court import fetch_court  # noqa: E402
 from apis.accused_details import fetch_accused_details  # noqa: E402
 from apis.accused import fetch_accused  # noqa: E402
 from db.connection import get_connection  # noqa: E402
+from db.run_log import finish_entity_run, start_entity_run  # noqa: E402
 from db.upsert import upsert_records  # noqa: E402
+from db.validate import dedupe_batch, filter_orphan_fir  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("cctns_v1_etl.pipeline")
@@ -82,38 +82,121 @@ def run_single_entity(entity_key: str) -> dict:
 
 
 def _run_entities(entities: dict, run_id: str, conn) -> dict:
+    """
+    Pipeline stages per entity:
+        1. API call (extract)
+        2. Validate — batch duplicate removal + FIR parent check (child tables)
+        3. Load — compare with DB: insert / update / ignore unchanged
+        4. Log — cctns_v1_etl_run_log (summary) + cctns_v1_etl_row_action (insert/update)
+                 + cctns_v1_audit_log (field-level on update, DB trigger)
+    """
     summary = {}
     for entity, cfg in entities.items():
-        logger.info("--- %s: extracting ---", entity)
+        cur = conn.cursor()
+        log_id = start_entity_run(cur, run_id, entity)
+        conn.commit()
+
+        logger.info("--- %s [1/4] API extract ---", entity)
         try:
             records, failed_windows = cfg["fetch"]()
-        except Exception:
+        except Exception as err:
+            conn.rollback()
             logger.exception("%s: EXTRACT FAILED", entity)
+            cur = conn.cursor()
+            finish_entity_run(
+                cur,
+                log_id,
+                status="extract_failed",
+                error_message=str(err),
+            )
+            conn.commit()
             summary[entity] = {"status": "extract_failed"}
             continue
 
-        logger.info("%s: fetched=%d failed_windows=%d", entity, len(records), len(failed_windows))
+        fetched = len(records)
+        logger.info("%s: fetched=%d failed_windows=%d", entity, fetched, len(failed_windows))
 
         if not cfg["upsert_ready"]:
             logger.warning(
-                "%s: fetched %d rows but NOT loaded -- natural_key/unique constraint "
-                "not applied yet (see db/sql/001_schema_fix.sql). Nothing written to "
-                "Postgres this run for this entity.",
-                entity, len(records),
+                "%s: fetched %d rows but NOT loaded -- upsert not enabled for this entity.",
+                entity,
+                fetched,
             )
-            summary[entity] = {"status": "not_loaded_pending_key", "fetched": len(records),
-                                "failed_windows": len(failed_windows)}
+            cur = conn.cursor()
+            finish_entity_run(
+                cur,
+                log_id,
+                status="not_loaded",
+                rows_fetched=fetched,
+                failed_windows=failed_windows if failed_windows else None,
+            )
+            conn.commit()
+            summary[entity] = {
+                "status": "not_loaded_pending_key",
+                "fetched": fetched,
+                "failed_windows": len(failed_windows),
+            }
             continue
 
+        logger.info("--- %s [2/4] validate — dedupe batch + FIR relationship ---", entity)
+        records, dupes_removed = dedupe_batch(entity, records)
+        records, orphan_skipped = filter_orphan_fir(entity, records, conn)
+        logger.info(
+            "%s: after filter rows=%d batch_dupes_removed=%d orphan_fir_skipped=%d",
+            entity,
+            len(records),
+            dupes_removed,
+            orphan_skipped,
+        )
+
+        logger.info("--- %s [3/4] load — insert / update / ignore unchanged ---", entity)
         cur = conn.cursor()
         try:
-            result = upsert_records(cur, cfg["table"], cfg["conflict_col"], records)
+            result = upsert_records(
+                cur,
+                cfg["table"],
+                cfg["conflict_col"],
+                records,
+                entity=entity,
+                run_id=run_id,
+            )
+            finish_entity_run(
+                cur,
+                log_id,
+                status="loaded",
+                rows_fetched=fetched,
+                rows_inserted=result["inserted"],
+                rows_updated=result["updated"],
+                rows_unchanged=result["unchanged"],
+                rows_batch_dupes_removed=dupes_removed,
+                rows_orphan_fir_skipped=orphan_skipped,
+                failed_windows=failed_windows if failed_windows else None,
+            )
             conn.commit()
-            summary[entity] = {"status": "loaded", "fetched": len(records),
-                                "failed_windows": len(failed_windows), **result}
-        except Exception:
+            summary[entity] = {
+                "status": "loaded",
+                "fetched": fetched,
+                "failed_windows": len(failed_windows),
+                "batch_dupes_removed": dupes_removed,
+                "orphan_fir_skipped": orphan_skipped,
+                **result,
+            }
+            logger.info("--- %s [4/4] run log + row actions committed ---", entity)
+        except Exception as err:
             conn.rollback()
             logger.exception("%s: LOAD FAILED", entity)
+            cur = conn.cursor()
+            finish_entity_run(
+                cur,
+                log_id,
+                status="load_failed",
+                rows_fetched=fetched,
+                rows_batch_dupes_removed=dupes_removed,
+                rows_orphan_fir_skipped=orphan_skipped,
+                error_message=str(err),
+                failed_windows=failed_windows if failed_windows else None,
+            )
+            conn.commit()
             summary[entity] = {"status": "load_failed"}
     return summary
 
