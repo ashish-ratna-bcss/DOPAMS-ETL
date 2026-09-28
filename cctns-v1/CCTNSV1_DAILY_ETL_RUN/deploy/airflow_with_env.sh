@@ -21,8 +21,10 @@ set +a
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5432}"
 PG_DATABASE="${PG_DATABASE:-cctns_v1}"
+# Must match .env (see .env.example) and config/settings.py defaults.
 PG_ETL_SCHEMA="${PG_ETL_SCHEMA:-cctns}"
 PG_AIRFLOW_SCHEMA="${PG_AIRFLOW_SCHEMA:-airflow}"
+export PG_ETL_SCHEMA PG_AIRFLOW_SCHEMA
 
 ENC_PASS="$("${ETL_DIR}/venv/bin/python3" -c "import urllib.parse, os; print(urllib.parse.quote_plus(os.environ['PG_PASSWORD']))")"
 

@@ -4,7 +4,12 @@ See `pipeline.md` for how the pipeline itself works. This file is setup/ops only
 
 ## One-time setup, before the first deploy
 
-1. Fill in `.env` — the 4 API URLs (see `cctnsv1/.env`) and Postgres credentials for `dopams-new`.
+1. Copy `.env.example` → `.env` and fill in API URLs + Postgres credentials. Keep schema names explicit:
+   ```env
+   PG_ETL_SCHEMA=cctns
+   PG_AIRFLOW_SCHEMA=airflow
+   ```
+   (Same values are the code defaults if omitted; set them in `.env` so PM2/Airflow and pgAdmin stay aligned.)
    On first pipeline run (or manually: `python -m db.init_schema`), the ETL creates the
    `cctns_v1` database if your role has `CREATEDB`, then applies `db/sql/init_schema.sql`
    and `db/sql/init_etl_support.sql`. Greenfield only — an existing dopams-new DB is
