@@ -44,7 +44,7 @@ Optional manual migrate only: `./deploy/setup_airflow_metadata_db.sh`
 
 `config/settings.py` loads `.env` from the project root so Airflow tasks always see `PG_*` and API URLs.
 
-Airflow UI: `http://<dopams-new-ip>:9001` (login `admin` / `admin` — change password).
+Airflow UI: `http://<dopams-new-ip>:9001` — credentials in `deploy/airflow-credentials.txt` (copy from `airflow-credentials.example.txt`; file is gitignored).
 
 ## Deploy (rsync + venv, optional)
 
