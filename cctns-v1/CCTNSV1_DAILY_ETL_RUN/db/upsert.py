@@ -23,6 +23,13 @@ from config.settings import PG_ETL_SCHEMA
 logger = logging.getLogger("cctns_v1_etl.db")
 
 
+def _sanitize_value(value):
+    """Postgres text fields reject NUL (0x00); some CCTNS API fields include them."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    return value
+
+
 def get_insertable_columns(cur, table):
     cur.execute(
         """
@@ -67,7 +74,7 @@ def upsert_records(cur, table: str, conflict_col: str, records: list) -> dict:
     inserted = updated = unchanged = 0
     for rec in records:
         rec_upper = {k.upper(): v for k, v in rec.items()}
-        values = [rec_upper.get(c.upper()) for c in columns]
+        values = [_sanitize_value(rec_upper.get(c.upper())) for c in columns]
         cur.execute(sql, values)
         row = cur.fetchone()
         if row is None:
