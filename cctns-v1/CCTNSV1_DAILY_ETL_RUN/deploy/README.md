@@ -1,5 +1,23 @@
 # Deploying CCTNSV1_DAILY_ETL_RUN
 
+See `pipeline.md` for how the pipeline itself works. This file is setup/ops only.
+
+## One-time setup, before the first deploy
+
+1. Fill in `.env` — the 4 API URLs (see `cctnsv1/.env`) and Postgres credentials for `dopams-new`.
+2. Run the safe dedupe on the live DB (removes only confirmed byte-identical duplicate rows):
+   ```bash
+   psql -h <dopams-new host> -U dopams_bcss -d cctns_v1 -f db/sql/000_dedupe_exact_only.sql
+   ```
+3. Review the ambiguous duplicate groups (query at the top of `db/sql/001_schema_fix.sql`) and decide the real business key for `cctns_court` / `cctns_accused_details` / `cctns_accused`.
+4. Uncomment + adjust the `natural_key` blocks in `db/sql/001_schema_fix.sql` to match that decision, then run it:
+   ```bash
+   psql -h <dopams-new host> -U dopams_bcss -d cctns_v1 -f db/sql/001_schema_fix.sql
+   ```
+5. In `dags/pipeline_run.py`, flip `"upsert_ready": False` → `True` for each entity once its constraint is live.
+
+## Deploy
+
 ```
 ./deploy/deploy.sh
 ```
@@ -27,6 +45,12 @@ ssh dopams-new "pgrep -fa 'airflow scheduler'; pgrep -fa 'airflow webserver'"
 ```
 
 Airflow UI: `http://<dopams-new-ip>:8793` (login `admin` / `admin` — **change this password**, it's a placeholder).
+
+## Checking whether a run actually worked
+
+1. **Airflow task logs**: DAG → task → Logs — shows `fetched=`, `inserted=`, `updated=`, `unchanged=`, and any date windows that failed to fetch (relevant to `accused` only).
+2. **`cctns_v1_etl_run_log`** in Postgres (once `db/sql/001_schema_fix.sql` is applied) — the durable, queryable history of every run.
+3. **`cctns_v1_audit_log`** in Postgres (same migration) — every field that actually changed on an update, old value → new value → when.
 
 ## Changing the schedule or DAG logic
 
