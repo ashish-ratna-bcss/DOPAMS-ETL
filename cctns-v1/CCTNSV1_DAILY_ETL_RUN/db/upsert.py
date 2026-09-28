@@ -39,7 +39,7 @@ def get_insertable_columns(cur, table):
             continue
         if default and "nextval" in default:
             continue
-        if name in ("created_at", "updated_at"):
+        if name in ("created_at", "updated_at", "natural_key"):
             continue
         cols.append(name)
     return cols

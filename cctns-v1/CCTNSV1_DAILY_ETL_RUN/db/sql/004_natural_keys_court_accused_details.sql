@@ -1,17 +1,27 @@
--- Unique natural_key for court + accused_details (validated against live API pulls).
--- Court: base key + court_name, court_disposal_type, court_remarks (0 distinct-row collisions).
--- Accused details: includes address + is_arrested + arrest_surrender_dt (0 collisions on ~20k rows).
+-- Unique natural_key for court + accused_details (expressions validated against live API).
+-- Uses BEFORE INSERT/UPDATE triggers (timestamps are not immutable for GENERATED columns).
 
 ALTER TABLE cctns.cctns_court
-    ADD COLUMN IF NOT EXISTS natural_key TEXT GENERATED ALWAYS AS (
-        COALESCE(fir_reg_num, '') || '|' ||
-        COALESCE(chargesheet_dt::text, '') || '|' ||
-        COALESCE(court_disposal_dt::text, '') || '|' ||
-        COALESCE(court_case_num, '') || '|' ||
-        COALESCE(court_name, '') || '|' ||
-        COALESCE(court_disposal_type, '') || '|' ||
-        COALESCE(court_remarks, '')
-    ) STORED;
+    ADD COLUMN IF NOT EXISTS natural_key TEXT;
+
+CREATE OR REPLACE FUNCTION cctns.trg_cctns_court_natural_key() RETURNS trigger AS $$
+BEGIN
+    NEW.natural_key :=
+        COALESCE(NEW.fir_reg_num, '') || '|' ||
+        COALESCE(NEW.chargesheet_dt::text, '') || '|' ||
+        COALESCE(NEW.court_disposal_dt::text, '') || '|' ||
+        COALESCE(NEW.court_case_num, '') || '|' ||
+        COALESCE(NEW.court_name, '') || '|' ||
+        COALESCE(NEW.court_disposal_type, '') || '|' ||
+        COALESCE(NEW.court_remarks, '');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_cctns_court_natural_key ON cctns.cctns_court;
+CREATE TRIGGER trg_cctns_court_natural_key
+    BEFORE INSERT OR UPDATE ON cctns.cctns_court
+    FOR EACH ROW EXECUTE FUNCTION cctns.trg_cctns_court_natural_key();
 
 DO $$
 BEGIN
@@ -24,19 +34,30 @@ BEGIN
 END $$;
 
 ALTER TABLE cctns.cctns_accused_details
-    ADD COLUMN IF NOT EXISTS natural_key TEXT GENERATED ALWAYS AS (
-        COALESCE(fir_reg_num, '') || '|' ||
-        COALESCE(person_code, '') || '|' ||
-        COALESCE(accused_name, '') || '|' ||
-        COALESCE(gender, '') || '|' ||
-        COALESCE(age::text, '') || '|' ||
-        COALESCE(father_name, '') || '|' ||
-        COALESCE(mobile_1, '') || '|' ||
-        COALESCE(accused_present_address, '') || '|' ||
-        COALESCE(accused_permanent_address, '') || '|' ||
-        COALESCE(is_arrested, '') || '|' ||
-        COALESCE(arrest_surrender_dt::text, '')
-    ) STORED;
+    ADD COLUMN IF NOT EXISTS natural_key TEXT;
+
+CREATE OR REPLACE FUNCTION cctns.trg_cctns_accused_details_natural_key() RETURNS trigger AS $$
+BEGIN
+    NEW.natural_key :=
+        COALESCE(NEW.fir_reg_num, '') || '|' ||
+        COALESCE(NEW.person_code, '') || '|' ||
+        COALESCE(NEW.accused_name, '') || '|' ||
+        COALESCE(NEW.gender, '') || '|' ||
+        COALESCE(NEW.age::text, '') || '|' ||
+        COALESCE(NEW.father_name, '') || '|' ||
+        COALESCE(NEW.mobile_1, '') || '|' ||
+        COALESCE(NEW.accused_present_address, '') || '|' ||
+        COALESCE(NEW.accused_permanent_address, '') || '|' ||
+        COALESCE(NEW.is_arrested, '') || '|' ||
+        COALESCE(NEW.arrest_surrender_dt::text, '');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_cctns_accused_details_natural_key ON cctns.cctns_accused_details;
+CREATE TRIGGER trg_cctns_accused_details_natural_key
+    BEFORE INSERT OR UPDATE ON cctns.cctns_accused_details
+    FOR EACH ROW EXECUTE FUNCTION cctns.trg_cctns_accused_details_natural_key();
 
 DO $$
 BEGIN
