@@ -1,0 +1,865 @@
+{
+  "endpoint_id": 17,
+  "category": "Interrogation Reports",
+  "summary": "Endpoint to get interrogation reports using crimeId",
+  "method": "GET",
+  "request_path": "/api/DOPAMS/interrogation-reports/v1/63b81a159aaa21e1320d3102",
+  "request_url": "http://103.164.200.184:3000/api/DOPAMS/interrogation-reports/v1/63b81a159aaa21e1320d3102",
+  "query_params": {},
+  "request_body": null,
+  "status_code": 200,
+  "duration_ms": 44,
+  "timestamp": "2026-09-22T12:00:22.855358",
+  "response": {
+    "status": true,
+    "data": [
+      {
+        "INTERROGATION_REPORT_ID": "63e48653c80d8e5dae08eb8a",
+        "CRIME_ID": "63b81a159aaa21e1320d3102",
+        "PERSON_ID": "63b824149aaa21a9790ea5c4",
+        "MEDIA": [],
+        "PHYSICAL_FEATURES": {
+          "BEARD": "Trim",
+          "BUILD": "Normal",
+          "BURN_MARKS": "OTHERS",
+          "COLOR": "Others",
+          "DEFORMITIES_OR_PECULIARITIES": "Others",
+          "DEFORMITIES": "Others",
+          "EAR": "Others",
+          "EYES": "Black",
+          "FACE": "Round",
+          "HAIR": "Black",
+          "HEIGHT": "5.1 - 5.5 ft",
+          "IDENTIFICATION_MARKS": "A Mole on the Right Face",
+          "LANGUAGE_OR_DIALECT": [
+            "Telugu",
+            "English",
+            "Hindi"
+          ],
+          "LEUCODERMA": "Other",
+          "MOLE": "Face",
+          "MUSTACHE": "Others",
+          "NOSE": "Others",
+          "SCAR": "OTHERS",
+          "TATTOO": "OTHERS",
+          "TEETH": "Normal Teeth"
+        },
+        "SOCIO_ECONOMIC_PROFILE": {
+          "LIVING_STATUS": "With family",
+          "MARITAL_STATUS": "Married",
+          "EDUCATION": "Graduate",
+          "OCCUPATION": "Student",
+          "INCOME_GROUP": "Upper Middle Income Rs.10000 to Rs. 25000"
+        },
+        "FAMILY_HISTORY": [
+          {
+            "PERSON_ID": "63e487f9c80d8ec50f091d06",
+            "RELATION": "Father",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": false
+          }
+        ],
+        "ASSOCIATE_DETAILS": [],
+        "COMMISSION_OF_OFFENCE": {
+          "OFFENCE_TIME": "",
+          "OTHER_OFFENCE_TIME": ""
+        },
+        "LOCAL_CONTACTS": [],
+        "REGULAR_HABITS": [
+          "Chewing Pan / Gutka",
+          "Consuming Liquor",
+          "Smoking"
+        ],
+        "OTHER_REGULAR_HABITS": "",
+        "INDULGANCE_BEFORE_OFFENCE": [],
+        "OTHER_INDULGANCE_BEFORE_OFFENCE": "",
+        "MODUS_OPERANDI": [],
+        "SHELTER": [],
+        "PROPERTY_DISPOSAL": [],
+        "SHARE_OF_AMOUNT_SPENT": {
+          "SHARE_OF_AMOUNT_SPENT": "",
+          "OTHER_SHARE_OF_AMOUNT_SPENT": "",
+          "REMARKS": ""
+        },
+        "PREVIOUS_OFFENCES_CONFESSED": [],
+        "REGULARIZATION_OF_TRANSIT_WARRANTS": [],
+        "EXECUTION_OF_NBW": [],
+        "PENDING_NBW": [],
+        "SURETIES": [],
+        "DEFENCE_COUNSEL": [],
+        "JAIL_SENTENCE": [],
+        "NEW_GANG_FORMATION": [],
+        "CONVICTION_ACQUITTAL": [],
+        "PRESENT_WHEREABOUTS": {
+          "IN_JAIL": {
+            "IS_IN_JAIL": false,
+            "FROM_WHERE_SENT_IN_JAIL": "",
+            "CRIME_NUM": "",
+            "DIST_UNIT": ""
+          },
+          "ON_BAIL": {
+            "IS_ON_BAIL": false,
+            "FROM_WHERE_SENT_ON_BAIL": "",
+            "CRIME_NUM": "",
+            "DATE_OF_BAIL": ""
+          },
+          "ABSCONDING": {
+            "IS_ABSCONDING": false,
+            "WANTED_IN_POLICE_STATION": "",
+            "CRIME_NUM": ""
+          },
+          "NORMAL_LIFE": {
+            "IS_NORMAL_LIFE": false,
+            "EKING_LIVELIHOOD_BY_LABOR_WORK": ""
+          },
+          "REHABILITATED": {
+            "IS_REHABILITATED": false,
+            "REHABILITATION_DETAILS": ""
+          },
+          "DEAD": {
+            "IS_DEAD": false,
+            "DEATH_DETAILS": ""
+          },
+          "FACING_TRIAL": {
+            "IS_FACING_TRIAL": false,
+            "PS_NAME": "",
+            "CRIME_NUM": ""
+          }
+        },
+        "INTERROGATION_REPORT": [
+          "d9a79584-470c-4ba7-acb3-f3a80fa724fb",
+          "20f7f7c3-ce99-49d3-b05f-0d4610a6f19d"
+        ],
+        "TYPES_OF_DRUGS": [
+          {
+            "TYPE_OF_DRUG": "ganja",
+            "QUANTITY": "5 kg",
+            "PURCHASE_AMOUN_IN_INR": "",
+            "MODE_OF_PAYMENT": "",
+            "MODE_OF_TRANSPORT": "",
+            "SUPPLIER_PERSON_ID": "",
+            "RECEIVERS_PERSON_ID": ""
+          }
+        ],
+        "CONSUMER_DETAILS": [
+          {
+            "CONSUMER_PERSON_ID": "65962e6057912c6d1537ac50",
+            "PLACE_OF_CONSUMPTION": "",
+            "OTHER_SOURCES": "",
+            "OTHER_SOURCES_PHONE_NO": "",
+            "AADHAR_CARD_NUMBER": "",
+            "AADHAR_CARD_NUMBER_PHONE_NO": ""
+          }
+        ],
+        "TIME_SINCE_MODUS_OPERANDI": "The facts of the case are that, on 06-01-2023 at about 11.30 hours while the SI, Nalgonda II (T) (LW-1) attending the station routine work in the PS received credible information that one person moving along with Psychotropic (Ganja) substances by illegal possession near at Vivekananda Statue, Hyderabad Road, Nalgonda.  On receipt of said information immediately LW-1 entered the said information in General Diary and informed to the superior officers and rushed to Vivekananda Statue, Hyderabad Road, Nalgonda along with LWs 3 to 5 and at about 12.00 hours found two persons by names1)Somidi Santhosh Reddy S/o Surender Reddy, age.25 years, caste.reddy, occ.student r/o H.No.6-9-173/3, New Raghavendra Colony, Nalgonda and 2) Medaboina Chakri S/o Yadagiri, age.20 years, caste.yadav, occ.private employee r/o H.No.6-2-347, Srinagar Colony, Hyderabad Road, Nalgonda along with separate polythine covers and stopped them and checked and found \u201cDried Ganja\u201d in their polythine covers.  During the confession the accused asked to use their statutory right of option of being searched in the presence of Gazetted officer or before Magistrate u/s 50 NDPS Act. On which the accused selected the option of Magistrate.  Immediately LW-1 sent a letter to Tahasildar, Nalgonda (LW-2) with a request to visit the scene of offence along with two official panchas and conduct personal search of accused. Accordingly the Tahasildar/Executive Magistrate, Nalgonda visited the scene of offence and conducted personal search of the accused. Further LW-1 has sent police personal to bring weighing machine along with its owner. The Tahasildar, Nalgonda recorded the confessional statement of the accused in presence of panchas where where he get weighed the packet at Somidi Santosh Reddy and found (01 kg ganja duly drawn 3 samples from that packet each weighing 25 grams and affixed panchas signed  chits on it and get weighed the packet at Medaboina Chakri and      found ( \u00bd )  kg ganja duly drawn 3 samples from that packet each weighing 25 grams and affixed panchas signed  chits on it  to in order to send the same to FSL for analysis.  The entire process of confessional and seizure of samples has been photographed. After confessional and seizure panchanama returned to Nalgonda II (T) PS  at 17.00 hours along with accused and seized property. Further he requested to take necessary legal action against the above persons. ",
+        "FINANCIAL_HISTORY": [
+          {
+            "ACCOUNT_HOLDER_PERSON_ID": "65962ed2f398e91e499c9436",
+            "PAN_NO": "",
+            "UPI_ID": "",
+            "NAME_OF_BANK": "",
+            "ACCOUNT_NUMBER": "",
+            "BRANCH_NAME": "",
+            "IFSC_CODE": "",
+            "IMMOVABLE_PROPERTY_ACQUIRED": "",
+            "MOVABLE_PROPERTY_ACQUIRED": ""
+          }
+        ],
+        "SIM_DETAILS": [
+          {
+            "PHONE_NUMBER": "9182887297",
+            "SDR": "",
+            "IMEI": "",
+            "TRUE_CALLER_NAME": "",
+            "PERSON_ID": ""
+          }
+        ],
+        "DOPAMS_LINKS": [
+          {
+            "PHONE_NUMBER": "9182887297",
+            "DOPAMS_DATA": []
+          }
+        ],
+        "DATE_CREATED": "2023-02-09T05:36:19.492Z",
+        "DATE_MODIFIED": "2024-02-03T07:53:15.368Z"
+      },
+      {
+        "INTERROGATION_REPORT_ID": "63e48d51c80d8eb69f09dde0",
+        "CRIME_ID": "63b81a159aaa21e1320d3102",
+        "PERSON_ID": "63b824939aaa21b4350ebcb2",
+        "MEDIA": [],
+        "PHYSICAL_FEATURES": {
+          "BEARD": "Short-Trimmed-Thin",
+          "BUILD": "Normal",
+          "BURN_MARKS": "OTHERS",
+          "COLOR": "Blakish Dark",
+          "DEFORMITIES_OR_PECULIARITIES": "Others",
+          "DEFORMITIES": "Others",
+          "EAR": "Others",
+          "EYES": "Black",
+          "FACE": "Long",
+          "HAIR": "Black",
+          "HEIGHT": "5.1 - 5.5 ft",
+          "IDENTIFICATION_MARKS": "A Mole On the Left Cheek",
+          "LANGUAGE_OR_DIALECT": [
+            "Telugu",
+            "English"
+          ],
+          "LEUCODERMA": "Other",
+          "MOLE": "Cheeks",
+          "MUSTACHE": "Others",
+          "NOSE": "Long Nose",
+          "SCAR": "OTHERS",
+          "TATTOO": "LEFT HAND",
+          "TEETH": "Normal Teeth"
+        },
+        "SOCIO_ECONOMIC_PROFILE": {
+          "LIVING_STATUS": "With family",
+          "MARITAL_STATUS": "Unmarried",
+          "EDUCATION": "Intermediate",
+          "OCCUPATION": "Private Employee",
+          "INCOME_GROUP": "Upper Middle Income Rs.10000 to Rs. 25000"
+        },
+        "FAMILY_HISTORY": [
+          {
+            "PERSON_ID": "63e49075c80d8eb32b0a502c",
+            "RELATION": "Father",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": false
+          },
+          {
+            "PERSON_ID": "659633d06e07413042b9dd5b",
+            "RELATION": "Mother",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": false
+          }
+        ],
+        "ASSOCIATE_DETAILS": [],
+        "COMMISSION_OF_OFFENCE": {
+          "OFFENCE_TIME": "",
+          "OTHER_OFFENCE_TIME": ""
+        },
+        "LOCAL_CONTACTS": [],
+        "REGULAR_HABITS": [
+          "Smoking",
+          "Consuming Liquor",
+          "Chewing Pan / Gutka"
+        ],
+        "OTHER_REGULAR_HABITS": "",
+        "INDULGANCE_BEFORE_OFFENCE": [],
+        "OTHER_INDULGANCE_BEFORE_OFFENCE": "",
+        "MODUS_OPERANDI": [],
+        "SHELTER": [],
+        "PROPERTY_DISPOSAL": [],
+        "SHARE_OF_AMOUNT_SPENT": {
+          "SHARE_OF_AMOUNT_SPENT": "",
+          "OTHER_SHARE_OF_AMOUNT_SPENT": "",
+          "REMARKS": ""
+        },
+        "PREVIOUS_OFFENCES_CONFESSED": [],
+        "REGULARIZATION_OF_TRANSIT_WARRANTS": [],
+        "EXECUTION_OF_NBW": [],
+        "PENDING_NBW": [],
+        "SURETIES": [],
+        "DEFENCE_COUNSEL": [],
+        "JAIL_SENTENCE": [],
+        "NEW_GANG_FORMATION": [],
+        "CONVICTION_ACQUITTAL": [],
+        "PRESENT_WHEREABOUTS": {
+          "IN_JAIL": {
+            "IS_IN_JAIL": false,
+            "FROM_WHERE_SENT_IN_JAIL": "",
+            "CRIME_NUM": "",
+            "DIST_UNIT": ""
+          },
+          "ON_BAIL": {
+            "IS_ON_BAIL": false,
+            "FROM_WHERE_SENT_ON_BAIL": "",
+            "CRIME_NUM": "",
+            "DATE_OF_BAIL": ""
+          },
+          "ABSCONDING": {
+            "IS_ABSCONDING": false,
+            "WANTED_IN_POLICE_STATION": "",
+            "CRIME_NUM": ""
+          },
+          "NORMAL_LIFE": {
+            "IS_NORMAL_LIFE": false,
+            "EKING_LIVELIHOOD_BY_LABOR_WORK": ""
+          },
+          "REHABILITATED": {
+            "IS_REHABILITATED": false,
+            "REHABILITATION_DETAILS": ""
+          },
+          "DEAD": {
+            "IS_DEAD": false,
+            "DEATH_DETAILS": ""
+          },
+          "FACING_TRIAL": {
+            "IS_FACING_TRIAL": false,
+            "PS_NAME": "",
+            "CRIME_NUM": ""
+          }
+        },
+        "INTERROGATION_REPORT": [
+          "7e9edda9-e3a0-4faf-93f2-f70eb5ae428a",
+          "ee7c4128-bb00-4edd-bd83-493d1d72d3b2"
+        ],
+        "TYPES_OF_DRUGS": [
+          {
+            "TYPE_OF_DRUG": "ganja",
+            "QUANTITY": "",
+            "PURCHASE_AMOUN_IN_INR": "",
+            "MODE_OF_PAYMENT": "",
+            "MODE_OF_TRANSPORT": "",
+            "SUPPLIER_PERSON_ID": "",
+            "RECEIVERS_PERSON_ID": ""
+          }
+        ],
+        "CONSUMER_DETAILS": [
+          {
+            "CONSUMER_PERSON_ID": "65963425f398e939079cbb94",
+            "PLACE_OF_CONSUMPTION": "",
+            "OTHER_SOURCES": "",
+            "OTHER_SOURCES_PHONE_NO": "",
+            "AADHAR_CARD_NUMBER": "",
+            "AADHAR_CARD_NUMBER_PHONE_NO": ""
+          }
+        ],
+        "TIME_SINCE_MODUS_OPERANDI": "The facts of the case are that, on 06-01-2023 at about 11.30 hours while the SI, Nalgonda II (T) (LW-1) attending the station routine work in the PS received credible information that one person moving along with Psychotropic (Ganja) substances by illegal possession near at Vivekananda Statue, Hyderabad Road, Nalgonda.  On receipt of said information immediately LW-1 entered the said information in General Diary and informed to the superior officers and rushed to Vivekananda Statue, Hyderabad Road, Nalgonda along with LWs 3 to 5 and at about 12.00 hours found two persons by names1)Somidi Santhosh Reddy S/o Surender Reddy, age.25 years, caste.reddy, occ.student r/o H.No.6-9-173/3, New Raghavendra Colony, Nalgonda and 2) Medaboina Chakri S/o Yadagiri, age.20 years, caste.yadav, occ.private employee r/o H.No.6-2-347, Srinagar Colony, Hyderabad Road, Nalgonda along with separate polythine covers and stopped them and checked and found \u201cDried Ganja\u201d in their polythine covers.  During the confession the accused asked to use their statutory right of option of being searched in the presence of Gazetted officer or before Magistrate u/s 50 NDPS Act. On which the accused selected the option of Magistrate.  Immediately LW-1 sent a letter to Tahasildar, Nalgonda (LW-2) with a request to visit the scene of offence along with two official panchas and conduct personal search of accused. Accordingly the Tahasildar/Executive Magistrate, Nalgonda visited the scene of offence and conducted personal search of the accused. Further LW-1 has sent police personal to bring weighing machine along with its owner. The Tahasildar, Nalgonda recorded the confessional statement of the accused in presence of panchas where where he get weighed the packet at Somidi Santosh Reddy and found (01 kg ganja duly drawn 3 samples from that packet each weighing 25 grams and affixed panchas signed  chits on it and get weighed the packet at Medaboina Chakri and      found ( \u00bd )  kg ganja duly drawn 3 samples from that packet each weighing 25 grams and affixed panchas signed  chits on it  to in order to send the same to FSL for analysis.  The entire process of confessional and seizure of samples has been photographed. After confessional and seizure panchanama returned to Nalgonda II (T) PS  at 17.00 hours along with accused and seized property. Further he requested to take necessary legal action against the above persons. \n\n",
+        "FINANCIAL_HISTORY": [
+          {
+            "ACCOUNT_HOLDER_PERSON_ID": "659634aaf398e9be4c9cc246",
+            "PAN_NO": "",
+            "UPI_ID": "",
+            "NAME_OF_BANK": "",
+            "ACCOUNT_NUMBER": "",
+            "BRANCH_NAME": "",
+            "IFSC_CODE": "",
+            "IMMOVABLE_PROPERTY_ACQUIRED": "",
+            "MOVABLE_PROPERTY_ACQUIRED": ""
+          }
+        ],
+        "SIM_DETAILS": [
+          {
+            "PHONE_NUMBER": "7569658670",
+            "SDR": "",
+            "IMEI": "",
+            "TRUE_CALLER_NAME": "",
+            "PERSON_ID": ""
+          }
+        ],
+        "DOPAMS_LINKS": [
+          {
+            "PHONE_NUMBER": "7569658670",
+            "DOPAMS_DATA": []
+          }
+        ],
+        "DATE_CREATED": "2023-02-09T06:06:09.933Z",
+        "DATE_MODIFIED": "2024-01-04T04:32:47.518Z"
+      },
+      {
+        "INTERROGATION_REPORT_ID": "63e491bb92fae7289947bbd9",
+        "CRIME_ID": "63b81a159aaa21e1320d3102",
+        "PERSON_ID": "63bedfb020965f59ff053770",
+        "MEDIA": [],
+        "PHYSICAL_FEATURES": {
+          "BEARD": "Others",
+          "BUILD": "Normal/Medieum",
+          "BURN_MARKS": "OTHERS",
+          "COLOR": "Black",
+          "DEFORMITIES_OR_PECULIARITIES": "Others",
+          "DEFORMITIES": "Others",
+          "EAR": "Others",
+          "EYES": "Black",
+          "FACE": "Round",
+          "HAIR": "Black",
+          "HEIGHT": "5.6 - 6.0 ft",
+          "IDENTIFICATION_MARKS": "A Mole On the Left Side Forehead",
+          "LANGUAGE_OR_DIALECT": [
+            "Telugu"
+          ],
+          "LEUCODERMA": "Other",
+          "MOLE": "Forehead",
+          "MUSTACHE": "Tooth Brush",
+          "NOSE": "Normal Nose",
+          "SCAR": "OTHERS",
+          "TATTOO": "RIGHT HAND",
+          "TEETH": "Normal Teeth"
+        },
+        "SOCIO_ECONOMIC_PROFILE": {
+          "LIVING_STATUS": "With family",
+          "MARITAL_STATUS": "Unmarried",
+          "EDUCATION": "7th to Xth",
+          "OCCUPATION": "Private Employee",
+          "INCOME_GROUP": "Upper Middle Income Rs.10000 to Rs. 25000"
+        },
+        "FAMILY_HISTORY": [
+          {
+            "PERSON_ID": "63e49457c80d8ee9800add10",
+            "RELATION": "Mother",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": false
+          }
+        ],
+        "ASSOCIATE_DETAILS": [],
+        "COMMISSION_OF_OFFENCE": {
+          "OFFENCE_TIME": "",
+          "OTHER_OFFENCE_TIME": ""
+        },
+        "LOCAL_CONTACTS": [],
+        "REGULAR_HABITS": [
+          "Consuming Liquor",
+          "Smoking",
+          "Chewing Pan / Gutka"
+        ],
+        "OTHER_REGULAR_HABITS": "",
+        "INDULGANCE_BEFORE_OFFENCE": [],
+        "OTHER_INDULGANCE_BEFORE_OFFENCE": "",
+        "MODUS_OPERANDI": [],
+        "SHELTER": [],
+        "PROPERTY_DISPOSAL": [],
+        "SHARE_OF_AMOUNT_SPENT": {
+          "SHARE_OF_AMOUNT_SPENT": "",
+          "OTHER_SHARE_OF_AMOUNT_SPENT": "",
+          "REMARKS": ""
+        },
+        "PREVIOUS_OFFENCES_CONFESSED": [],
+        "REGULARIZATION_OF_TRANSIT_WARRANTS": [],
+        "EXECUTION_OF_NBW": [],
+        "PENDING_NBW": [],
+        "SURETIES": [],
+        "DEFENCE_COUNSEL": [],
+        "JAIL_SENTENCE": [],
+        "NEW_GANG_FORMATION": [],
+        "CONVICTION_ACQUITTAL": [],
+        "PRESENT_WHEREABOUTS": {
+          "IN_JAIL": {
+            "IS_IN_JAIL": false,
+            "FROM_WHERE_SENT_IN_JAIL": "",
+            "CRIME_NUM": "",
+            "DIST_UNIT": ""
+          },
+          "ON_BAIL": {
+            "IS_ON_BAIL": false,
+            "FROM_WHERE_SENT_ON_BAIL": "",
+            "CRIME_NUM": "",
+            "DATE_OF_BAIL": ""
+          },
+          "ABSCONDING": {
+            "IS_ABSCONDING": false,
+            "WANTED_IN_POLICE_STATION": "",
+            "CRIME_NUM": ""
+          },
+          "NORMAL_LIFE": {
+            "IS_NORMAL_LIFE": false,
+            "EKING_LIVELIHOOD_BY_LABOR_WORK": ""
+          },
+          "REHABILITATED": {
+            "IS_REHABILITATED": false,
+            "REHABILITATION_DETAILS": ""
+          },
+          "DEAD": {
+            "IS_DEAD": false,
+            "DEATH_DETAILS": ""
+          },
+          "FACING_TRIAL": {
+            "IS_FACING_TRIAL": false,
+            "PS_NAME": "",
+            "CRIME_NUM": ""
+          }
+        },
+        "INTERROGATION_REPORT": [
+          "349f971d-5ed8-43e1-8bea-ab4090801ad8"
+        ],
+        "TYPES_OF_DRUGS": [],
+        "CONSUMER_DETAILS": [],
+        "TIME_SINCE_MODUS_OPERANDI": "",
+        "FINANCIAL_HISTORY": [],
+        "SIM_DETAILS": [],
+        "DOPAMS_LINKS": [],
+        "DATE_CREATED": "2023-02-09T06:24:59.625Z",
+        "DATE_MODIFIED": "2023-02-09T06:36:07.324Z"
+      },
+      {
+        "INTERROGATION_REPORT_ID": "63e4ffc092fae7db7e53532b",
+        "CRIME_ID": "63b81a159aaa21e1320d3102",
+        "PERSON_ID": "63bee11915c40721183d2a3d",
+        "MEDIA": [],
+        "PHYSICAL_FEATURES": {
+          "BEARD": "Others",
+          "BUILD": "Fat",
+          "BURN_MARKS": "OTHERS",
+          "COLOR": "Fair",
+          "DEFORMITIES_OR_PECULIARITIES": "Others",
+          "DEFORMITIES": "Others",
+          "EAR": "Others",
+          "EYES": "Black",
+          "FACE": "Round",
+          "HAIR": "Black",
+          "HEIGHT": "4.6 - 5.0 ft",
+          "IDENTIFICATION_MARKS": "A Mole On The Beside Right Eye ",
+          "LANGUAGE_OR_DIALECT": [
+            "Telugu"
+          ],
+          "LEUCODERMA": "other",
+          "MOLE": "Eye",
+          "MUSTACHE": "Others",
+          "NOSE": "Long Nose",
+          "SCAR": "OTHERS",
+          "TATTOO": "RIGHT HAND",
+          "TEETH": "Normal Teeth"
+        },
+        "SOCIO_ECONOMIC_PROFILE": {
+          "LIVING_STATUS": "With family",
+          "MARITAL_STATUS": "Unmarried",
+          "EDUCATION": "7th to Xth",
+          "OCCUPATION": "Carpenter",
+          "INCOME_GROUP": "Upper Middle Income Rs.10000 to Rs. 25000"
+        },
+        "FAMILY_HISTORY": [
+          {
+            "PERSON_ID": "63e50152c80d8e7b44169a26",
+            "RELATION": "Mother",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": false
+          }
+        ],
+        "ASSOCIATE_DETAILS": [],
+        "COMMISSION_OF_OFFENCE": {
+          "OFFENCE_TIME": "",
+          "OTHER_OFFENCE_TIME": ""
+        },
+        "LOCAL_CONTACTS": [],
+        "REGULAR_HABITS": [
+          "None"
+        ],
+        "OTHER_REGULAR_HABITS": "",
+        "INDULGANCE_BEFORE_OFFENCE": [],
+        "OTHER_INDULGANCE_BEFORE_OFFENCE": "",
+        "MODUS_OPERANDI": [],
+        "SHELTER": [],
+        "PROPERTY_DISPOSAL": [],
+        "SHARE_OF_AMOUNT_SPENT": {
+          "SHARE_OF_AMOUNT_SPENT": "",
+          "OTHER_SHARE_OF_AMOUNT_SPENT": "",
+          "REMARKS": ""
+        },
+        "PREVIOUS_OFFENCES_CONFESSED": [],
+        "REGULARIZATION_OF_TRANSIT_WARRANTS": [],
+        "EXECUTION_OF_NBW": [],
+        "PENDING_NBW": [],
+        "SURETIES": [],
+        "DEFENCE_COUNSEL": [],
+        "JAIL_SENTENCE": [],
+        "NEW_GANG_FORMATION": [],
+        "CONVICTION_ACQUITTAL": [],
+        "PRESENT_WHEREABOUTS": {
+          "IN_JAIL": {
+            "IS_IN_JAIL": false,
+            "FROM_WHERE_SENT_IN_JAIL": "",
+            "CRIME_NUM": "",
+            "DIST_UNIT": ""
+          },
+          "ON_BAIL": {
+            "IS_ON_BAIL": false,
+            "FROM_WHERE_SENT_ON_BAIL": "",
+            "CRIME_NUM": "",
+            "DATE_OF_BAIL": ""
+          },
+          "ABSCONDING": {
+            "IS_ABSCONDING": false,
+            "WANTED_IN_POLICE_STATION": "",
+            "CRIME_NUM": ""
+          },
+          "NORMAL_LIFE": {
+            "IS_NORMAL_LIFE": false,
+            "EKING_LIVELIHOOD_BY_LABOR_WORK": ""
+          },
+          "REHABILITATED": {
+            "IS_REHABILITATED": false,
+            "REHABILITATION_DETAILS": ""
+          },
+          "DEAD": {
+            "IS_DEAD": false,
+            "DEATH_DETAILS": ""
+          },
+          "FACING_TRIAL": {
+            "IS_FACING_TRIAL": false,
+            "PS_NAME": "",
+            "CRIME_NUM": ""
+          }
+        },
+        "INTERROGATION_REPORT": [
+          "7b582e5b-0d63-4e0d-9486-a4259f493b69"
+        ],
+        "TYPES_OF_DRUGS": [],
+        "CONSUMER_DETAILS": [],
+        "TIME_SINCE_MODUS_OPERANDI": "",
+        "FINANCIAL_HISTORY": [],
+        "SIM_DETAILS": [],
+        "DOPAMS_LINKS": [],
+        "DATE_CREATED": "2023-02-09T14:14:24.841Z",
+        "DATE_MODIFIED": "2023-02-09T15:29:10.829Z"
+      },
+      {
+        "INTERROGATION_REPORT_ID": "668d2eb3d8e8bc613a6aef6d",
+        "CRIME_ID": "63b81a159aaa21e1320d3102",
+        "PERSON_ID": "63b928b520965fd547b0306f",
+        "MEDIA": [],
+        "PHYSICAL_FEATURES": {
+          "BEARD": "Bearded",
+          "BUILD": "Normal",
+          "BURN_MARKS": "OTHERS",
+          "COLOR": "White",
+          "DEFORMITIES_OR_PECULIARITIES": "Others",
+          "DEFORMITIES": "",
+          "EAR": "Others",
+          "EYES": "Black",
+          "FACE": "Round",
+          "HAIR": "Black",
+          "HEIGHT": "5.6 - 6.0 ft",
+          "IDENTIFICATION_MARKS": "amole on the right hand arm",
+          "LANGUAGE_OR_DIALECT": [
+            "Telugu"
+          ],
+          "LEUCODERMA": "no leucoderma",
+          "MOLE": "Right Hand",
+          "MUSTACHE": "Handle Bar",
+          "NOSE": "Normal Nose",
+          "SCAR": "OTHERS",
+          "TATTOO": "OTHERS",
+          "TEETH": "Normal Teeth"
+        },
+        "SOCIO_ECONOMIC_PROFILE": {
+          "LIVING_STATUS": "",
+          "MARITAL_STATUS": "",
+          "EDUCATION": "",
+          "OCCUPATION": "",
+          "INCOME_GROUP": ""
+        },
+        "FAMILY_HISTORY": [
+          {
+            "PERSON_ID": "668d2f60d9b2662aee27b099",
+            "RELATION": "Father",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": true
+          }
+        ],
+        "ASSOCIATE_DETAILS": [],
+        "COMMISSION_OF_OFFENCE": {
+          "OFFENCE_TIME": "",
+          "OTHER_OFFENCE_TIME": ""
+        },
+        "LOCAL_CONTACTS": [],
+        "REGULAR_HABITS": [],
+        "OTHER_REGULAR_HABITS": "",
+        "INDULGANCE_BEFORE_OFFENCE": [],
+        "OTHER_INDULGANCE_BEFORE_OFFENCE": "",
+        "MODUS_OPERANDI": [],
+        "SHELTER": [],
+        "PROPERTY_DISPOSAL": [],
+        "SHARE_OF_AMOUNT_SPENT": {
+          "SHARE_OF_AMOUNT_SPENT": "",
+          "OTHER_SHARE_OF_AMOUNT_SPENT": "",
+          "REMARKS": ""
+        },
+        "PREVIOUS_OFFENCES_CONFESSED": [],
+        "REGULARIZATION_OF_TRANSIT_WARRANTS": [],
+        "EXECUTION_OF_NBW": [],
+        "PENDING_NBW": [],
+        "SURETIES": [],
+        "DEFENCE_COUNSEL": [],
+        "JAIL_SENTENCE": [],
+        "NEW_GANG_FORMATION": [],
+        "CONVICTION_ACQUITTAL": [],
+        "PRESENT_WHEREABOUTS": {
+          "IN_JAIL": {
+            "IS_IN_JAIL": false,
+            "FROM_WHERE_SENT_IN_JAIL": "",
+            "CRIME_NUM": "",
+            "DIST_UNIT": ""
+          },
+          "ON_BAIL": {
+            "IS_ON_BAIL": false,
+            "FROM_WHERE_SENT_ON_BAIL": "",
+            "CRIME_NUM": "",
+            "DATE_OF_BAIL": ""
+          },
+          "ABSCONDING": {
+            "IS_ABSCONDING": false,
+            "WANTED_IN_POLICE_STATION": "",
+            "CRIME_NUM": ""
+          },
+          "NORMAL_LIFE": {
+            "IS_NORMAL_LIFE": false,
+            "EKING_LIVELIHOOD_BY_LABOR_WORK": ""
+          },
+          "REHABILITATED": {
+            "IS_REHABILITATED": false,
+            "REHABILITATION_DETAILS": ""
+          },
+          "DEAD": {
+            "IS_DEAD": false,
+            "DEATH_DETAILS": ""
+          },
+          "FACING_TRIAL": {
+            "IS_FACING_TRIAL": false,
+            "PS_NAME": "",
+            "CRIME_NUM": ""
+          }
+        },
+        "INTERROGATION_REPORT": [],
+        "TYPES_OF_DRUGS": [],
+        "CONSUMER_DETAILS": [],
+        "TIME_SINCE_MODUS_OPERANDI": "",
+        "FINANCIAL_HISTORY": [],
+        "SIM_DETAILS": [],
+        "DOPAMS_LINKS": [],
+        "DATE_CREATED": "2024-07-09T12:36:03.539Z",
+        "DATE_MODIFIED": "2024-07-09T12:38:56.378Z"
+      },
+      {
+        "INTERROGATION_REPORT_ID": "668d33fed9b266e4162829ea",
+        "CRIME_ID": "63b81a159aaa21e1320d3102",
+        "PERSON_ID": "668cd53fd8e8bc7f294a3565",
+        "MEDIA": [],
+        "PHYSICAL_FEATURES": {
+          "BEARD": "Bearded",
+          "BUILD": "Normal",
+          "BURN_MARKS": "OTHERS",
+          "COLOR": "White",
+          "DEFORMITIES_OR_PECULIARITIES": "Others",
+          "DEFORMITIES": "",
+          "EAR": "Others",
+          "EYES": "Black",
+          "FACE": "Round",
+          "HAIR": "Black",
+          "HEIGHT": "5.6 - 6.0 ft",
+          "IDENTIFICATION_MARKS": "amole on the fore head",
+          "LANGUAGE_OR_DIALECT": [
+            "Telugu"
+          ],
+          "LEUCODERMA": "no leucoderma",
+          "MOLE": "Forehead",
+          "MUSTACHE": "Handle Bar",
+          "NOSE": "Normal Nose",
+          "SCAR": "OTHERS",
+          "TATTOO": "OTHERS",
+          "TEETH": "Normal Teeth"
+        },
+        "SOCIO_ECONOMIC_PROFILE": {
+          "LIVING_STATUS": "With family",
+          "MARITAL_STATUS": "Unmarried",
+          "EDUCATION": "Graduate",
+          "OCCUPATION": "Private Employee",
+          "INCOME_GROUP": "Upper Middle Income Rs.10000 to Rs. 25000"
+        },
+        "FAMILY_HISTORY": [
+          {
+            "PERSON_ID": "668d34f6d9b2667e57283f49",
+            "RELATION": "Father",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": true
+          },
+          {
+            "PERSON_ID": "668d34f6d9b2661062283f4c",
+            "RELATION": "Mother",
+            "FAMILY_MEMBER_PECULIARITY": "",
+            "CRIMINAL_BACKGROUND": false,
+            "IS_ALIVE": true,
+            "FAMILY_STAY_TOGETHER": true
+          }
+        ],
+        "ASSOCIATE_DETAILS": [],
+        "COMMISSION_OF_OFFENCE": {
+          "OFFENCE_TIME": "",
+          "OTHER_OFFENCE_TIME": ""
+        },
+        "LOCAL_CONTACTS": [],
+        "REGULAR_HABITS": [],
+        "OTHER_REGULAR_HABITS": "",
+        "INDULGANCE_BEFORE_OFFENCE": [],
+        "OTHER_INDULGANCE_BEFORE_OFFENCE": "",
+        "MODUS_OPERANDI": [],
+        "SHELTER": [],
+        "PROPERTY_DISPOSAL": [],
+        "SHARE_OF_AMOUNT_SPENT": {
+          "SHARE_OF_AMOUNT_SPENT": "",
+          "OTHER_SHARE_OF_AMOUNT_SPENT": "",
+          "REMARKS": ""
+        },
+        "PREVIOUS_OFFENCES_CONFESSED": [],
+        "REGULARIZATION_OF_TRANSIT_WARRANTS": [],
+        "EXECUTION_OF_NBW": [],
+        "PENDING_NBW": [],
+        "SURETIES": [],
+        "DEFENCE_COUNSEL": [],
+        "JAIL_SENTENCE": [],
+        "NEW_GANG_FORMATION": [],
+        "CONVICTION_ACQUITTAL": [],
+        "PRESENT_WHEREABOUTS": {
+          "IN_JAIL": {
+            "IS_IN_JAIL": false,
+            "FROM_WHERE_SENT_IN_JAIL": "",
+            "CRIME_NUM": "",
+            "DIST_UNIT": ""
+          },
+          "ON_BAIL": {
+            "IS_ON_BAIL": false,
+            "FROM_WHERE_SENT_ON_BAIL": "",
+            "CRIME_NUM": "",
+            "DATE_OF_BAIL": ""
+          },
+          "ABSCONDING": {
+            "IS_ABSCONDING": false,
+            "WANTED_IN_POLICE_STATION": "",
+            "CRIME_NUM": ""
+          },
+          "NORMAL_LIFE": {
+            "IS_NORMAL_LIFE": false,
+            "EKING_LIVELIHOOD_BY_LABOR_WORK": ""
+          },
+          "REHABILITATED": {
+            "IS_REHABILITATED": false,
+            "REHABILITATION_DETAILS": ""
+          },
+          "DEAD": {
+            "IS_DEAD": false,
+            "DEATH_DETAILS": ""
+          },
+          "FACING_TRIAL": {
+            "IS_FACING_TRIAL": false,
+            "PS_NAME": "",
+            "CRIME_NUM": ""
+          }
+        },
+        "INTERROGATION_REPORT": [
+          "55a395c7-504d-433f-9553-5951e22fe833"
+        ],
+        "TYPES_OF_DRUGS": [],
+        "CONSUMER_DETAILS": [],
+        "TIME_SINCE_MODUS_OPERANDI": "",
+        "FINANCIAL_HISTORY": [],
+        "SIM_DETAILS": [],
+        "DOPAMS_LINKS": [],
+        "DATE_CREATED": "2024-07-09T12:58:38.375Z",
+        "DATE_MODIFIED": "2024-07-09T13:03:24.670Z"
+      }
+    ]
+  }
+}

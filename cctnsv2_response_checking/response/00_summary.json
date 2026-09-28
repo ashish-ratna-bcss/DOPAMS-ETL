@@ -1,0 +1,268 @@
+{
+  "total_endpoints": 29,
+  "executed_at": "2026-09-22T12:00:38.759212",
+  "client": "DOPAMS",
+  "results": [
+    {
+      "id": 1,
+      "category": "Ping",
+      "method": "GET",
+      "path": "/api/DOPAMS/ping",
+      "status_code": 200,
+      "duration_ms": 52,
+      "file": "01_ping_endpoint_to_test_api.json"
+    },
+    {
+      "id": 2,
+      "category": "Crimes",
+      "method": "GET",
+      "path": "/api/DOPAMS/crimes/disposal",
+      "status_code": 200,
+      "duration_ms": 83,
+      "file": "02_crimes_endpoint_to_get_disposal_cases_data_betw.json"
+    },
+    {
+      "id": 3,
+      "category": "Crimes",
+      "method": "GET",
+      "path": "/api/DOPAMS/crimes/disposal/65959992c5c223d372efa506",
+      "status_code": 200,
+      "duration_ms": 19,
+      "file": "03_crimes_endpoint_to_get_disposal_case_data_using.json"
+    },
+    {
+      "id": 4,
+      "category": "Crimes",
+      "method": "GET",
+      "path": "/api/DOPAMS/crimes",
+      "status_code": 200,
+      "duration_ms": 94,
+      "file": "04_crimes_endpoint_to_get_crimes_data_updated_betw.json"
+    },
+    {
+      "id": 5,
+      "category": "Crimes",
+      "method": "GET",
+      "path": "/api/DOPAMS/crimes/65930ca8eec4a3f005d8667c",
+      "status_code": 200,
+      "duration_ms": 41,
+      "file": "05_crimes_endpoint_to_get_crime_data_using_crimeid.json"
+    },
+    {
+      "id": 6,
+      "category": "Master Data",
+      "method": "GET",
+      "path": "/api/DOPAMS/master-data/hierarchy",
+      "status_code": 200,
+      "duration_ms": 79,
+      "file": "06_master_data_endpoint_to_get_hierarchy_master_data.json"
+    },
+    {
+      "id": 7,
+      "category": "Accused",
+      "method": "GET",
+      "path": "/api/DOPAMS/accused",
+      "status_code": 200,
+      "duration_ms": 4110,
+      "file": "07_accused_endpoint_to_get_accused_data_updated_bet.json"
+    },
+    {
+      "id": 8,
+      "category": "Accused",
+      "method": "GET",
+      "path": "/api/DOPAMS/accused/62b53a7f447aa041707dce99",
+      "status_code": 200,
+      "duration_ms": 20,
+      "file": "08_accused_endpoint_to_get_accused_data_using_crime.json"
+    },
+    {
+      "id": 9,
+      "category": "Arrests",
+      "method": "GET",
+      "path": "/api/DOPAMS/arrests",
+      "status_code": 200,
+      "duration_ms": 4106,
+      "file": "09_arrests_endpoint_to_get_arrests_data_updated_bet.json"
+    },
+    {
+      "id": 10,
+      "category": "Arrests",
+      "method": "GET",
+      "path": "/api/DOPAMS/arrests/62b53a7f447aa041707dce99",
+      "status_code": 200,
+      "duration_ms": 21,
+      "file": "10_arrests_endpoint_to_get_arrests_data_using_crime.json"
+    },
+    {
+      "id": 11,
+      "category": "MO Seizures",
+      "method": "GET",
+      "path": "/api/DOPAMS/mo-seizures",
+      "status_code": 200,
+      "duration_ms": 233,
+      "file": "11_mo_seizures_endpoint_to_get_mo_seizures_created_or_u.json"
+    },
+    {
+      "id": 12,
+      "category": "MO Seizures",
+      "method": "GET",
+      "path": "/api/DOPAMS/mo-seizures/63cc2a307f84d853c71c754c",
+      "status_code": 200,
+      "duration_ms": 27,
+      "file": "12_mo_seizures_endpoint_to_get_mo_seizures_using_crimei.json"
+    },
+    {
+      "id": 13,
+      "category": "Person Details",
+      "method": "GET",
+      "path": "/api/DOPAMS/person-details/62b53ccf6e2f9553d74c8f31",
+      "status_code": 200,
+      "duration_ms": 44,
+      "file": "13_person_details_endpoint_to_get_person_details_using_per.json"
+    },
+    {
+      "id": 14,
+      "category": "Property Details",
+      "method": "GET",
+      "path": "/api/DOPAMS/property-details",
+      "status_code": 200,
+      "duration_ms": 435,
+      "file": "14_property_details_endpoint_to_get_property_details_created.json"
+    },
+    {
+      "id": 15,
+      "category": "Property Details",
+      "method": "GET",
+      "path": "/api/DOPAMS/property-details/63f3113f59db8547bf8a0de7",
+      "status_code": 200,
+      "duration_ms": 27,
+      "file": "15_property_details_endpoint_to_get_property_details_using_c.json"
+    },
+    {
+      "id": 16,
+      "category": "Interrogation Reports",
+      "method": "GET",
+      "path": "/api/DOPAMS/interrogation-reports/v1/",
+      "status_code": 200,
+      "duration_ms": 2539,
+      "file": "16_interrogation_reports_endpoint_to_get_interrogation_reports_cr.json"
+    },
+    {
+      "id": 17,
+      "category": "Interrogation Reports",
+      "method": "GET",
+      "path": "/api/DOPAMS/interrogation-reports/v1/63b81a159aaa21e1320d3102",
+      "status_code": 200,
+      "duration_ms": 44,
+      "file": "17_interrogation_reports_endpoint_to_get_interrogation_reports_us.json"
+    },
+    {
+      "id": 18,
+      "category": "Chargesheets",
+      "method": "GET",
+      "path": "/api/DOPAMS/chargesheets",
+      "status_code": 200,
+      "duration_ms": 55,
+      "file": "18_chargesheets_endpoint_to_get_chargesheets_updated_bet.json"
+    },
+    {
+      "id": 19,
+      "category": "Chargesheets",
+      "method": "GET",
+      "path": "/api/DOPAMS/chargesheets/63b81a159aaa21e1320d3102",
+      "status_code": 200,
+      "duration_ms": 19,
+      "file": "19_chargesheets_endpoint_to_get_chargesheets_using_crime.json"
+    },
+    {
+      "id": 20,
+      "category": "Update Chargesheets",
+      "method": "GET",
+      "path": "/api/DOPAMS/update-chargesheets",
+      "status_code": 200,
+      "duration_ms": 737,
+      "file": "20_update_chargesheets_endpoint_to_get_update-chargesheets_upda.json"
+    },
+    {
+      "id": 21,
+      "category": "Update Chargesheets",
+      "method": "GET",
+      "path": "/api/DOPAMS/update-chargesheets/63b81a159aaa21e1320d3102",
+      "status_code": 200,
+      "duration_ms": 23,
+      "file": "21_update_chargesheets_endpoint_to_get_update-chargesheets_usin.json"
+    },
+    {
+      "id": 22,
+      "category": "Case Property",
+      "method": "GET",
+      "path": "/api/DOPAMS/case-property",
+      "status_code": 200,
+      "duration_ms": 163,
+      "file": "22_case_property_get_case_property_details_between_date_r.json"
+    },
+    {
+      "id": 23,
+      "category": "Case Property",
+      "method": "GET",
+      "path": "/api/DOPAMS/case-property/6522bf667c0055345cba8814",
+      "status_code": 200,
+      "duration_ms": 29,
+      "file": "23_case_property_get_case_property_details_by_crime_id.json"
+    },
+    {
+      "id": 24,
+      "category": "Files",
+      "method": "GET",
+      "path": "/api/DOPAMS/files/db921173-6d6d-491a-ab7a-9053ac8f56db",
+      "status_code": 200,
+      "duration_ms": 171,
+      "file": "24_files_endpoint_to_download_file_using_fileid_n.json"
+    },
+    {
+      "id": 25,
+      "category": "Reports",
+      "method": "GET",
+      "path": "/api/DOPAMS/reports/missing-udb-persons/v1/",
+      "status_code": 200,
+      "duration_ms": 12934,
+      "file": "25_reports_endpoint_to_get_missing_and_udb_persons_.json"
+    },
+    {
+      "id": 26,
+      "category": "Reports",
+      "method": "GET",
+      "path": "/api/DOPAMS/reports/arrest/arrest-particulars/v1/",
+      "status_code": 200,
+      "duration_ms": 418,
+      "file": "26_reports_endpoint_to_get_arrest_particulars_data_.json"
+    },
+    {
+      "id": 27,
+      "category": "Citizen Portal",
+      "method": "GET",
+      "path": "/api/DOPAMS/reports/citizen/arrest/arrest-particulars/v1/",
+      "status_code": 200,
+      "duration_ms": 1021,
+      "file": "27_citizen_portal_public_endpoint_for_the_citizen_portal_t.json"
+    },
+    {
+      "id": 28,
+      "category": "Reports",
+      "method": "GET",
+      "path": "/api/DOPAMS/reports/stolen-automobiles",
+      "status_code": 200,
+      "duration_ms": 257,
+      "file": "28_reports_endpoint_to_get_stolen_automobiles_creat.json"
+    },
+    {
+      "id": 29,
+      "category": "Reports",
+      "method": "GET",
+      "path": "/api/DOPAMS/reports/stolen-automobiles/6522bf667c0055345cba8814",
+      "status_code": 200,
+      "duration_ms": 25,
+      "file": "29_reports_endpoint_to_get_stolen_automobiles_using.json"
+    }
+  ]
+}

@@ -1,0 +1,535 @@
+{
+  "endpoint_id": 25,
+  "category": "Reports",
+  "summary": "Endpoint to get missing and udb persons data.",
+  "method": "GET",
+  "request_path": "/api/DOPAMS/reports/missing-udb-persons/v1/",
+  "request_url": "http://103.164.200.184:3000/api/DOPAMS/reports/missing-udb-persons/v1/?districtCodes=37016500&limit=10&page=1&personType=Missing",
+  "query_params": {
+    "districtCodes": "37016500",
+    "limit": "10",
+    "page": "1",
+    "personType": "Missing"
+  },
+  "request_body": null,
+  "status_code": 200,
+  "duration_ms": 12934,
+  "timestamp": "2026-09-22T12:00:37.025014",
+  "response": {
+    "status": true,
+    "data": {
+      "data": [
+        {
+          "PERSON_NAME": "Kurpagiri Vaishnavi",
+          "PERSON_AGE": 20,
+          "GENDER": "Female",
+          "FIR_NUM": "1329/2026",
+          "CRIME_ID": "6ab21aeb26fcdfadea468baa",
+          "FIR_DATE": "2026-09-22T05:30:00.000Z",
+          "BRIEF_FACTS": "IN THE COURT OF THE HON\u2019BLE VI MM  AJCJ CUM VI AJMFC COURT AT LB NAGAR  R.R.DIST.\nHonoured Sir\n  Today i.e. on 22.09.2026 at 11:00hours, received a complaint from Smt. Kurpagiri Chandrakala, W/o Vidya Raj, aged:40yrs, Caste: SC-Mala, Occ: Housekeeping, R/o Laxmi Nagar Colony, Near CKR-KTR Function Hall, Badangpet, Balapur mandal, Ranga Reddy dist. #8074824208, in which facts read as follows. \t\n Facts of the case are that, on 21.09.2026 at about:09:30hrs, the complainant and family members went to out for their work, but her daughter by name Kurpagiri Vaishnavi, aged:20yrs, Occ: bangle store  present at home, at about:18:30hrs, the complainant returned to home and found that, her daughter Vaishnavi, left from the home without intimation to anyone and did not returned so far, and her mobile number  7993029273, getting switched off, the complainant searched for her in relatives and neighbored places, but could not be traced out, the descriptive particulars of missing woman height:5.2fts, normal complexion, the complainant suspected to one Jeevan#7986098548, for her daughter missing. Hence the complainant requested for necessary action. (Issued FIR: A. Satyanarayana-ASI. & IO V. Sujatha-WASI# 8712576563(Cr. No: 1329/2026 U/H: Woman Missing)\n",
+          "IO_NAME": "VENKATAGIRI SUJATHA",
+          "IO_RANK": "ASI",
+          "IO_PAO_CODE": "1414004",
+          "PS_NAME": "Meerpet PS(Hyderabad)",
+          "DISTRICT": "Hyderabad",
+          "PERSON": "6ab21bd37dcf5f1ed9959ca5",
+          "COMPLAINANT_NAME": "Kurpagiri Chandrakala",
+          "PERSON_DATE": "2026-09-21T13:00:00.000Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab21bd37dcf5fb906959ca7",
+              "mimeType": "image/jpeg",
+              "name": "1329-2026 FIR Photo.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/f943bb7d-df20-47f6-a5c8-2d58402bc0c7/content?attachment=false&alf_ticket=TICKET_0234152c3b8e0b47ee56becd3f6ef1b7206b3fef",
+              "fileId": "f943bb7d-df20-47f6-a5c8-2d58402bc0c7",
+              "dateUploaded": "2026-09-22T06:10:27.214Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "",
+            "STREET_ROAD_NO": "Laxmi Nagar Colony",
+            "WARD_COLONY": "Laxmi Nagar Colony",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "",
+            "AREA_MANDAL": "Balapur",
+            "DISTRICT": "RANGA REDDY",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "Rajanala Nandini",
+          "PERSON_AGE": 20,
+          "GENDER": "Female",
+          "FIR_NUM": "947/2026",
+          "CRIME_ID": "6ab20f36bbba5b80646c415b",
+          "FIR_DATE": "2026-09-21T19:00:00.000Z",
+          "BRIEF_FACTS": "IN THE COURT OF HON\u2019BLE III ADDITIONAL JUNIOR CIVIL JUDGE-CUM, III ADDITIONAL JUDICIAL MAGISTRATE OF FIRST-CLASS AT KUSHAIGUDA\n\nHonoured Sir/Madam,\nThe Brief facts facts of the case are the on 22.09.2023 at 00:30hrs received a petition from Sri Rajanala Raju S/o Yadaiah, Age:45yrs, Caste:Mudiraj, Occ:Driver, R/o:H No.2-31, Yadgarpally (V), Keesara Mandal, Medchal Malkajgiri dist In his petition, the complainant stated that his daughter, namely Rajanala Nandini, age:20 years, is pursuing her first year Degree at Sai Sudheer College, ECIL. On 21.09.2026 at about 07:30 hours, she left their house as usual to attend college. However, she did not return home in the evening. As the missing woman did not possess a mobile phone, the complainant went to her college and enquired about her whereabouts. The college authorities informed him that she had not attended college on that day and was marked absent. Later, on the same day at about 20:15 hours, the complainant received a phone call from an unknown mobile number, i.e., 8977473269. During the said call, his daughter Rajanala Nandini informed him that she was safe and requested him not to search for her. Thereafter, she disconnected the call. When the complainant subsequently attempted to contact the said mobile number, it was found to be switched off. Hence,he had requested to take necessary action as per law.\n\nReceived on 22.09.2026 at 00:30 Hours \n  As Per the Contents of the above Petition, I B Nagaraju SI of Police PS Keesara registered a case in Cr. No: 947/2026 U/s Woman Missing and investigation entrusted to P. Bala Narsimha ASI .\n                                                              Station House Officer\n                                                                            PS Keesara. Malkajgiri.\n",
+          "IO_NAME": "POUSA BALA NARSIMHA",
+          "IO_RANK": "ASI",
+          "IO_PAO_CODE": "1414166",
+          "PS_NAME": "Keesara PS(Malkajgiri)",
+          "DISTRICT": "Malkajgiri",
+          "PERSON": "6ab210b1c16f4b338cadb2c2",
+          "COMPLAINANT_NAME": "Sri Rajanala Raju",
+          "PERSON_DATE": "2026-09-21T02:00:00.957Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab210b1c16f4b7e51adb2c4",
+              "mimeType": "image/jpeg",
+              "name": "WhatsApp Image 2026-09-22 at 9.24.18 AM.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/da9d1696-0a13-451a-9b28-723d529118aa/content?attachment=false&alf_ticket=TICKET_0234152c3b8e0b47ee56becd3f6ef1b7206b3fef",
+              "fileId": "da9d1696-0a13-451a-9b28-723d529118aa",
+              "dateUploaded": "2026-09-22T05:22:57.959Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "2-31",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": "Yadgaripally Village",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "Yadgarpally",
+            "AREA_MANDAL": "Keesara",
+            "DISTRICT": "MEDCHAL MALKAJGIRI",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "501301",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "Pradeep Raj",
+          "PERSON_AGE": 15,
+          "GENDER": "Male",
+          "FIR_NUM": "559/2026",
+          "CRIME_ID": "6ab1759c334ace7ca99205e5",
+          "FIR_DATE": "2026-09-21T17:00:00.000Z",
+          "BRIEF_FACTS": "IN THE COURT OF HONOURABLE ADDL. JUDICIAL FIRST-CLASS MAGISTRATE AT SANGAREDDY\n\nHonoured Sir/Madam,\n                       Brief facts of the case are that, today i.e, on 21.09.2026 at 22:30 hrs, the complainant Sri Mensoth Gopal S/o Jemla, aged 42 years, Caste: ST-Lambada, Occupation: Bricks Business, R/o Koyagundu Thanda, Kandi Mandal, Sangareddy District, Ph. No. 6302938386 lodged a Telugu written petition in which he stated that he has 1 daughter and 2 sons. On 21.09.2026 at about 07:00 hours the complainant dropped his elder son, namely Pradeep Raj, aged 15 years, Occ: Student (10th class)at St. Ann's School, Sangareddy, at Koulampet Village Bus Stand as a daily routine, from where he boarded an RTC bus to attend school at Sangareddy. However, he did not return home by evening. At about 20:00 hours, the complainant made enquiries and came to know that his son Pradeep Raj had not attended school on 21.09.2026. The complainant searched for his son among his friends, relatives, and in the surrounding areas, but could not trace him. The missing boy was wearing a school uniform consisting of a white-and-blue checkered shirt and blue-coloured pants. He is approximately 5 feet tall and has a normal complexion. Therefore he requested to take necessary action in this regards.                      \n                                                                                                    Sd/-\n                                                                                    Sri Mensoth Gopal\n                                                                               Mobile No.6302938386\n\t\nReceived on 21.09.2026 at 22:30 hrs\nToday i.e. on 21.09.2026 at about 22:30 hours, while I A.Harika SIP was present at the scene of offence at Koulampet Village Bus Stand, the complainant present before me and submitted the enclosed complaint. As the contents disclose a cognizable offence, the SI of Sangareddy Rural PS is directed to register a case and submit the FIR to the Hon\u2019ble Court and take up investigation as per law. Received the complaint with SI endorsement, As per the instructions of SIP, I S.Madhusudhana Reddy SIP registered a case in Cr. No. 559/2026 U/Sec 137(2) BNS and entrusted to A.Harika SIP for further investigation.\n\n\n                                                                                                 Sd/-\n                                                                              S.Madhusudhana Reddy\n                                                                                Sub-Inspecter of Police\n                                                                                 P.S. Sangareddy Rural.",
+          "ACTS_SECTIONS": "137(2) BNS",
+          "IO_NAME": "ARVA HARIKA",
+          "IO_RANK": "SI",
+          "IO_PAO_CODE": "1651750",
+          "PS_NAME": "Sangareddy Rural PS(Sangareddy)",
+          "DISTRICT": "Sangareddy",
+          "PERSON": "6ab17740c8b3c841fb68e809",
+          "COMPLAINANT_NAME": "Sri Mensoth Gopal",
+          "PERSON_DATE": "2026-09-21T01:30:00.828Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab176745e6b45b908fbd5d2",
+              "mimeType": "image/jpeg",
+              "name": "Missing Boy Photo.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/90a78235-ffca-441a-98b3-a722b41ce821/content?attachment=false&alf_ticket=TICKET_f551ede8b532f3f010a6a29ec90f15f5d06abcd1",
+              "fileId": "90a78235-ffca-441a-98b3-a722b41ce821",
+              "dateUploaded": "2026-09-21T18:24:52.204Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": "Koyagundu Thanda",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "Vaddena guda Thanda",
+            "AREA_MANDAL": "Sangareddy",
+            "DISTRICT": "SANGAREDDY",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "Shaik Mohammed Rizwan",
+          "PERSON_AGE": 36,
+          "GENDER": "Male",
+          "FIR_NUM": "651/2026",
+          "CRIME_ID": "6ab192827fa2d6049deefbaf",
+          "FIR_DATE": "2026-09-21T16:30:00.000Z",
+          "BRIEF_FACTS": "IN THE COURT OF THE HONOURABLE XI ADDITIONAL CHIEF JUDICIALMAGISTRATE, AT SECUNDERABAD. \n\nHonored Sir,\nBrief facts of the case are that, on 21.09.2026 at 22:00 hours, received complaint from Smt. Arshiya Begum W/o Shaik Mohammed Rizwan, Age:  26 years, Occ: Housewife, R/o H.No. 276, Block No. 05, Krishna Nagar, Katta Maisamma Temple, Rasoolpura, Begumpet, Hyderabad, Phone No. 9951068302 submitted  that she got married to Shaik Mohammed Rizwan, S/o Babu Miya, Age: 36 years, Occ: Server at Azam Hotel, Ranigunj, in the year 2020. They are blessed with three children, namely (1) Shaik Mohammed Shail, aged 5 years, (2) Shaik Sameera, aged 2 years, and (3) Shaik Mehraj, aged 20 days. On 19.09.2026 at about 2200 hours, her husband Shaik Mohammed Rizwan left the house without informing her or any other family member and has not returned home since then. About ten days prior to this incident also, her husband had left the house without informing anyone, regarding which she had lodged a missing complaint at the Police Station. After about five days, he returned home on his own. As her husband has again gone missing and has not returned home till now, she searched for him at all possible places and contacted relatives and known persons, but his whereabouts could not be traced. Therefore,  Hence she  requested to take necessary action as per law and trace out her husband. \nMan Missing Details: Shaik Mohammed Rizwan S/o Babu Miya, Age: 36 years, Occ: Server at Azam Hotel, Ranigunj, Wearing clothes: Black color shirt & Black colour Pant, Languages Known: Hindi, Height: 5 Feet 3 Inches, Complexion: Medium. \nSd/-\nSmt. Arshiya Begum,\nPh.no: 9951068302.\n\nReceived on 21.09.2026 at 2200 hrs.\n\tAs per the contents of the above complaint I, CH. Shekhar, Sub-Inspector of Police, PS Begumpet registered a case in Cr.No: 651/2026 U/H Man Missing and took up investigation.\nSd/-\nCH. Shekhar \nSub-Inspector of Police\nPS Begumpet.\n\n\n\t\t\tNote: Original Complaint Enclosed.\n",
+          "ACTS_SECTIONS": "Man Missing",
+          "IO_NAME": "CHIRRABOINA SHEKHAR",
+          "IO_RANK": "SI",
+          "IO_PAO_CODE": "2599044",
+          "PS_NAME": "BEGUMPET PS(Malkajgiri)",
+          "DISTRICT": "Malkajgiri",
+          "PERSON": "6ab1931e9928de7460deda77",
+          "COMPLAINANT_NAME": "Arshiya Begum",
+          "PERSON_DATE": "2026-09-19T16:30:00.920Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab1931e9928de6e27deda79",
+              "mimeType": "image/jpeg",
+              "name": "WhatsApp Image 2026-09-22 at 12.36.44 AM.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/13d3c18d-79f9-4e0a-8635-190bc3681318/content?attachment=false&alf_ticket=TICKET_f551ede8b532f3f010a6a29ec90f15f5d06abcd1",
+              "fileId": "13d3c18d-79f9-4e0a-8635-190bc3681318",
+              "dateUploaded": "2026-09-21T20:27:10.989Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "H.No. 276, Block No. 05, ",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": "Krishna Nagar, Katta Maisamma Temple, Rasoolpura",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "",
+            "AREA_MANDAL": "Begumpet",
+            "DISTRICT": "HYDERABAD",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "Samreen Begum",
+          "PERSON_AGE": 20,
+          "GENDER": "Female",
+          "FIR_NUM": "354/2026",
+          "CRIME_ID": "6ab19a07fce2831e2e2c07ce",
+          "FIR_DATE": "2026-09-21T15:30:00.000Z",
+          "BRIEF_FACTS": "IN THE COURT OF HONOURABLE XVII ADDL CHIEF JUDICIAL MAGISTRATE AT HYDERABAD.  \nHonoured Sir,     \n    \n         The Brief facts of the case are that on 21-09-2026 at 21:00 hrs received an English written petition from Rubeena Begum W/o Mohd Shabbir, Age: 60 yrs, Occ: Housewife, R/o: H.No. 9-11-119/14, near Bilal masjid, Qazigalli, Golconda, Hyderabad, Ph: 7660097139 in which she stated that two years back her 2nd daughter Samreen engagement had done with hameed khan but on 20/09/2026 she went Jahangir peer dargah with other person samad (unknown person to complainant). Her son bring her to home and also they warned her not to go. On 21/09/2026 at around 06:00 Am when complainant saw she couldn\u2019t found her daughter in home. They have searched all the possible places for her but in vain. So therefore she request to take necessary action as per law.\n\nMissing Person Details:\nSamreen Begum D/o Mohd Shabbir, Age: 20 yrs, Occ: Household, Height: 5.3 fts, Complexion: fair, Wearing clothes: black burqa.\n                                                                                                                                                                                                                                                                    \n(The Original English written petition is enclosed herewith for your kind perusal)\n\nReceived on 21.09.2026 at 21:00 hours  \t      \n\n -------------------------------------------------- \t\t\nAs per the contents of the above petition I K. Ramu Naidu, Sub-Inspector of Police, PS Golconda registered a case in Crime No. 354/2026 U/h Woman Missing and tookup the investigation. \n\n(K. Ramu Naidu,  Sub- Inspector of Police, PS Golconda)\n",
+          "ACTS_SECTIONS": "Woman Missing",
+          "IO_NAME": "KURACHA RAMU NAIDU",
+          "IO_RANK": "SI",
+          "IO_PAO_CODE": "0256084",
+          "PS_NAME": "GOLCONDA PS(Hyderabad)",
+          "DISTRICT": "Hyderabad",
+          "PERSON": "6ab19afdfce283f8f02c08a1",
+          "COMPLAINANT_NAME": "Rubeena Begum",
+          "PERSON_DATE": "2026-09-21T00:30:00.475Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab19afdfce2835fe62c08a3",
+              "mimeType": "image/jpeg",
+              "name": "354-26 missing.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/fd485582-24e4-41b0-b954-4ae9f131e3fd/content?attachment=false&alf_ticket=TICKET_f551ede8b532f3f010a6a29ec90f15f5d06abcd1",
+              "fileId": "fd485582-24e4-41b0-b954-4ae9f131e3fd",
+              "dateUploaded": "2026-09-21T21:00:45.006Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "Normal",
+            "EYES": "Black",
+            "HAIR": "Black",
+            "FACE": "",
+            "COLOR": "Fair",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "9-11-119/14, near Bilal masjid, Qazigalli, Golconda, Hyderabad",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": " near Bilal masjid, Qazigalli, Golconda, Hyderabad",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "",
+            "AREA_MANDAL": "Golconda",
+            "DISTRICT": "HYDERABAD",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "Swetha Tatapudi",
+          "PERSON_AGE": 28,
+          "GENDER": "Female",
+          "FIR_NUM": "325/2026",
+          "CRIME_ID": "6ab1870bd6935679edc5c2f0",
+          "FIR_DATE": "2026-09-21T15:30:00.000Z",
+          "BRIEF_FACTS": "IN THE COURT OF HON`BLE VII TH ADDL.CHIEF JUDICIAL MAGISTRATE\nAT NAMPALLY, HYD\n\nHonoured Sir/ Madam,\nToday i.e. on 21-09-2026 at 21:00 hours, an English written complaint was received from Bera Santosh Kumar, S/o Bera Satyanarayana, Age: 33 years, Occupation: Running own cab, Caste: BC-A (Neyyala), R/o: 16-1-24/132 Srt, Vandana Nilayam, Near Ramalayam Temple, Saidabad Colony, Saidabad \u2013 500059. Native of village Bikkavolu, East Godavari District, Andhra Pradesh, Ph:no: 9701882515, Email: berasantosh.1204@gmail.com. Which facts are as follows.   \nThe brief facts of the case are that, on 21-09-2026 at 21:00 hours, an English written complaint was received from Bera Santosh Kumar, S/o Bera Satyanarayana, Age: 33 years, Occupation: Running own cab, Caste: BC-A (Neyyala), R/o: 16-1-24/132 Srt, Vandana Nilayam, Near Ramalayam Temple, Saidabad Colony, Saidabad \u2013 500059. Native of village Bikkavolu, East Godavari District, Andhra Pradesh, Ph:no: 9701882515, Email: berasantosh.1204@gmail.com. The complainant stated that he was married to Swetha Tatapudi, Age: 28 years, on 13/06/2019. They have been residing in Hyderabad for the past 3 years. She has been working at Kotak Mahindra Bank as Deputy Manager at the Dilsukhnagar Branch for the last 7 months. For the past 2 months, she was being distance from him without a proper reason. On 20/09/2026, they had a little dispute regarding not eating food properly, so the complainant decided to take her to his native village on the same day at 20:30 hours, they started from home with luggage. On the way, he realized that he had forgotten his specs, so he returned to collect them within 5 minutes, he asked her to wait in the car while he went inside his home to collect the specs.  When he returned to the car, she was missing from the vehicle. She left without taking any luggage and carried only her phone. He tried calling her immediately, but she did not answer his call. At around 22:00 hours, her mobile phone was switched off  and till now remains the same,  her mobile number 9989079189 . He searched for her in the surrounding streets but could not find her. He also informed her parents and checked for updates to see if she had reached their home, but she had not arrived there either. As of now, she has not returned home, so he came to file a complaint. While she left home she was wearing  a light green color dress , Height: 5.5  feet, Complexion: fair, Languages Known: Telugu, English and Hindi. Therefore, he requests you to kindly take necessary action as per the law\nMissing person details: Swetha Tatapudi, W/o: Bera Santosh Kumar, Age: 28 years, R/o: 16-1-24/132 Srt, Vandana Nilayam, Near Ramalayam Temple, Saidabad Colony, Saidabad \u2013 500059, Height: 5'5\" feet, Complexion: Fair, Languages known: Telugu, English and Hindi. Wearing Clothes: light green color dress.\nReceived on 21-09-2026 at 21:00 hrs\nAs per the contents of the complaint, I registered a case in Cr. No. 325/2026 U/H Woman Missing and investigation entrusted to ASI L Vijay Kanth. \n                                                                                                        \n\t\t\t\tSd/- \n                        B. Gnaneshwar \n                 SI of Police, PS Saidabad. \n\n// THE ORIGINAL ENGLISH WRITTEN COMPLAINT IS ENCLOSED WITH THIS //\n",
+          "ACTS_SECTIONS": "Woman Missing",
+          "IO_NAME": "LAVUDI VIJAYAKANTH",
+          "IO_RANK": "ASI",
+          "IO_PAO_CODE": "2593637",
+          "PS_NAME": "SAIDABAD PS(Hyderabad)",
+          "DISTRICT": "Hyderabad",
+          "PERSON": "6ab18952d6935674f4c5c7e5",
+          "COMPLAINANT_NAME": "Bera Santosh Kumar",
+          "PERSON_DATE": "2026-09-20T15:00:00.297Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab18952d6935667dcc5c7e7",
+              "mimeType": "image/jpeg",
+              "name": "WhatsApp Image 2026-09-21 at 22.21.35.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/768013ba-c32e-4238-8388-25938dff5a5e/content?attachment=false&alf_ticket=TICKET_f551ede8b532f3f010a6a29ec90f15f5d06abcd1",
+              "fileId": "768013ba-c32e-4238-8388-25938dff5a5e",
+              "dateUploaded": "2026-09-21T19:45:22.790Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "16-1-24/132 Srt, Vandana Nilayam",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": "Saidabad Colony",
+            "LANDMARK_MILESTONE": "Near Ramalayam Temple",
+            "LOCALITY_VILLAGE": "",
+            "AREA_MANDAL": "Saidabad",
+            "DISTRICT": "HYDERABAD",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "Bashaboina Umesh",
+          "PERSON_AGE": 28,
+          "GENDER": "Male",
+          "FIR_NUM": "523/2026",
+          "CRIME_ID": "6ab151ed6ad703882c0ea43d",
+          "FIR_DATE": "2026-09-21T14:30:11.372Z",
+          "BRIEF_FACTS": "\nIN THE COURT OF HON'BLE I ADDL JUDICIAL FIRST CLASS MAGISTRATE AT KHAMMAM\nHonoured Madam/Sir,\n                 Occurred on 16.09.2026 at 21:30 hrs at Sundaraiah Colony Indiranagar, Khammam Urban, Khammam and reported on 21.09.2026 at 20:00 hrs by the complainant  Bashaboina Pravalika W/o Umesh, 21 yrs, Mudhiraj, House wife R/o Sundaraiah Colony Indiranagar, Khammam Urban, Khammam, where in the missing man i.e Husband of the complainant namely Bashaboina Umesh S/o Upendar, 28 yrs, Mudhiraj, Auto driver, R/o Sundaraiah Colony Indiranagar, Khammam left from the house without intimating to anyone and did not return to the house. Where about are not known till reporting the matter at PS. Due to family disputes. The descriptive particulars of the missing person, i.e height 6.0 feet\u2019s, complexion is black, Face type is oval and wear blue colour shirt & black colour pant when he left from the house. Case is UI to trace out the Missing Man.",
+          "ACTS_SECTIONS": "Man Missing",
+          "IO_NAME": "VENKATESH PARSIKA",
+          "IO_RANK": "SI",
+          "IO_PAO_CODE": "3101187",
+          "PS_NAME": "Khammam 2 Town PS(Khammam)",
+          "DISTRICT": "Khammam",
+          "PERSON": "6ab15320d9241320b930177c",
+          "COMPLAINANT_NAME": "Bashaboina Pravalika",
+          "PERSON_DATE": "2026-09-16T16:00:00.773Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab15320d92413b56b30177f",
+              "mimeType": "image/jpeg",
+              "name": "523-Photo.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/8bad3a94-46a9-4de4-b857-76965543592d/content?attachment=false&alf_ticket=TICKET_f551ede8b532f3f010a6a29ec90f15f5d06abcd1",
+              "fileId": "8bad3a94-46a9-4de4-b857-76965543592d",
+              "dateUploaded": "2026-09-21T15:54:08.511Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "Sundaraiah Colony Indiranagar, Khammam",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": "Sundaraiah Colony Indiranagar, Khammam",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "Indhira Nagar",
+            "AREA_MANDAL": "Khammam Urban",
+            "DISTRICT": "KHAMMAM",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "507002",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "C. Venkatesh",
+          "PERSON_AGE": 37,
+          "GENDER": "Male",
+          "FIR_NUM": "369/2026",
+          "CRIME_ID": "6ab151513a2140fa8e2c72a2",
+          "FIR_DATE": "2026-09-21T14:30:00.000Z",
+          "BRIEF_FACTS": "IN THE COURT OF HON\u2019BLE VIII ADDL. CHIEF JUDICIAL MAGISTRATE \nAT HYDERABAD.\n------------------------------------------------------------------------------------------------------------\nHonoured Sir, \t\n\tThe brief facts of the case are that, on 21.09.2026 at 20:00 hours, an English written complaint was received from C. Pushpa Latha, W/o. C. Venkatesh, aged 30 years, Occ:Maid, R/o. H.No. 16-2-681/8, Adjacent Akshay Hotel, New Malakpet, Hyderabad, wherein she stated that her husband, C. Venkatesh, S/o. C. Marappa, aged 37 years, Occ: Auto Driver, R/o. H.No. 16-2-681/8, Adjacent Akshay Hotel, New Malakpet, Hyderabad, had left the house for his work on 20.09.2026  at about 09:40 AM and did not return home thereafter. She further stated that at about 06:00 PM, he was seen proceeding towards the Reliance Back side in his auto. Hence request to take necessary action as per law.\nMissing Person Details:\nName: C. Venkatesh\nS/o. C. Marappa\nFace Shape: Oval\nComplexion: Light Brown\nHeight: 5.6 ft\nClothes worn: Orange Shirt, Khaki Pant\nLanguages Known: Telugu, Hindi, Kannada\nSd/-\nC. Pushpa Latha\n9182748702\n9014363990\n// Original English written Compliant is enclosed //\n\nReceived On 21.09.2026 at 20:00 hrs\nAs per the contents of the above Complaint, I, I. Kalpana, SI of Police, Chaderghat Police Station, registered a case in Cr. No. 369/2026 U/h. Man Missing and casefile handed over to Sri. V. Narasimha, ASI for further investigation.\n\nSd/-\nI. Kalpana,\nSub-Inspector of police\nP.S. Chaderghat, Hyd.",
+          "ACTS_SECTIONS": "Man Missing",
+          "IO_NAME": "V NARASIMHA",
+          "IO_RANK": "ASI",
+          "IO_PAO_CODE": "2508001",
+          "PS_NAME": "CHADERGHAT PS(Hyderabad)",
+          "DISTRICT": "Hyderabad",
+          "PERSON": "6ab1575ea46202d1fda6198c",
+          "COMPLAINANT_NAME": "C. Pushpa Latha",
+          "PERSON_DATE": "2026-09-20T04:10:00.000Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab1575ea46202baeda6198e",
+              "mimeType": "image/jpeg",
+              "name": "WhatsApp Image 2026-09-21 at 9.40.03 PM.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/34c3b7b5-6896-4c6c-b5f6-c1dd5191f915/content?attachment=false&alf_ticket=TICKET_f551ede8b532f3f010a6a29ec90f15f5d06abcd1",
+              "fileId": "34c3b7b5-6896-4c6c-b5f6-c1dd5191f915",
+              "dateUploaded": "2026-09-21T16:12:14.530Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "H.No. 16-2-681/8, Adjacent Akshay Hotel, New Malakpet, Hyderabad,",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": "Malakpet",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "",
+            "AREA_MANDAL": "Amberpet",
+            "DISTRICT": "HYDERABAD",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "M. Mangamma",
+          "PERSON_AGE": 40,
+          "GENDER": "Female",
+          "FIR_NUM": "940/2026",
+          "CRIME_ID": "6ab1e40f27fdfc353123ac28",
+          "FIR_DATE": "2026-09-21T14:00:00.019Z",
+          "BRIEF_FACTS": "IN THE COURT OF HON' BLE VIII ADDITIONAL JUDICIAL MAGISTRATE OF FIRST CLASS AT MEDCHAL\n\nHonored,\nOccurred on 19.09.2026 at 16:40 hours at Block No. 10/808, 2BHK, Dundigal and reported on 21.09.2026 at 19:30 hours by complaint Sri. M. John, S/o M. Yadaiah, Age: 20 Years, Occ: Student, Caste: SC-Madiga, R/o: Block No. 10/808, 2BHK, Dundigal, GM-Dundigal Mandal, Medchal District, wherein he stated that on 19.09.2026 at 15:00 hours, a small quarrel took place between his mother M. Mangamma, W/o M. Yadaiah, Age: 40 Years, Occ: Housewife, and father. Thereafter, they remained silent, and the complainant went out of the house. At about 16:40 hours, when he returned home, he found that his mother was missing from the house. He and his family members searched for her at nearby places and made efforts to trace her, but they could not find her. The missing woman is described as being approximately 5 feet 4 inches in height, dark in complexion, and conversant in Telugu and Hindi languages. Hence, the FIR.\n(The original Petition enclosed).\nReceived On 21.09.2026 at 19:30 hours\nAs per the contents of above complaint, I, B. Rambabu, SIP registered a case in Cr. No. 940/2026 U/s Woman Missing and investigation entrusted to Sri. B. Venkateswarlu, HC-1449.\n\nSd/-\nStation House officer,\nDundigal PS.\n",
+          "IO_NAME": "BODIPUDI VENKATESWARLU",
+          "IO_RANK": "HC",
+          "IO_PAO_CODE": "1805534",
+          "PS_NAME": "Dundigal PS(Cyberabad)",
+          "DISTRICT": "Cyberabad",
+          "PERSON": "6ab1e4c727fdfc0fea23adcd",
+          "COMPLAINANT_NAME": "Sri. M. John",
+          "PERSON_DATE": "2026-09-19T11:10:00.299Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab1e4c727fdfcc10e23adcf",
+              "mimeType": "image/jpeg",
+              "name": "940-2026 Photo.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/be6b7b03-2d45-4faa-86c8-1d6030ddccf8/content?attachment=false&alf_ticket=TICKET_0234152c3b8e0b47ee56becd3f6ef1b7206b3fef",
+              "fileId": "be6b7b03-2d45-4faa-86c8-1d6030ddccf8",
+              "dateUploaded": "2026-09-22T02:15:35.130Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "Block No. 10/808, 2BHK, Dundigal",
+            "STREET_ROAD_NO": "Block No. 10/808, 2BHK, Dundigal",
+            "WARD_COLONY": "Block No. 10/808, 2BHK, Dundigal",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "",
+            "AREA_MANDAL": "Gandimaisamma Dundigal",
+            "DISTRICT": "MEDCHAL MALKAJGIRI",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "",
+            "JURISDICTION_PS": ""
+          }
+        },
+        {
+          "PERSON_NAME": "Srinivas kudukala",
+          "PERSON_AGE": 40,
+          "GENDER": "Male",
+          "FIR_NUM": "100/2026",
+          "CRIME_ID": "6ab1df56b7da0018cc4caefb",
+          "FIR_DATE": "2026-09-21T14:00:00.000Z",
+          "BRIEF_FACTS": "Occurred on 20-09-2026 at about 18:00 hrs at Neelwai Village and reported on 21-09-2026 at 19:30 hrs  by the complainant namely Kodukala Sharada, W/o Kodukala Srinivas, age 30 years, caste Netakani, R/o Neelwai Village, stated that her husband namely Kodukala Srinivas, age:40 years, caste Netakani, occ: Agril, R/o Neelwai Village, left the house on 29-09-2026 at about 18:00 hrs stating that he was going to Mancherial to meet his friend Sheshu and boarded a bus. On the same night, when the complainant contacted him over phone and enquired about his whereabouts, he stated that he was at his friend's house in Mancherial and would return home in the early morning. However, he did not return home even by the today evening. She searched for him at nearby places and with relatives and friends, but his whereabouts could not be traced. At the time of leaving, he was carrying a mobile phone bearing No. 9705253528. His height about 5 feet 8 inches, fair complexion, and he was wearing white-coloured pants. As such she requested to take necessary action.",
+          "IO_NAME": "KOMATI EBENEZER",
+          "IO_RANK": "HC",
+          "IO_PAO_CODE": "1304302",
+          "PS_NAME": "Neelwai PS(Ramagundam )",
+          "DISTRICT": "Ramagundam ",
+          "PERSON": "6ab1e05aa2ff2c9e892a143c",
+          "COMPLAINANT_NAME": "Sharadha Kudukala",
+          "PERSON_DATE": "2026-09-20T12:30:29.437Z",
+          "PERSON_MEDIA": [
+            {
+              "_id": "6ab1e05aa2ff2cb2632a143e",
+              "mimeType": "image/jpeg",
+              "name": "100 missing photo.jpeg",
+              "url": "http://10.20.2.213:8080/alfresco/api/-default-/public/alfresco/versions/1/nodes/a5fcf852-1ef2-4f0a-817b-ebf53f47ce4e/content?attachment=false&alf_ticket=TICKET_0234152c3b8e0b47ee56becd3f6ef1b7206b3fef",
+              "fileId": "a5fcf852-1ef2-4f0a-817b-ebf53f47ce4e",
+              "dateUploaded": "2026-09-22T01:56:42.205Z"
+            }
+          ],
+          "PHYSICAL_FEATURES": {
+            "BUILD": "",
+            "EYES": "",
+            "HAIR": "",
+            "FACE": "",
+            "COLOR": "",
+            "EAR": "",
+            "MOLE": ""
+          },
+          "PRESENT_ADDRESS": {
+            "HOUSE_NO": "",
+            "STREET_ROAD_NO": "",
+            "WARD_COLONY": "Neelwai",
+            "LANDMARK_MILESTONE": "",
+            "LOCALITY_VILLAGE": "Neelwai",
+            "AREA_MANDAL": "Vemanpalle",
+            "DISTRICT": "MANCHERIAL",
+            "STATE_UT": "TELANGANA",
+            "COUNTRY": "India",
+            "RESIDENCY_TYPE": "",
+            "PIN_CODE": "504214",
+            "JURISDICTION_PS": ""
+          }
+        }
+      ],
+      "totalCount": 5823,
+      "males": 2876,
+      "females": 2943,
+      "others": 4
+    }
+  }
+}

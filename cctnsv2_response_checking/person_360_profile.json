@@ -1,0 +1,652 @@
+{
+  "person_id": "6542b1110559fea26e841a1b",
+  "person_name": "Vagmari",
+  "crime_id": "6542aee3ca7ff80d088ef259",
+  "ps_hierarchy": {
+    "ADG_NAME": "ADG L&O",
+    "ADG_CODE": "2000999",
+    "ZONE_NAME": "",
+    "ZONE_CODE": "",
+    "RANGE_NAME": "",
+    "RANGE_CODE": "",
+    "DIST_NAME": "Malkajgiri",
+    "DIST_CODE": "37015500",
+    "SUB_ZONE_NAME": "Malkajgiri Zone",
+    "SUB_ZONE_CODE": "2022429",
+    "SDPO_NAME": "Jawaharnagar Division",
+    "SDPO_CODE": "37015301",
+    "CIRCLE_NAME": "",
+    "CIRCLE_CODE": "",
+    "PS_NAME": "Jawaharnagar PS",
+    "PS_CODE": "2022006"
+  },
+  "accused_info": {
+    "CRIME_ID": "6542aee3ca7ff80d088ef259",
+    "ACCUSED_ID": "6542b5f0fb24f53394fb0a51",
+    "IS_CCL": false,
+    "PERSON_ID": "6542b1110559fea26e841a1b",
+    "ACCUSED_STATUS": "Arrest By Police and Remanded",
+    "ACCUSED_CODE": "A2",
+    "TYPE": "Accused",
+    "SEQ_NUM": "202200623116167002",
+    "PHYSICAL_FEATURES": {
+      "BEARD": "",
+      "BUILD": "",
+      "COLOR": "",
+      "EAR": "",
+      "EYES": "",
+      "FACE": "",
+      "HAIR": "",
+      "HEIGHT": "",
+      "LEUCODERMA": "",
+      "MOLE": "",
+      "MUSTACHE": "",
+      "NOSE": "",
+      "TEETH": ""
+    }
+  },
+  "arrest_info": {
+    "CRIME_ID": "6542aee3ca7ff80d088ef259",
+    "ACCUSED_SEQ_NO": "202200623116167002",
+    "ACCUSED_CODE": "A2",
+    "PERSON_ID": "6542b1110559fea26e841a1b",
+    "ACCUSED_TYPE": "Accused",
+    "IS_ARRESTED": true,
+    "ARRESTED_DATE": "2023-11-01 21:30:00",
+    "IS_41A_CRPC": false,
+    "IS_41A_EXPLAIN_SUBMITTED": false,
+    "DATE_OF_ISSUE_41A": "",
+    "IS_CCL": false,
+    "IS_APPREHENDED": false,
+    "IS_ABSCONDING": false,
+    "IS_DIED": false,
+    "DATE_CREATED": "2023-11-01T20:02:43.376Z",
+    "DATE_MODIFIED": "2024-01-04T07:33:39.672Z"
+  },
+  "person_details": {
+    "PERSON_ID": "6542b1110559fea26e841a1b",
+    "PERSONAL_DETAILS": {
+      "NAME": "Sri. Arjun ",
+      "SURNAME": "Vagmari ",
+      "ALIAS": "",
+      "FULL_NAME": "Sri. Arjun Vagmari",
+      "RELATION_TYPE": "Father",
+      "RELATIVE_NAME": "Nagappa",
+      "GENDER": "Male",
+      "IS_DIED": false,
+      "DATE_OF_BIRTH": "",
+      "AGE": 35,
+      "OCCUPATION": "Driver",
+      "EDUCATION_QUALIFICATION": "Illiterate",
+      "CASTE": "Madiga",
+      "SUB_CASTE": "",
+      "RELIGION": "",
+      "NATIONALITY": "India",
+      "DESIGNATION": "",
+      "PLACE_OF_WORK": ""
+    },
+    "PRESENT_ADDRESS": {
+      "HOUSE_NO": "Venkateshwara Colony,",
+      "STREET_ROAD_NO": "",
+      "WARD_COLONY": "Near Indiramma Statue",
+      "LANDMARK_MILESTONE": " Balaji Nagar",
+      "LOCALITY_VILLAGE": "Balajinagar",
+      "AREA_MANDAL": "Kapra",
+      "DISTRICT": "MEDCHAL MALKAJGIRI",
+      "STATE_UT": "TELANGANA",
+      "COUNTRY": "",
+      "RESIDENCY_TYPE": "",
+      "PIN_CODE": "",
+      "JURISDICTION_PS": ""
+    },
+    "PERMANENT_ADDRESS": {
+      "HOUSE_NO": "Venkateshwara Colony,",
+      "STREET_ROAD_NO": "",
+      "WARD_COLONY": "Near Indiramma Statue",
+      "LANDMARK_MILESTONE": " Balaji Nagar",
+      "LOCALITY_VILLAGE": "Balajinagar",
+      "AREA_MANDAL": "Kapra",
+      "DISTRICT": "MEDCHAL MALKAJGIRI",
+      "STATE_UT": "TELANGANA",
+      "COUNTRY": "",
+      "RESIDENCY_TYPE": "",
+      "PIN_CODE": "",
+      "JURISDICTION_PS": ""
+    },
+    "CONTACT_DETAILS": {
+      "PHONE_NUMBER": "9390561180",
+      "COUNTRY_CODE": "",
+      "EMAIL_ID": ""
+    },
+    "IDENTITY_DETAILS": [],
+    "MEDIA": [],
+    "DATE_CREATED": "2023-11-01T20:12:01.853Z",
+    "DATE_MODIFIED": "2024-01-04T07:03:26.535Z"
+  },
+  "crime_details": {
+    "CRIME_ID": "6542aee3ca7ff80d088ef259",
+    "PS_CODE": "2022006",
+    "FIR_NUM": "1161/2023",
+    "FIR_REG_NUM": "2022006231161",
+    "FIR_TYPE": "Regular",
+    "ACTS_SECTIONS": "8c NDPSA, r/w 20(b)(ii)(A) NDPSA",
+    "FIR_DATE": "2023-11-01T15:45:00.904Z",
+    "CASE_STATUS": "PT Cases",
+    "MAJOR_HEAD": "Narcotics-Small /Intermediate Quantity",
+    "MINOR_HEAD": "special & local laws",
+    "CRIME_TYPE": "Narcotics",
+    "IO_NAME": "RAVULAKOLLU LAXMAN",
+    "IO_RANK": "SI",
+    "IO_MOBILE": "7382030252",
+    "BRIEF_FACTS": "IN THE COURT OF HON\u2019BLE X ADDITIONAL JUNIOR CIVIL JUDGE- CUM- X ADDITIONAL METROPOLITAN MAGISTRATE, MEDCHAL MALKAJGIRI DISTRICT AT MEDCHAL\nHonoured Sir,\n            To-day i.e., on 01.11.2023 at 21:15 hrs received a petition from Through Telangana State Police Sri B. Venu Madhav, Sub Inspector of Police, Jawaharnagar Police Station, Rachakonda Commissionerate. Cell: 8712580052. In which reads as follows.\n\nThis is a Suo-moto case; Facts of the case are that the complainant Sri B. Venu Madhav, SIP stated that on 01.11.2023 at 17:00 hours, while he was conducting Vehicle Checking at Vikalangula Colony, Balajinagar, he found two persons suspiciously moving on Activa bike br.No TS08GE8903. On seeing the SI and staff, they tried to escape from the spot, however SI and staff caught the persons at 1715 hrs. Later SI and Staff searched the bike and found 250 gms of Dry Ganja in the dickey of the bike. Thereafter he informed the same to superior officers and secured two panchayathdars and briefed them to act as mediators. On enquiry they disclosed their names as 1) Tudumu Chitti Babu @ Chitti S/o Devaiah, age: 31 yrs, Occ: Painting, R/o; Santosh Nagar, Balajinagar, Kapra (M), Medchal (D). Cell: 8897459432, 2). Vagmari. Arjun S/o Nagappa, age: 35 yrs, Occ: Driver, Caste: SC-Madiga, R/o Near Indiramma Statue, Market Lane, Venkateshwara Balajinagar, Kapra Mandal, Medchal District. Cell: 9390561180. Then complainant recorded confession cum seizure panchanama in the presence of mediators in which they stated that today morning hours they purchased 250 gms of Ganja from Sonu, R/o; Balajinagar in order to sell the same to the needy persons and seized Dry Ganja 250 Grams and Activa Bike Br.No TS08GE8903 from the accused persons, affixed signed Panch chits on it. Hence complainant produced the accused persons in Jawaharnagar PS along with seized material and requested to take necessary action against them as per law. Hence the FIR.\n\n    /THE ORIGINAL DETAILED COMPLAINT IS ENCLOSED HERE WITH/\n     Received on 01.11.2023 at 21:15 hrs: - \n             As per the content of the above petition a case registered in Cr. No. 1161/2023 U/s 8(c) r/w 20 (b) (ii)(A) of NDPS Act and took up the investigation.\n \t\t\tSd/-\n                 (R. Laxman)\n           Sub-Inspector of Police,\n            PS: Jawahar Nagar,           \n      Rachakonda Commissionarate.\n  Copy Submitted W/Cs:\n 1). Through ACP Kushaiguda Division, Rachakonda Commissionerate. \n 2). The DCP, Malkajgiri Zone, Rachakonda Commissionerate &\n 3). The Commissioner of Police, Rachakonda Commissionerate for favour of             \n       Information.\n",
+    "FIR_COPY": "a3ef650c-ffea-4fe4-8122-709dee17baa9",
+    "OCCURRENCE_DATE": {
+      "FROM_DATE": "2023-11-01T11:30:00.092Z",
+      "TO_DATE": "",
+      "PRIOR_TO_DATE": ""
+    },
+    "PLACE_OF_OFFENCE": {
+      "LIMITS": "inside",
+      "BEAT_NO": "",
+      "HOUSE_NO": "Vikalangula Colony",
+      "STREET_ROAD_NO": "",
+      "WARD_COLONY": "Balajinagar",
+      "LANDMARK_MILESTONE": "",
+      "AREA_MANDAL": "Kapra",
+      "DISTRICT": "",
+      "STATE_UT": "",
+      "PIN_CODE": "",
+      "LONGITUDE": "",
+      "LATITUDE": "",
+      "JURISDICTION_PS": ""
+    },
+    "GD": {
+      "ENTRY_NUM": "23",
+      "ENTRY_DATE": "2023-11-01T15:45:00.302Z",
+      "ENTRY_TYPE": "FIR/Criminal case"
+    },
+    "COURT_NAME": "Xth Additional Metropolitan Magistrate At Medchal",
+    "COMPLAINANT_ID": "6542b04f483fc553c45946ad",
+    "DATE_CREATED": "2023-11-01T20:02:43.374Z",
+    "DATE_MODIFIED": "2026-08-24T09:29:31.636Z"
+  },
+  "interrogation_reports": [
+    {
+      "INTERROGATION_REPORT_ID": "65965d289bb3f13431ed3c3c",
+      "CRIME_ID": "6542aee3ca7ff80d088ef259",
+      "PERSON_ID": "6542b1110559fea26e841a1b",
+      "MEDIA": [],
+      "PHYSICAL_FEATURES": {
+        "BEARD": "Bearded",
+        "BUILD": "Normal",
+        "BURN_MARKS": "OTHERS",
+        "COLOR": "Fair",
+        "DEFORMITIES_OR_PECULIARITIES": "Others",
+        "DEFORMITIES": "Others",
+        "EAR": "Others",
+        "EYES": "Black",
+        "FACE": "Normal",
+        "HAIR": "Black",
+        "HEIGHT": "5.1 - 5.5 ft",
+        "IDENTIFICATION_MARKS": "Others",
+        "LANGUAGE_OR_DIALECT": [
+          "Telugu"
+        ],
+        "LEUCODERMA": "others",
+        "MOLE": "Others",
+        "MUSTACHE": "Others",
+        "NOSE": "Normal Nose",
+        "SCAR": "OTHERS",
+        "TATTOO": "OTHERS",
+        "TEETH": "Normal Teeth"
+      },
+      "SOCIO_ECONOMIC_PROFILE": {
+        "LIVING_STATUS": "With family",
+        "MARITAL_STATUS": "Married",
+        "EDUCATION": "Illiterate",
+        "OCCUPATION": "Driver",
+        "INCOME_GROUP": "Middle Income Rs.5000 to Rs.10000"
+      },
+      "FAMILY_HISTORY": [
+        {
+          "PERSON_ID": "65965f0228ab677459e6c057",
+          "RELATION": "Father",
+          "FAMILY_MEMBER_PECULIARITY": "",
+          "CRIMINAL_BACKGROUND": false,
+          "IS_ALIVE": true,
+          "FAMILY_STAY_TOGETHER": true
+        }
+      ],
+      "ASSOCIATE_DETAILS": [],
+      "COMMISSION_OF_OFFENCE": {
+        "OFFENCE_TIME": "",
+        "OTHER_OFFENCE_TIME": ""
+      },
+      "LOCAL_CONTACTS": [],
+      "REGULAR_HABITS": [
+        "Consuming Liquor"
+      ],
+      "OTHER_REGULAR_HABITS": "",
+      "INDULGANCE_BEFORE_OFFENCE": [],
+      "OTHER_INDULGANCE_BEFORE_OFFENCE": "",
+      "MODUS_OPERANDI": [],
+      "SHELTER": [],
+      "PROPERTY_DISPOSAL": [],
+      "SHARE_OF_AMOUNT_SPENT": {
+        "SHARE_OF_AMOUNT_SPENT": "",
+        "OTHER_SHARE_OF_AMOUNT_SPENT": "",
+        "REMARKS": ""
+      },
+      "PREVIOUS_OFFENCES_CONFESSED": [],
+      "REGULARIZATION_OF_TRANSIT_WARRANTS": [],
+      "EXECUTION_OF_NBW": [],
+      "PENDING_NBW": [],
+      "SURETIES": [],
+      "DEFENCE_COUNSEL": [],
+      "JAIL_SENTENCE": [],
+      "NEW_GANG_FORMATION": [],
+      "CONVICTION_ACQUITTAL": [],
+      "PRESENT_WHEREABOUTS": {
+        "IN_JAIL": {
+          "IS_IN_JAIL": false,
+          "FROM_WHERE_SENT_IN_JAIL": "",
+          "CRIME_NUM": "",
+          "DIST_UNIT": ""
+        },
+        "ON_BAIL": {
+          "IS_ON_BAIL": false,
+          "FROM_WHERE_SENT_ON_BAIL": "",
+          "CRIME_NUM": "",
+          "DATE_OF_BAIL": ""
+        },
+        "ABSCONDING": {
+          "IS_ABSCONDING": false,
+          "WANTED_IN_POLICE_STATION": "",
+          "CRIME_NUM": ""
+        },
+        "NORMAL_LIFE": {
+          "IS_NORMAL_LIFE": false,
+          "EKING_LIVELIHOOD_BY_LABOR_WORK": ""
+        },
+        "REHABILITATED": {
+          "IS_REHABILITATED": false,
+          "REHABILITATION_DETAILS": ""
+        },
+        "DEAD": {
+          "IS_DEAD": false,
+          "DEATH_DETAILS": ""
+        },
+        "FACING_TRIAL": {
+          "IS_FACING_TRIAL": false,
+          "PS_NAME": "",
+          "CRIME_NUM": ""
+        }
+      },
+      "INTERROGATION_REPORT": [
+        "94008e67-3ad8-41fb-9249-0a04dfe531b1"
+      ],
+      "TYPES_OF_DRUGS": [
+        {
+          "TYPE_OF_DRUG": "Dry Ganga",
+          "QUANTITY": "250",
+          "PURCHASE_AMOUN_IN_INR": "",
+          "MODE_OF_PAYMENT": "",
+          "MODE_OF_TRANSPORT": "",
+          "SUPPLIER_PERSON_ID": "",
+          "RECEIVERS_PERSON_ID": ""
+        }
+      ],
+      "CONSUMER_DETAILS": [
+        {
+          "CONSUMER_PERSON_ID": "65965e38dd6722bddb0d52a4",
+          "PLACE_OF_CONSUMPTION": "",
+          "OTHER_SOURCES": "",
+          "OTHER_SOURCES_PHONE_NO": "",
+          "AADHAR_CARD_NUMBER": "",
+          "AADHAR_CARD_NUMBER_PHONE_NO": ""
+        }
+      ],
+      "TIME_SINCE_MODUS_OPERANDI": "",
+      "FINANCIAL_HISTORY": [],
+      "SIM_DETAILS": [
+        {
+          "PHONE_NUMBER": "9390561180",
+          "SDR": "",
+          "IMEI": "",
+          "TRUE_CALLER_NAME": "",
+          "PERSON_ID": ""
+        }
+      ],
+      "DOPAMS_LINKS": [],
+      "DATE_CREATED": "2024-01-04T07:24:24.686Z",
+      "DATE_MODIFIED": "2024-01-04T07:32:26.000Z"
+    }
+  ],
+  "mo_seizures": [],
+  "property_details": [],
+  "chargesheets": [
+    {
+      "uploadChargeSheet": {
+        "fileId": "e47e9dc2-76ed-49e4-8dd6-34d8d8ccd217"
+      },
+      "chargeSheetId": "65965fa3dd6722bcf30d6ac3",
+      "crimeId": "6542aee3ca7ff80d088ef259",
+      "chargeSheetNo": "1105/2023",
+      "chargeSheetDate": "2024-01-04T07:32:36.328Z",
+      "chargeSheetType": "Original",
+      "courtName": "Xth Additional Metropolitan Magistrate At Medchal",
+      "isCcl": false,
+      "isEsigned": false,
+      "chargeSheetNoForIcjs": "202200623116101",
+      "accusedParticulars": [
+        {
+          "requestedForNBW": false,
+          "_id": "65965fd1eec4a3f98fff6504",
+          "accusedPersonId": "6542b0a36ffbc5dd53cb85f4",
+          "chargeStatus": "Charged",
+          "reasonForNoCharge": ""
+        },
+        {
+          "requestedForNBW": false,
+          "_id": "65965fd1eec4a31b1aff6505",
+          "accusedPersonId": "6542b1110559fea26e841a1b",
+          "chargeStatus": "Charged",
+          "reasonForNoCharge": ""
+        },
+        {
+          "requestedForNBW": false,
+          "_id": "65965fd1eec4a37b30ff6506",
+          "accusedPersonId": "6542b17ffb24f58a42fb0675",
+          "chargeStatus": "Absconding",
+          "reasonForNoCharge": ""
+        }
+      ],
+      "actsAndSections": [
+        {
+          "section": [
+            "8c"
+          ],
+          "rwRequired": false,
+          "_id": "65965fa3dd672259260d6ac8",
+          "actDescription": "Narcotic Drugs And Psychotropic Substances Act",
+          "sectionDescription": "false",
+          "graveParticulars": ""
+        },
+        {
+          "section": [
+            "20(b)(ii)(A)"
+          ],
+          "rwRequired": true,
+          "_id": "65965fa3dd6722c3900d6ac9",
+          "actDescription": "Narcotic Drugs And Psychotropic Substances Act",
+          "sectionDescription": "false",
+          "graveParticulars": ""
+        },
+        {
+          "section": [
+            "8c"
+          ],
+          "rwRequired": false,
+          "_id": "65965fa3dd672282160d6acb",
+          "actDescription": "Narcotic Drugs And Psychotropic Substances Act",
+          "sectionDescription": "false",
+          "graveParticulars": ""
+        },
+        {
+          "section": [
+            "20(b)(ii)(A)"
+          ],
+          "rwRequired": true,
+          "_id": "65965fa3dd672201fd0d6acc",
+          "actDescription": "Narcotic Drugs And Psychotropic Substances Act",
+          "sectionDescription": "false",
+          "graveParticulars": ""
+        },
+        {
+          "section": [
+            "8c"
+          ],
+          "rwRequired": false,
+          "_id": "65965fa3dd672234b70d6ace",
+          "actDescription": "Narcotic Drugs And Psychotropic Substances Act",
+          "sectionDescription": "false",
+          "graveParticulars": ""
+        },
+        {
+          "section": [
+            "20(b)(ii)(A)"
+          ],
+          "rwRequired": true,
+          "_id": "65965fa3dd67224ea50d6acf",
+          "actDescription": "Narcotic Drugs And Psychotropic Substances Act",
+          "sectionDescription": "false",
+          "graveParticulars": ""
+        }
+      ],
+      "dateCreated": "2024-01-04T07:34:59.777Z",
+      "dateModified": "2024-01-04T07:35:54.930Z"
+    }
+  ],
+  "update_chargesheets": [
+    {
+      "takenOnFile": {
+        "date": "2024-02-20T03:14:57.986Z",
+        "caseType": "CC",
+        "courtCaseNo": "170/2024"
+      },
+      "updateChargeSheetId": "65d56ac0ddf0674f372e56ac",
+      "crimeId": "6542aee3ca7ff80d088ef259",
+      "chargeSheetNo": "1105/2023",
+      "chargeSheetDate": "2024-01-04T07:32:36.328Z",
+      "chargeSheetStatus": "Taken on File",
+      "dateCreated": "2024-02-21T03:15:12.673Z"
+    }
+  ],
+  "case_property": [],
+  "stolen_automobiles": [],
+  "person_specific_endpoints_audit": [
+    {
+      "id": 1,
+      "endpoint": "GET /api/DOPAMS/ping",
+      "used_for_person": "YES (System)",
+      "status": "200 OK",
+      "data_obtained": "API Gateway Online (Verified connection to DOPAMS server)"
+    },
+    {
+      "id": 2,
+      "endpoint": "GET /api/DOPAMS/crimes/disposal",
+      "used_for_person": "NO (Pool)",
+      "status": "200 OK",
+      "data_obtained": "Checked batch disposal list (1 case in system; subject's crime not yet disposed)"
+    },
+    {
+      "id": 3,
+      "endpoint": "GET /api/DOPAMS/crimes/disposal/6542aee3ca7ff80d088ef259",
+      "used_for_person": "YES (Crime Check)",
+      "status": "400 Not Disposed",
+      "data_obtained": "Case Active / Pending Court Trial (Crime is currently Taken on File, not disposed)"
+    },
+    {
+      "id": 4,
+      "endpoint": "GET /api/DOPAMS/crimes",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Discovered subject's FIR record among 21 crimes in date range"
+    },
+    {
+      "id": 5,
+      "endpoint": "GET /api/DOPAMS/crimes/6542aee3ca7ff80d088ef259",
+      "used_for_person": "YES (Direct Crime)",
+      "status": "200 OK",
+      "data_obtained": "FIR No: 1161/2023, Sections: 8c NDPSA, r/w 20(b)(ii)(A) NDPSA, Reg Date: 2023-11-01T15:45:00.904Z"
+    },
+    {
+      "id": 6,
+      "endpoint": "GET /api/DOPAMS/master-data/hierarchy",
+      "used_for_person": "YES (PS Mapping)",
+      "status": "200 OK",
+      "data_obtained": "Mapped PS Code 2022006 -> Station: Jawaharnagar PS, District: Malkajgiri, Zone: "
+    },
+    {
+      "id": 7,
+      "endpoint": "GET /api/DOPAMS/accused",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Matched subject's accused record among 229 accused in date range"
+    },
+    {
+      "id": 8,
+      "endpoint": "GET /api/DOPAMS/accused/6542aee3ca7ff80d088ef259",
+      "used_for_person": "YES (Direct Subject)",
+      "status": "200 OK",
+      "data_obtained": "Accused Code: A2, Status: Arrest By Police and Remanded, CCL: No"
+    },
+    {
+      "id": 9,
+      "endpoint": "GET /api/DOPAMS/arrests",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Matched subject's arrest record among 229 arrests in date range"
+    },
+    {
+      "id": 10,
+      "endpoint": "GET /api/DOPAMS/arrests/6542aee3ca7ff80d088ef259",
+      "used_for_person": "YES (Direct Subject)",
+      "status": "200 OK",
+      "data_obtained": "Arrest Date: 2023-11-01 21:30:00, Is Arrested: True, 41A CrPC Notice: No"
+    },
+    {
+      "id": 11,
+      "endpoint": "GET /api/DOPAMS/mo-seizures",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Scanned 131 seizures across police stations for evidence linked to this FIR"
+    },
+    {
+      "id": 12,
+      "endpoint": "GET /api/DOPAMS/mo-seizures/6542aee3ca7ff80d088ef259",
+      "used_for_person": "NO (No Seizure)",
+      "status": "200 OK",
+      "data_obtained": "No physical seizures registered for this case"
+    },
+    {
+      "id": 13,
+      "endpoint": "GET /api/DOPAMS/person-details/6542b1110559fea26e841a1b",
+      "used_for_person": "YES (Direct KYC)",
+      "status": "200 OK",
+      "data_obtained": "Name: Vagmari, Age: 35, Relative: Nagappa, Address: None, Mobile: N/A"
+    },
+    {
+      "id": 14,
+      "endpoint": "GET /api/DOPAMS/property-details",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Scanned 17 property recovery records for matches in this crime"
+    },
+    {
+      "id": 15,
+      "endpoint": "GET /api/DOPAMS/property-details/6542aee3ca7ff80d088ef259",
+      "used_for_person": "NO (No Property)",
+      "status": "200 OK",
+      "data_obtained": "No property recovery records for this case"
+    },
+    {
+      "id": 16,
+      "endpoint": "GET /api/DOPAMS/interrogation-reports/v1/",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Scanned 185 statewide interrogation dossiers to locate this subject"
+    },
+    {
+      "id": 17,
+      "endpoint": "GET /api/DOPAMS/interrogation-reports/v1/6542aee3ca7ff80d088ef259",
+      "used_for_person": "YES (Direct Subject)",
+      "status": "200 OK",
+      "data_obtained": "Retrieved 1 Interrogation Report (Physical features, Socio-economic profile, Modus Operandi & Associates)"
+    },
+    {
+      "id": 18,
+      "endpoint": "GET /api/DOPAMS/chargesheets",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Scanned 21 court chargesheets to identify subject's chargesheet filing"
+    },
+    {
+      "id": 19,
+      "endpoint": "GET /api/DOPAMS/chargesheets/6542aee3ca7ff80d088ef259",
+      "used_for_person": "YES (Direct Filing)",
+      "status": "200 OK",
+      "data_obtained": "Chargesheet No: 1105/2023, Filing Date: 2024-01-04T07:32:36.328Z, Court: Xth Additional Metropolitan Magistrate At Medchal"
+    },
+    {
+      "id": 20,
+      "endpoint": "GET /api/DOPAMS/update-chargesheets",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Scanned 23 update chargesheets to identify court case numbers"
+    },
+    {
+      "id": 21,
+      "endpoint": "GET /api/DOPAMS/update-chargesheets/6542aee3ca7ff80d088ef259",
+      "used_for_person": "YES (Direct Trial)",
+      "status": "200 OK",
+      "data_obtained": "Court Trial Case No: 170/2024, Case Type: CC, Status: Taken on File"
+    },
+    {
+      "id": 22,
+      "endpoint": "GET /api/DOPAMS/case-property",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Scanned 49 case property records for court forwarding records"
+    },
+    {
+      "id": 23,
+      "endpoint": "GET /api/DOPAMS/case-property/6542aee3ca7ff80d088ef259",
+      "used_for_person": "NO (No Items)",
+      "status": "200 OK",
+      "data_obtained": "No case property forwarded to court for this case"
+    },
+    {
+      "id": 24,
+      "endpoint": "GET /api/DOPAMS/files/db921173-6d6d-491a-ab7a-9053ac8f56db",
+      "used_for_person": "YES (File Engine)",
+      "status": "200 OK",
+      "data_obtained": "Document attachment stream verified (1.1 MB PDF stream available for download)"
+    },
+    {
+      "id": 25,
+      "endpoint": "GET /api/DOPAMS/reports/missing-udb-persons/v1/",
+      "used_for_person": "NO (Cross-Check)",
+      "status": "200 OK",
+      "data_obtained": "Cross-checked 10 missing/UDB cases (Subject is confirmed Accused, not missing/unidentified)"
+    },
+    {
+      "id": 26,
+      "endpoint": "GET /api/DOPAMS/reports/arrest/arrest-particulars/v1/",
+      "used_for_person": "NO (Supervisory)",
+      "status": "200 OK",
+      "data_obtained": "Arrest statistical report checked (Aggregated senior officer reporting)"
+    },
+    {
+      "id": 27,
+      "endpoint": "GET /api/DOPAMS/reports/citizen/arrest/arrest-particulars/v1/",
+      "used_for_person": "YES (Public Record)",
+      "status": "200 OK",
+      "data_obtained": "Verified public transparency record published on Citizen Portal for this arrest category"
+    },
+    {
+      "id": 28,
+      "endpoint": "GET /api/DOPAMS/reports/stolen-automobiles",
+      "used_for_person": "YES (Discovery)",
+      "status": "200 OK",
+      "data_obtained": "Scanned stolen vehicle database for vehicle theft linkages"
+    },
+    {
+      "id": 29,
+      "endpoint": "GET /api/DOPAMS/reports/stolen-automobiles/6542aee3ca7ff80d088ef259",
+      "used_for_person": "NO (No Stolen Vehicle)",
+      "status": "200 OK",
+      "data_obtained": "No stolen automobile involved in this NDPS crime"
+    }
+  ]
+}

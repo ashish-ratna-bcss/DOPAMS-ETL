@@ -1,0 +1,61 @@
+{
+  "endpoint_id": 23,
+  "category": "Case Property",
+  "summary": "Get Case Property details by Crime ID",
+  "method": "GET",
+  "request_path": "/api/DOPAMS/case-property/6522bf667c0055345cba8814",
+  "request_url": "http://103.164.200.184:3000/api/DOPAMS/case-property/6522bf667c0055345cba8814",
+  "query_params": {},
+  "request_body": null,
+  "status_code": 200,
+  "duration_ms": 29,
+  "timestamp": "2026-09-22T12:00:23.898174",
+  "response": {
+    "status": true,
+    "data": [
+      {
+        "CASE_PROPERTY_ID": "654366e1014c405d4b43a87d",
+        "CASE_TYPE": "Material Objects",
+        "CRIME_ID": "6522bf667c0055345cba8814",
+        "MO_ID": "654361000ed12b13a681de96",
+        "STATUS": "Send To FSL",
+        "SEND_DATE": "2023-10-31T04:30:00.250Z",
+        "FORWARDING_THROUGH": "Court",
+        "COURT_NAME": "",
+        "FSL_COURT_NAME": "Special Mobile Court Judicial First Class Megistrate Khammam",
+        "FSL_REQUEST_ID": "",
+        "MEDIA": [
+          {
+            "FILE_ID": ""
+          }
+        ],
+        "CPR_NO": "",
+        "DIRECTION_BY_COURT": "",
+        "DETAILS_DISPOSAL": "",
+        "CPR_COURT_NAME": "",
+        "PLACE_DISPOSAL": "",
+        "DATE_DISPOSAL": "",
+        "RELEASE_ORDER_NO": "",
+        "RELEASE_DATE": "",
+        "RETURN_DATE": "",
+        "PLACE_CUSTODY": "",
+        "ASSIGN_CUSTODY": "",
+        "DATE_CUSTODY": "",
+        "FSL_NO": "SFSL(TS)/9651 NAR/1057/23",
+        "FSL_DATE": "2023-10-31T11:16:46.111Z",
+        "REPORT_RECEIVED": false,
+        "OPINION": "",
+        "OPINION_FURNISHED": "",
+        "STRENGTH_OF_EVIDENCE": "",
+        "PROPERTY_RECEIVED_BACK": false,
+        "EXPERT_TYPE": "",
+        "OTHER_EXPERT_TYPE": "",
+        "DATE_SENT_TO_EXPERT": "",
+        "COURT_ORDER_NUMBER": "",
+        "COURT_ORDER_DATE": "",
+        "DATE_CREATED": "2023-11-02T09:07:45.599Z",
+        "DATE_MODIFIED": "2024-01-03T11:17:07.259Z"
+      }
+    ]
+  }
+}

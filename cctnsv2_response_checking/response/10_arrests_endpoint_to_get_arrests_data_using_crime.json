@@ -1,0 +1,54 @@
+{
+  "endpoint_id": 10,
+  "category": "Arrests",
+  "summary": "Endpoint to get arrests data using crimeId",
+  "method": "GET",
+  "request_path": "/api/DOPAMS/arrests/62b53a7f447aa041707dce99",
+  "request_url": "http://103.164.200.184:3000/api/DOPAMS/arrests/62b53a7f447aa041707dce99",
+  "query_params": {},
+  "request_body": null,
+  "status_code": 200,
+  "duration_ms": 21,
+  "timestamp": "2026-09-22T12:00:19.450151",
+  "response": {
+    "status": true,
+    "data": [
+      {
+        "CRIME_ID": "62b53a7f447aa041707dce99",
+        "ACCUSED_SEQ_NO": "202407822013067001",
+        "ACCUSED_CODE": "A1",
+        "PERSON_ID": "62b53ccf6e2f9553d74c8f31",
+        "ACCUSED_TYPE": "Accused",
+        "IS_ARRESTED": true,
+        "ARRESTED_DATE": "2022-06-23 18:00:00",
+        "IS_41A_CRPC": false,
+        "IS_41A_EXPLAIN_SUBMITTED": false,
+        "DATE_OF_ISSUE_41A": "",
+        "IS_CCL": false,
+        "IS_APPREHENDED": false,
+        "IS_ABSCONDING": false,
+        "IS_DIED": false,
+        "DATE_CREATED": "2022-06-24T04:15:59.813Z",
+        "DATE_MODIFIED": "2024-01-03T15:53:48.048Z"
+      },
+      {
+        "CRIME_ID": "62b53a7f447aa041707dce99",
+        "ACCUSED_SEQ_NO": "202407822013067002",
+        "ACCUSED_CODE": "A2",
+        "PERSON_ID": "62b53d62447aa076467dcfa1",
+        "ACCUSED_TYPE": "Accused",
+        "IS_ARRESTED": true,
+        "ARRESTED_DATE": "2022-06-23 18:00:00",
+        "IS_41A_CRPC": false,
+        "IS_41A_EXPLAIN_SUBMITTED": false,
+        "DATE_OF_ISSUE_41A": "",
+        "IS_CCL": false,
+        "IS_APPREHENDED": false,
+        "IS_ABSCONDING": false,
+        "IS_DIED": false,
+        "DATE_CREATED": "2022-06-24T04:15:59.813Z",
+        "DATE_MODIFIED": "2024-01-03T15:53:48.048Z"
+      }
+    ]
+  }
+}
