@@ -48,6 +48,8 @@ def get_insertable_columns(cur, table):
 def upsert_records(cur, table: str, conflict_col: str, records: list) -> dict:
     columns = get_insertable_columns(cur, table)
     fq = f"{PG_ETL_SCHEMA}.{table}"
+    # ON CONFLICT DO UPDATE must reference the target row by bare table name, not
+    # schema.table — otherwise Postgres treats "cctns" as a missing FROM alias.
     col_list = ", ".join(columns)
     placeholders = ", ".join(["%s"] * len(columns))
     update_set = ", ".join(
@@ -58,7 +60,7 @@ def upsert_records(cur, table: str, conflict_col: str, records: list) -> dict:
         VALUES ({placeholders})
         ON CONFLICT ({conflict_col})
         DO UPDATE SET {update_set}
-        WHERE {fq} IS DISTINCT FROM EXCLUDED
+        WHERE {table} IS DISTINCT FROM EXCLUDED
         RETURNING (xmax = 0) AS inserted
     """
 
