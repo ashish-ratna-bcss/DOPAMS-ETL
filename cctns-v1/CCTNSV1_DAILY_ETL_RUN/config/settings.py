@@ -3,9 +3,13 @@ Single place every other module reads config from. Nothing here talks to the
 API or the DB directly -- it just loads .env and exposes typed values.
 """
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# Always load from ETL project root (Airflow task cwd is not guaranteed).
+_ETL_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_ETL_ROOT / ".env")
 
 # --- CCTNS V1 API (source) --- no auth required, confirmed live against all 4 endpoints
 FIR_API_URL = os.environ.get("FIR_API_URL")

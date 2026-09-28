@@ -20,13 +20,34 @@ See `pipeline.md` for how the pipeline itself works. This file is setup/ops only
    ```
 5. In `dags/pipeline_run.py`, flip `"upsert_ready": False` → `True` for each entity once its constraint is live.
 
-## Deploy
+## Airflow on dopams-new (PM2 — recommended)
+
+Production-style settings (removes SQLite / SequentialExecutor UI warnings):
+
+1. **One-time** — Postgres metadata DB + migrate:
+   ```bash
+   cd ~/dopams/DOPAMS-ETL/cctns-v1/CCTNSV1_DAILY_ETL_RUN
+   chmod +x deploy/setup_airflow_metadata_db.sh deploy/reload_pm2.sh
+   ./deploy/setup_airflow_metadata_db.sh
+   ```
+   Uses `AIRFLOW_METADATA_DATABASE` (default `cctns_v1_airflow`) and `PG_*` from `.env`.
+
+2. **After every code pull** — reload PM2 with env from `.env`:
+   ```bash
+   ./deploy/reload_pm2.sh
+   ```
+
+`config/settings.py` loads `.env` from the project root so Airflow tasks always see `PG_*` and API URLs.
+
+Airflow UI: `http://<dopams-new-ip>:9001` (login `admin` / `admin` — change password).
+
+## Deploy (rsync + venv, optional)
 
 ```
 ./deploy/deploy.sh
 ```
 
-Syncs the code to `dopams-new`, installs Airflow + dependencies into a venv there, initializes Airflow (self-contained under `airflow_home/`, pointed at `dags/`), and starts the scheduler + webserver in the background. Safe to re-run — it kills and restarts both processes each time.
+Syncs the code to `dopams-new`, installs Airflow + dependencies into a venv there, initializes Airflow (self-contained under `airflow_home/`, pointed at `dags/`), and starts the scheduler + webserver in the background. Safe to re-run — it kills and restarts both processes each time. On dopams-new prefer **`./deploy/reload_pm2.sh`** after `git pull` instead.
 
 ## Reboot survival (one-time, needs your `sudo`)
 
