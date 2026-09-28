@@ -2,27 +2,48 @@
 
 ## Flow
 
+```mermaid
+flowchart TB
+    subgraph SRC["CCTNS V1 API — no auth required"]
+        FIR["FIR endpoint\nGET"]
+        COURT["Court endpoint\nGET"]
+        AD["Accused Details endpoint\nGET"]
+        ACC["Accused date-range endpoint\nPOST"]
+    end
+
+    subgraph DAG1["DAG: cctnsv1_simple_apis_etl — 00:30 daily"]
+        FIR --> E1["fetch_fir()\n~7,300 rows"]
+        COURT --> E2["fetch_court()\n~7,700 rows"]
+        AD --> E3["fetch_accused_details()\n~20,200 rows"]
+    end
+
+    subgraph DAG2["DAG: cctnsv1_accused_yearly_etl — 00:30 daily"]
+        ACC --> E4["fetch_accused()\nmonth-by-month, adaptive halving\non Oracle ORA-06502 buffer errors"]
+    end
+
+    E1 --> L
+    E2 --> L
+    E3 --> L
+    E4 --> L
+
+    L{{"upsert_records()\nON CONFLICT (key) DO UPDATE\nWHERE row IS DISTINCT FROM EXCLUDED"}}
+
+    L -->|"key not seen before"| INS[("INSERT")]
+    L -->|"key seen, content changed"| UPD[("UPDATE")]
+    L -->|"key seen, nothing changed"| SKIP["no write"]
+
+    INS --> DB[("cctns_v1 (Postgres)\ncctns_fir / cctns_court /\ncctns_accused_details / cctns_accused")]
+    UPD --> DB
+    UPD --> AUDIT[("cctns_v1_audit_log\nfield, old_value, new_value, changed_at")]
+
+    E1 -.-> RUNLOG
+    E2 -.-> RUNLOG
+    E3 -.-> RUNLOG
+    E4 -.-> RUNLOG
+    L -.-> RUNLOG[("cctns_v1_etl_run_log\nfetched / inserted / updated / unchanged\nfailed date windows, status")]
 ```
-                    ┌── fetch_fir()              (plain GET, ~7,300 rows)
-DAG 1: simple_apis  ├── fetch_court()            (plain GET, ~7,700 rows)
-  00:30 daily       └── fetch_accused_details()  (plain GET, ~20,200 rows)
 
-DAG 2: accused_yearly
-  00:30 daily       └── fetch_accused()          (POST, month-by-month, adaptive
-                                                    halving on Oracle ORA-06502
-                                                    buffer errors)
-
-For every record fetched, per table:
-
-    key not seen before          → INSERT
-    key seen, content changed    → UPDATE  (+ auto-logged to cctns_v1_audit_log)
-    key seen, nothing changed    → no-op, no write
-
-    (the key: fir_reg_num for cctns_fir; natural_key for the other 3 tables)
-
-Every run writes one row per entity to cctns_v1_etl_run_log:
-    rows fetched / inserted / updated / unchanged, failed date windows, status
-```
+The key used to detect "have I seen this record before": `fir_reg_num` for `cctns_fir`, `natural_key` for the other 3 tables (see `db/sql/001_schema_fix.sql`).
 
 Both DAGs pull the **full dataset every run** — there's no reliable "give me what changed since yesterday" filter on this API, so instead the pipeline re-fetches everything and lets Postgres decide what actually changed via the `ON CONFLICT ... WHERE IS DISTINCT FROM` upsert in `db/upsert.py`. No hash column, no manual diff code — Postgres compares the real row values directly.
 
