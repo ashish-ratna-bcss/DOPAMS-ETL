@@ -26,6 +26,7 @@ INIT_SQL_FILES = (
     "003_migrate_airflow_to_airflow_schema.sql",
     "init_schema.sql",
     "init_etl_support.sql",
+    "004_natural_keys_court_accused_details.sql",
 )
 
 _schema_applied = False

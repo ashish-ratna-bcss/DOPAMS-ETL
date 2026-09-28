@@ -1,10 +1,9 @@
 -- ============================================================================
--- DRAFT -- DO NOT RUN YET.
+-- DRAFT -- accused dossier (cctns_accused) only.
 --
--- This adds the unique constraint + natural_key that the nightly upsert
--- (db/upsert.py) needs to know "have I seen this record before". It is
--- blocked on one open problem, found during real duplicate analysis on
--- dopams-new and confirmed by the user needing to review it personally:
+-- Court + accused_details natural_key: applied in 004_natural_keys_court_accused_details.sql
+--
+-- This file remains for cctns_accused + optional audit/run-log extras. Blocked on:
 --
 --   The obvious composite key per table (fir_reg_num + person_code +
 --   accused_name for cctns_accused_details; similar for cctns_accused) is
