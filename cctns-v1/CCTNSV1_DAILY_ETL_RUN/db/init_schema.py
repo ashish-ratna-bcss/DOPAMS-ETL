@@ -23,6 +23,7 @@ logger = logging.getLogger("cctns_v1_etl.db")
 SQL_DIR = Path(__file__).resolve().parent / "sql"
 INIT_SQL_FILES = (
     "002_migrate_etl_to_cctns_schema.sql",
+    "003_migrate_airflow_to_airflow_schema.sql",
     "init_schema.sql",
     "init_etl_support.sql",
 )
