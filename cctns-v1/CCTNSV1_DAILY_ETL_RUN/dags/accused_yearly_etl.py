@@ -1,49 +1,80 @@
 """
-DAG 2 of 2: the Accused date-range endpoint only.
+DAG 2 of 2 — Accused dossier date-range API (month-chunked, adaptive halving).
 
-This is the one endpoint that needs date chunking -- its Oracle backend
-throws ORA-06502 "buffer too small" on wide date ranges (confirmed from
-real captured runs in cctnsv1/response/accused_list_yearly_range/, which
-show failedWindows even at yearly granularity). apis/accused.py pulls this
-one month by month across the full history, with adaptive halving down to
-single days on failure.
-
-Kept as its own DAG (separate from simple_apis_etl.py) since this pull is
-slower and more failure-prone than the other 3 -- easier to monitor/retry
-independently.
-
-Logic lives in pipeline_run.run_accused_yearly(); this file is just the
-Airflow schedule wrapper around it.
+Graph (Airflow UI):
+    bootstrap_database → sync_accused_dossier
 """
 import os
 import sys
-from datetime import datetime, timedelta
-
-from airflow import DAG
-from airflow.operators.python import PythonOperator
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from airflow.decorators import dag, task
 
-def run_accused_yearly_task(**_context):
-    from dags.pipeline_run import run_accused_yearly
-    run_id, summary = run_accused_yearly()
-    failures = [e for e, r in summary.items() if r.get("status") in ("extract_failed", "load_failed")]
-    if failures:
-        raise RuntimeError(f"run_id={run_id} entities failed: {failures}")
+from dags.cctnsv1_dag_common import (
+    DEFAULT_ARGS,
+    SCHEDULE_DAILY_0030_UTC,
+    START_DATE,
+    TAGS_BASE,
+)
+
+DAG_DOC = """
+## CCTNS V1 — accused dossier (daily 00:30 UTC)
+
+Separate DAG because this endpoint is **slow** and **Oracle-sensitive**
+(ORA-06502 buffer errors → month chunks + adaptive day splitting).
+
+| Task | CCTNS API | Target table | Load today? |
+|------|-----------|--------------|-------------|
+| `bootstrap_database` | — | DDL bootstrap | always |
+| `sync_accused_dossier` | Accused POST date-range | `cctns_accused` | Fetch only — needs `natural_key` |
+
+Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
+"""
 
 
-with DAG(
+@dag(
     dag_id="cctnsv1_accused_yearly_etl",
-    description="Nightly full month-chunked pull + upsert of CCTNS V1 Accused date-range endpoint into Postgres cctns_v1",
-    schedule="30 0 * * *",
-    start_date=datetime(2026, 9, 28),
+    description=(
+        "CCTNS V1 nightly: month-chunked Accused dossier API "
+        "(date-range POST → Postgres cctns_v1, fetch-only until natural_key)"
+    ),
+    schedule=SCHEDULE_DAILY_0030_UTC,
+    start_date=START_DATE,
     catchup=False,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},
-    tags=["cctns", "v1", "etl", "accused-yearly"],
-) as dag:
-
-    run_accused_yearly_op = PythonOperator(
-        task_id="run_accused_yearly",
-        python_callable=run_accused_yearly_task,
+    default_args=DEFAULT_ARGS,
+    tags=[*TAGS_BASE, "accused-dossier", "date-range", "yearly-chunked"],
+    doc_md=DAG_DOC,
+)
+def cctnsv1_accused_yearly_etl():
+    @task(
+        task_id="bootstrap_database",
+        doc_md="Ensure `cctns_v1` DB + tables exist (`db/sql/init_schema.sql`, `init_etl_support.sql`).",
     )
+    def bootstrap_database() -> dict:
+        from db.init_schema import ensure_schema
+
+        ensure_schema()
+        return {"status": "schema_ready"}
+
+    @task(
+        task_id="sync_accused_dossier",
+        doc_md=(
+            "Accused date-range POST from 2002 → today, month-by-month with halving on "
+            "ORA-06502. Wide flat row (~140+ cols incl. INT_* relatives). "
+            "**Fetch logged only** until `natural_key` in `001_schema_fix.sql`."
+        ),
+    )
+    def sync_accused_dossier() -> dict:
+        from dags.pipeline_run import raise_if_task_failed, run_single_entity
+
+        result = run_single_entity("accused")
+        raise_if_task_failed("accused", result)
+        return result
+
+    boot = bootstrap_database()
+    sync = sync_accused_dossier()
+    boot >> sync
+
+
+cctnsv1_accused_yearly_etl()

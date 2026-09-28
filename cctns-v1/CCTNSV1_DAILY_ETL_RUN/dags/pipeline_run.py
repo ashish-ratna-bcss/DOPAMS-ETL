@@ -58,6 +58,29 @@ ACCUSED_YEARLY_ENTITY = {
 }
 
 
+def raise_if_task_failed(entity: str, result: dict) -> None:
+    """Airflow tasks fail only on extract/load errors — fetch-only is success."""
+    if result.get("status") in ("extract_failed", "load_failed"):
+        raise RuntimeError(f"{entity} failed: {result}")
+
+
+def run_single_entity(entity_key: str) -> dict:
+    """Run one API entity (used by per-task Airflow operators)."""
+    registry = {**SIMPLE_ENTITIES, **ACCUSED_YEARLY_ENTITY}
+    if entity_key not in registry:
+        raise KeyError(f"Unknown entity: {entity_key}")
+    run_id = str(uuid.uuid4())
+    logger.info("=== entity=%s run_id=%s ===", entity_key, run_id)
+    conn = get_connection()
+    try:
+        summary = _run_entities({entity_key: registry[entity_key]}, run_id, conn)
+        result = summary[entity_key]
+        logger.info("=== entity=%s result=%s ===", entity_key, result)
+        return result
+    finally:
+        conn.close()
+
+
 def _run_entities(entities: dict, run_id: str, conn) -> dict:
     summary = {}
     for entity, cfg in entities.items():

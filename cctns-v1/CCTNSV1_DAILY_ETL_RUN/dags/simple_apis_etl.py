@@ -1,43 +1,104 @@
 """
-DAG 1 of 2: the 3 plain CCTNS V1 endpoints (FIR, Court, Accused Details).
+DAG 1 of 2 — FIR, Court, Accused Details (single GET each, no date chunking).
 
-These 3 all support a single unfiltered GET that returns the full dataset
-in a few seconds each (confirmed from real captured responses) -- no date
-chunking needed, unlike the Accused date-range endpoint (see
-accused_yearly_etl.py for that one).
-
-Logic lives in pipeline_run.run_simple_apis(); this file is just the
-Airflow schedule wrapper around it.
+Graph (Airflow UI):
+    bootstrap_database → sync_fir → sync_court
+                                  ↘ sync_accused_details
 """
 import os
 import sys
-from datetime import datetime, timedelta
-
-from airflow import DAG
-from airflow.operators.python import PythonOperator
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from airflow.decorators import dag, task
 
-def run_simple_apis_task(**_context):
-    from dags.pipeline_run import run_simple_apis
-    run_id, summary = run_simple_apis()
-    failures = [e for e, r in summary.items() if r.get("status") in ("extract_failed", "load_failed")]
-    if failures:
-        raise RuntimeError(f"run_id={run_id} entities failed: {failures}")
+from dags.cctnsv1_dag_common import (
+    DEFAULT_ARGS,
+    SCHEDULE_DAILY_0030_UTC,
+    START_DATE,
+    TAGS_BASE,
+)
+
+DAG_DOC = """
+## CCTNS V1 — simple APIs (daily 00:30 UTC)
+
+Full pull every run; Postgres upsert decides insert / update / skip.
+
+| Task | CCTNS API | Target table | Load today? |
+|------|-----------|--------------|-------------|
+| `bootstrap_database` | — | DDL bootstrap | always |
+| `sync_fir` | FIR GET | `cctns_fir` | **Yes** (PK `fir_reg_num`) |
+| `sync_court` | Court GET | `cctns_court` | Fetch only — needs `natural_key` |
+| `sync_accused_details` | Accused Details GET | `cctns_accused_details` | Fetch only — needs `natural_key` |
+
+Court and accused details run **in parallel** after FIR (FK to `cctns_fir` when load is enabled).
+See `db/sql/001_schema_fix.sql` for the pending upsert keys.
+"""
 
 
-with DAG(
+@dag(
     dag_id="cctnsv1_simple_apis_etl",
-    description="Nightly full pull + upsert of CCTNS V1 FIR / Court / Accused Details into Postgres cctns_v1",
-    schedule="30 0 * * *",
-    start_date=datetime(2026, 9, 28),
+    description=(
+        "CCTNS V1 nightly: FIR upsert + Court & Accused Details fetch "
+        "(unfiltered GET APIs → Postgres cctns_v1)"
+    ),
+    schedule=SCHEDULE_DAILY_0030_UTC,
+    start_date=START_DATE,
     catchup=False,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},
-    tags=["cctns", "v1", "etl", "simple-apis"],
-) as dag:
-
-    run_simple_apis_op = PythonOperator(
-        task_id="run_simple_apis",
-        python_callable=run_simple_apis_task,
+    default_args=DEFAULT_ARGS,
+    tags=[*TAGS_BASE, "fir", "court", "accused-details", "simple-apis"],
+    doc_md=DAG_DOC,
+)
+def cctnsv1_simple_apis_etl():
+    @task(
+        task_id="bootstrap_database",
+        doc_md="Ensure `cctns_v1` DB + tables exist (`db/sql/init_schema.sql`, `init_etl_support.sql`).",
     )
+    def bootstrap_database() -> dict:
+        from db.init_schema import ensure_schema
+
+        ensure_schema()
+        return {"status": "schema_ready"}
+
+    @task(
+        task_id="sync_fir",
+        doc_md="Unfiltered FIR GET (~7.3k rows) → upsert into `cctns_fir` on `fir_reg_num`.",
+    )
+    def sync_fir() -> dict:
+        from dags.pipeline_run import raise_if_task_failed, run_single_entity
+
+        result = run_single_entity("fir")
+        raise_if_task_failed("fir", result)
+        return result
+
+    @task(
+        task_id="sync_court",
+        doc_md="Unfiltered Court GET (~7.7k rows). **Fetch logged only** until `natural_key` is applied.",
+    )
+    def sync_court() -> dict:
+        from dags.pipeline_run import raise_if_task_failed, run_single_entity
+
+        result = run_single_entity("court")
+        raise_if_task_failed("court", result)
+        return result
+
+    @task(
+        task_id="sync_accused_details",
+        doc_md="Unfiltered Accused Details GET (~20k rows). **Fetch logged only** until `natural_key` is applied.",
+    )
+    def sync_accused_details() -> dict:
+        from dags.pipeline_run import raise_if_task_failed, run_single_entity
+
+        result = run_single_entity("accused_details")
+        raise_if_task_failed("accused_details", result)
+        return result
+
+    boot = bootstrap_database()
+    fir = sync_fir()
+    court = sync_court()
+    accused_details = sync_accused_details()
+
+    boot >> fir >> [court, accused_details]
+
+
+cctnsv1_simple_apis_etl()

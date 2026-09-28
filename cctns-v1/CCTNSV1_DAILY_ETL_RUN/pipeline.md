@@ -11,14 +11,14 @@ flowchart TB
         ACC["Accused date-range endpoint\nPOST"]
     end
 
-    subgraph DAG1["DAG: cctnsv1_simple_apis_etl — 00:30 daily"]
-        FIR --> E1["fetch_fir()\n~7,300 rows"]
-        COURT --> E2["fetch_court()\n~7,700 rows"]
-        AD --> E3["fetch_accused_details()\n~20,200 rows"]
+    subgraph DAG1["DAG: cctnsv1_simple_apis_etl — 00:30 daily (4 Airflow tasks)"]
+        BOOT1["bootstrap_database"] --> E1["sync_fir\n~7,300 rows → upsert"]
+        E1 --> E2["sync_court\n~7,700 rows fetch"]
+        E1 --> E3["sync_accused_details\n~20,200 rows fetch"]
     end
 
-    subgraph DAG2["DAG: cctnsv1_accused_yearly_etl — 00:30 daily"]
-        ACC --> E4["fetch_accused()\nmonth-by-month, adaptive halving\non Oracle ORA-06502 buffer errors"]
+    subgraph DAG2["DAG: cctnsv1_accused_yearly_etl — 00:30 daily (2 Airflow tasks)"]
+        BOOT2["bootstrap_database"] --> E4["sync_accused_dossier\nmonth-by-month POST\nORA-06502 halving"]
     end
 
     E1 --> L
