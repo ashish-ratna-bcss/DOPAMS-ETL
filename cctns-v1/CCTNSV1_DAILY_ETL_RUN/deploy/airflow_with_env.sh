@@ -27,13 +27,16 @@ PG_AIRFLOW_SCHEMA="${PG_AIRFLOW_SCHEMA:-airflow}"
 export PG_ETL_SCHEMA PG_AIRFLOW_SCHEMA
 
 ENC_PASS="$("${ETL_DIR}/venv/bin/python3" -c "import urllib.parse, os; print(urllib.parse.quote_plus(os.environ['PG_PASSWORD']))")"
+# Custom metadata schema requires search_path on the URI (Airflow 2.10+), or log_template
+# is not seeded and DAG trigger fails with a generic UI "Ooops!" / TypeError on log_template_id.
+SEARCH_PATH_QUERY="$("${ETL_DIR}/venv/bin/python3" -c "import os, urllib.parse; s=os.environ['PG_AIRFLOW_SCHEMA']; print('options=' + urllib.parse.quote('-csearch_path=' + s, safe=''))")"
 
 export AIRFLOW_HOME="${ETL_DIR}/airflow_home"
 export AIRFLOW__CORE__DAGS_FOLDER="${ETL_DIR}/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 export AIRFLOW__CORE__PARALLELISM=4
-export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://${PG_USER}:${ENC_PASS}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}"
+export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://${PG_USER}:${ENC_PASS}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}?${SEARCH_PATH_QUERY}"
 export AIRFLOW__DATABASE__SQL_ALCHEMY_SCHEMA="${PG_AIRFLOW_SCHEMA}"
 
 _ensure_postgres_schemas() {
@@ -49,10 +52,36 @@ _ensure_cctns_database() {
     "from db.init_schema import ensure_database_exists; ensure_database_exists()"
 }
 
+_ensure_log_template_row() {
+  export PGPASSWORD="${PG_PASSWORD}"
+  local count
+  count="$(psql -h "${PG_HOST}" -p "${PG_PORT}" -U "${PG_USER}" -d "${PG_DATABASE}" -tAc \
+    "SELECT COUNT(*) FROM ${PG_AIRFLOW_SCHEMA}.log_template" 2>/dev/null || echo 0)"
+  count="${count// /}"
+  if [[ "${count}" != "0" ]]; then
+    return 0
+  fi
+  echo "Seeding ${PG_AIRFLOW_SCHEMA}.log_template (required for DAG trigger with custom schema)" >&2
+  psql -h "${PG_HOST}" -p "${PG_PORT}" -U "${PG_USER}" -d "${PG_DATABASE}" -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO ${PG_AIRFLOW_SCHEMA}.log_template (filename, elasticsearch_id)
+SELECT p.filename, p.elasticsearch_id
+FROM public.log_template p
+WHERE NOT EXISTS (SELECT 1 FROM ${PG_AIRFLOW_SCHEMA}.log_template)
+ORDER BY p.id DESC
+LIMIT 1;
+INSERT INTO ${PG_AIRFLOW_SCHEMA}.log_template (filename, elasticsearch_id)
+SELECT
+  'dag_id={{ ti.dag_id }}/run_id={{ ti.run_id }}/task_id={{ ti.task_id }}/{% if ti.map_index >= 0 %}map_index={{ ti.map_index }}/{% endif %}attempt={{ try_number }}.log',
+  '{dag_id}-{task_id}-{run_id}-{map_index}-{try_number}'
+WHERE NOT EXISTS (SELECT 1 FROM ${PG_AIRFLOW_SCHEMA}.log_template);
+SQL
+}
+
 _ensure_airflow_tables() {
   _ensure_cctns_database
   _ensure_postgres_schemas
   "${AF}" db migrate
+  _ensure_log_template_row
 }
 
 _ensure_admin_user() {

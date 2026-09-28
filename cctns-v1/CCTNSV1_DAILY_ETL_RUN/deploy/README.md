@@ -46,6 +46,8 @@ Optional manual migrate only: `./deploy/setup_airflow_metadata_db.sh`
 
 Airflow UI: `http://<dopams-new-ip>:9001` — credentials in `deploy/airflow-credentials.txt` (copy from `airflow-credentials.example.txt`; file is gitignored).
 
+**UI shows "Ooops!" when triggering a DAG:** With metadata in schema `airflow`, the Postgres URL must set `search_path` (handled in `deploy/airflow_with_env.sh`). After `git pull`, run `./deploy/reload_pm2.sh`. If trigger still fails, check webserver logs (`pm2 logs cctnsv1-airflow-webserver --lines 50`) for `log_template` / `TypeError`, and verify `SELECT COUNT(*) FROM airflow.log_template;` is greater than 0.
+
 ## Deploy (rsync + venv, optional)
 
 ```
