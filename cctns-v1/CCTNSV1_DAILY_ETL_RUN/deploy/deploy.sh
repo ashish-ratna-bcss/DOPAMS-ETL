@@ -82,7 +82,7 @@ ssh "$REMOTE_HOST" "
 
 echo "==> Deploy complete."
 echo "    Airflow UI:   http://<dopams-new-ip>:${WEBSERVER_PORT}  (login: admin / admin -- change this)"
-echo "    DAGs:         cctnsv1_simple_apis_etl (00:30 daily), cctnsv1_accused_yearly_etl (00:30 daily)"
+echo "    DAGs:         cctnsv1_simple_apis_etl (00:30 UTC), cctnsv1_accused_yearly_etl (01:30 UTC)"
 echo "    Scheduler log: ${REMOTE_HOST}:${REMOTE_DIR}/airflow_scheduler.log"
 echo "    Webserver log: ${REMOTE_HOST}:${REMOTE_DIR}/airflow_webserver.log"
 echo "    NOTE: started via nohup, will NOT survive a server reboot -- see deploy/README.md"

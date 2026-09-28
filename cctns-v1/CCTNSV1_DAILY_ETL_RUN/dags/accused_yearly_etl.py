@@ -16,13 +16,13 @@ from airflow.decorators import dag, task
 
 from dags.cctnsv1_dag_common import (
     DEFAULT_ARGS,
-    SCHEDULE_DAILY_0030_UTC,
+    SCHEDULE_DAILY_0130_UTC,
     START_DATE,
     TAGS_BASE,
 )
 
 DAG_DOC = """
-## CCTNS V1 — accused dossier (daily 00:30 UTC)
+## CCTNS V1 — accused dossier (daily 01:30 UTC, after simple-apis DAG)
 
 Separate DAG because this endpoint is **slow** and **Oracle-sensitive**
 (ORA-06502 buffer errors → month chunks + adaptive day splitting).

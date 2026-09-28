@@ -5,6 +5,15 @@ Nightly pipeline: pull data from **four CCTNS V1 HTTP APIs** on dopams infrastru
 - **DAG behavior and task graphs:** [`dags/README.md`](dags/README.md)  
 - **Deploy, PM2, Airflow UI:** [`deploy/README.md`](deploy/README.md)
 
+### Nightly schedule (UTC)
+
+| DAG | Cron | Local (IST) | Why |
+|-----|------|-------------|-----|
+| `cctnsv1_simple_apis_etl` | `30 0 * * *` | 06:00 | Fast 3× GET + FIR should load first |
+| `cctnsv1_accused_yearly_etl` | `30 1 * * *` | 07:00 | Long date-range POST; starts **1 hour later** so it does not compete with simple APIs |
+
+Both still do a **full pull** each run (no incremental mode yet).
+
 ---
 
 ## What problem this ETL solves
