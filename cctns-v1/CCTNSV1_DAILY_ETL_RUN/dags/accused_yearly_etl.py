@@ -26,7 +26,7 @@ Separate DAG because this endpoint is **slow** and **Oracle-sensitive**
 
 | Task | CCTNS API | Target table | Load today? |
 |------|-----------|--------------|-------------|
-| `bootstrap_database` | — | DDL bootstrap | always |
+| `bootstrap_database` | — | `cctns_v1` DB + ETL + Airflow tables | always |
 | `sync_accused_dossier` | Accused POST date-range | `cctns_accused` | Fetch only — needs `natural_key` |
 
 Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
@@ -49,13 +49,17 @@ Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
 def cctnsv1_accused_yearly_etl():
     @task(
         task_id="bootstrap_database",
-        doc_md="Ensure `cctns_v1` DB + tables exist (`db/sql/init_schema.sql`, `init_etl_support.sql`).",
+        doc_md=(
+            "Create `PG_DATABASE` if missing; ETL DDL; Airflow metadata in the same DB."
+        ),
     )
     def bootstrap_database() -> dict:
+        from db.airflow_metadata import ensure_airflow_metadata
         from db.init_schema import ensure_schema
 
         ensure_schema()
-        return {"status": "schema_ready"}
+        ensure_airflow_metadata()
+        return {"status": "schema_ready", "database": "cctns_v1"}
 
     @task(
         task_id="sync_accused_dossier",

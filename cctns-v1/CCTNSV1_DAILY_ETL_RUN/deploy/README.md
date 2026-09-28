@@ -22,20 +22,18 @@ See `pipeline.md` for how the pipeline itself works. This file is setup/ops only
 
 ## Airflow on dopams-new (PM2 — recommended)
 
-Production-style settings (removes SQLite / SequentialExecutor UI warnings):
+Production-style settings (Postgres + LocalExecutor, no separate Airflow DB):
 
-1. **One-time** — Postgres metadata DB + migrate:
-   ```bash
-   cd ~/dopams/DOPAMS-ETL/cctns-v1/CCTNSV1_DAILY_ETL_RUN
-   chmod +x deploy/setup_airflow_metadata_db.sh deploy/reload_pm2.sh
-   ./deploy/setup_airflow_metadata_db.sh
-   ```
-   Uses `AIRFLOW_METADATA_DATABASE` (default `cctns_v1_airflow`) and `PG_*` from `.env`.
+- **One database:** `PG_DATABASE` (default `cctns_v1`) holds both ETL tables (`cctns_*`) and Airflow metadata (`dag`, `dag_run`, …).
+- **Auto-create:** PM2 `airflow_with_env.sh` creates the DB if missing, runs `airflow db migrate`, and creates `admin` on scheduler start. DAG task `bootstrap_database` runs ETL DDL + migrate too.
 
-2. **After every code pull** — reload PM2 with env from `.env`:
-   ```bash
-   ./deploy/reload_pm2.sh
-   ```
+**After every code pull:**
+```bash
+cd ~/dopams/DOPAMS-ETL/cctns-v1/CCTNSV1_DAILY_ETL_RUN
+./deploy/reload_pm2.sh
+```
+
+Optional manual migrate only: `./deploy/setup_airflow_metadata_db.sh`
 
 `config/settings.py` loads `.env` from the project root so Airflow tasks always see `PG_*` and API URLs.
 

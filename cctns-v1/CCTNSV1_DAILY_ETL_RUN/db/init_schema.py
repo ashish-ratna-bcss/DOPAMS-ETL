@@ -6,6 +6,8 @@ SQL files (in order):
     db/sql/init_etl_support.sql -- updated_at, audit log, run log, FIR audit trigger
 
 Upsert keys (natural_key) remain in db/sql/001_schema_fix.sql until reviewed.
+
+Airflow internal tables (separate naming) also live in PG_DATABASE — see db/airflow_metadata.py.
 """
 import logging
 from pathlib import Path

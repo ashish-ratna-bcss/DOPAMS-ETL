@@ -24,6 +24,8 @@ PG_DATABASE = os.environ.get("PG_DATABASE", "cctns_v1")
 PG_USER = os.environ.get("PG_USER")
 PG_PASSWORD = os.environ.get("PG_PASSWORD")
 
+# Airflow metadata (dag_run, task_instance, …) uses the same Postgres database as ETL.
+
 # --- Pull behavior ---
 # How far back the Accused date-range endpoint pulls, every night, in full.
 # The other 3 endpoints (FIR/Court/Accused Details) take no date range at all

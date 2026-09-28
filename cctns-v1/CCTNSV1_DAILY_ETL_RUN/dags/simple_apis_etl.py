@@ -26,7 +26,7 @@ Full pull every run; Postgres upsert decides insert / update / skip.
 
 | Task | CCTNS API | Target table | Load today? |
 |------|-----------|--------------|-------------|
-| `bootstrap_database` | — | DDL bootstrap | always |
+| `bootstrap_database` | — | `cctns_v1` DB + ETL + Airflow tables | always |
 | `sync_fir` | FIR GET | `cctns_fir` | **Yes** (PK `fir_reg_num`) |
 | `sync_court` | Court GET | `cctns_court` | Fetch only — needs `natural_key` |
 | `sync_accused_details` | Accused Details GET | `cctns_accused_details` | Fetch only — needs `natural_key` |
@@ -52,13 +52,18 @@ See `db/sql/001_schema_fix.sql` for the pending upsert keys.
 def cctnsv1_simple_apis_etl():
     @task(
         task_id="bootstrap_database",
-        doc_md="Ensure `cctns_v1` DB + tables exist (`db/sql/init_schema.sql`, `init_etl_support.sql`).",
+        doc_md=(
+            "Create `PG_DATABASE` if missing; ETL DDL (`init_schema.sql`); "
+            "Airflow metadata tables in the **same** database (`airflow db migrate`)."
+        ),
     )
     def bootstrap_database() -> dict:
+        from db.airflow_metadata import ensure_airflow_metadata
         from db.init_schema import ensure_schema
 
         ensure_schema()
-        return {"status": "schema_ready"}
+        ensure_airflow_metadata()
+        return {"status": "schema_ready", "database": "cctns_v1"}
 
     @task(
         task_id="sync_fir",

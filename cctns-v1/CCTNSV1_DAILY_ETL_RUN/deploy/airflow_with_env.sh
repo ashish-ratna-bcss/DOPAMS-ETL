@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# PM2 entrypoint: load .env + Airflow Postgres metadata URL, then exec airflow CLI.
+# PM2 entrypoint: .env → same Postgres DB as ETL (PG_DATABASE) → airflow CLI.
 set -euo pipefail
 
 ETL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ETL_DIR}/.env"
+AF="${ETL_DIR}/venv/bin/airflow"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing ${ENV_FILE}" >&2
@@ -19,7 +20,7 @@ set +a
 : "${PG_PASSWORD:?PG_PASSWORD required in .env}"
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5432}"
-AIRFLOW_METADATA_DATABASE="${AIRFLOW_METADATA_DATABASE:-cctns_v1_airflow}"
+PG_DATABASE="${PG_DATABASE:-cctns_v1}"
 
 ENC_PASS="$("${ETL_DIR}/venv/bin/python3" -c "import urllib.parse, os; print(urllib.parse.quote_plus(os.environ['PG_PASSWORD']))")"
 
@@ -28,6 +29,37 @@ export AIRFLOW__CORE__DAGS_FOLDER="${ETL_DIR}/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 export AIRFLOW__CORE__PARALLELISM=4
-export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://${PG_USER}:${ENC_PASS}@${PG_HOST}:${PG_PORT}/${AIRFLOW_METADATA_DATABASE}"
+export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://${PG_USER}:${ENC_PASS}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}"
 
-exec "${ETL_DIR}/venv/bin/airflow" "$@"
+_ensure_cctns_database() {
+  PYTHONPATH="${ETL_DIR}" "${ETL_DIR}/venv/bin/python3" -c \
+    "from db.init_schema import ensure_database_exists; ensure_database_exists()"
+}
+
+_ensure_airflow_tables() {
+  _ensure_cctns_database
+  "${AF}" db migrate
+}
+
+_ensure_admin_user() {
+  if ! "${AF}" users list 2>/dev/null | grep -qE '[[:space:]]admin[[:space:]]'; then
+    echo "Creating Airflow admin user (admin / admin — change in UI)" >&2
+    "${AF}" users create \
+      --username admin --password admin \
+      --firstname CCTNS --lastname Admin --role Admin --email admin@example.com
+  fi
+}
+
+if [[ "$1" == "db" && "$2" == "migrate" ]]; then
+  _ensure_airflow_tables
+  exit 0
+fi
+
+if [[ "$1" == "scheduler" || "$1" == "webserver" ]]; then
+  _ensure_airflow_tables
+  if [[ "$1" == "scheduler" ]]; then
+    _ensure_admin_user
+  fi
+fi
+
+exec "${AF}" "$@"
