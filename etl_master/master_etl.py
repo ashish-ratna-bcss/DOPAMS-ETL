@@ -28,7 +28,7 @@ from preflight_check import (
     parse_input_file,
     run_preflight,
 )
-from checkpoint_manager import mark_backfill_complete
+from checkpoint_manager import mark_backfill_complete, is_backfill_complete
 import etl_run_config
 
 STEP_TIMEOUT_SEC = int(os.environ.get("STEP_TIMEOUT_SEC", "7200")) or None
@@ -419,6 +419,15 @@ def resolve_config_path(args):
 
 
 
+def is_full_pipeline_run(start_order, end_order) -> bool:
+    """Return True when the invocation covers the full configured order list.
+
+    Partial/resume runs pass --start-order and/or --end-order; those must not
+    advance LAST_RUN or mark backfill complete.
+    """
+    return start_order is None and end_order is None
+
+
 def filter_processes_by_order(processes, start_order=None, end_order=None):
     """Optionally run a subset of ordered blocks for resume/debug compatibility."""
     if start_order is None and end_order is None:
@@ -557,13 +566,28 @@ def main():
     total_time = time.time() - pipeline_start_time
     logger.info("All ETL processes finished successfully. Total execution time: %.2fs", total_time)
 
+    # Checkpoint advancement is only valid for a full configured run.
+    # Partial/resume windows (--start-order / --end-order) must not advance
+    # LAST_RUN or mark backfill complete, or a later 6-hour sync would skip
+    # data that the selected subset never covered.
+    if not is_full_pipeline_run(args.start_order, args.end_order):
+        logger.warning(
+            "Partial order window (start_order=%s end_order=%s): skipping LAST_RUN "
+            "persist and backfill checkpoint updates. Existing LAST_RUN is preserved.",
+            args.start_order,
+            args.end_order,
+        )
+        return
+
     # Persist successful run watermark back into .env
     etl_run_config.persist_last_run(to_date)
     logger.info("LAST_RUN persisted: %s", to_date)
 
     # Mark backfill as complete ONLY if all steps succeeded (keeps etl_bookkeeping run_state in sync)
     logger.info("Updating master checkpoint to mark backfill complete...")
-    if mark_backfill_complete():
+    if is_backfill_complete():
+        logger.info("Backfill already marked complete; leaving existing watermark unchanged.")
+    elif mark_backfill_complete():
         logger.info("Backfill marked complete. Future runs will use daily incremental mode.")
     else:
         logger.warning("Failed to update master checkpoint. Backfill not marked complete.")

@@ -430,38 +430,90 @@ class FSLCasePropertyETL:
         
         return new_fields
 
-    def mo_id_exists_for_crime(self, crime_id: str, mo_id: Optional[str]) -> bool:
-        """
-        Check if mo_id exists for crime (logging warning only, not blocking).
-        Returns True to allow insert - MO_ID is API reference, not strict FK.
+    def resolve_mo_reference(
+        self,
+        crime_id: str,
+        api_mo_id: Optional[str],
+        cursor=None,
+    ) -> Tuple[Optional[str], str]:
+        """Resolve CCTNS FSL MO_ID to the mo_seizures.mo_id label the DB trigger expects.
 
-        PRODUCTION FIX: API returns MongoDB ObjectIDs that don't map to mo_seizures directly.
-        Allow inserts with unmatched MO_ID; log warning for audit trail.
+        CCTNS case-property payloads often put the Mongo ObjectId that is stored as
+        mo_seizures.mo_seizure_id into the MO_ID field, while the trigger requires
+        mo_seizures.(crime_id, mo_id) where mo_id is the human label (e.g. MO7).
+
+        Returns:
+            (value, status) where status is one of:
+              - 'empty': no MO reference (NULL/blank) — insert allowed
+              - 'mo_id_label': api_mo_id already matches mo_seizures.mo_id
+              - 'mo_seizure_id_remap': remapped from mo_seizure_id → parent mo_id
+              - 'unresolved': no parent seizure — leave queued / trigger-reject
         """
-        if not mo_id:
-            return True
+        if not api_mo_id or not str(api_mo_id).strip():
+            return None, 'empty'
+        if not crime_id:
+            return api_mo_id, 'unresolved'
+
+        cur = cursor or self.db_cursor
         try:
-            self.db_cursor.execute(
+            cur.execute(
                 f"""
-                SELECT 1
-                FROM {MO_SEIZURES_TABLE}
-                WHERE crime_id = %s
-                  AND mo_id = %s
-                LIMIT 1
+                SELECT mo_id
+                  FROM {MO_SEIZURES_TABLE}
+                 WHERE crime_id = %s
+                   AND mo_id = %s
+                 LIMIT 1
                 """,
-                (crime_id, mo_id)
+                (crime_id, api_mo_id),
             )
-            exists = self.db_cursor.fetchone() is not None
-            if not exists:
-                logger.warning(
-                    f"⚠️  [INFO] MO_ID {mo_id} not found in {MO_SEIZURES_TABLE} "
-                    f"for CRIME_ID {crime_id} (API reference, allowing insert)"
+            row = cur.fetchone()
+            if row and row[0]:
+                return row[0], 'mo_id_label'
+
+            cur.execute(
+                f"""
+                SELECT mo_id
+                  FROM {MO_SEIZURES_TABLE}
+                 WHERE crime_id = %s
+                   AND mo_seizure_id = %s
+                 LIMIT 1
+                """,
+                (crime_id, api_mo_id),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                logger.info(
+                    "Resolved FSL MO_ID %s → mo_seizures.mo_id=%s for crime_id=%s",
+                    api_mo_id,
+                    row[0],
+                    crime_id,
                 )
-            return True  # Allow insert even if mo_id not found
+                return row[0], 'mo_seizure_id_remap'
+
+            logger.warning(
+                "⚠️  MO_ID %s not found as mo_id or mo_seizure_id in %s for CRIME_ID %s",
+                api_mo_id,
+                MO_SEIZURES_TABLE,
+                crime_id,
+            )
+            return api_mo_id, 'unresolved'
         except Exception as e:
-            logger.error(f"Error validating mo_id={mo_id} for crime_id={crime_id}: {e}")
-            self.db_conn.rollback()
-            return True  # Allow insert on validation error
+            logger.error(f"Error resolving mo_id={api_mo_id} for crime_id={crime_id}: {e}")
+            if self.db_conn is not None:
+                try:
+                    self.db_conn.rollback()
+                except Exception:
+                    pass
+            return api_mo_id, 'unresolved'
+
+    def mo_id_exists_for_crime(self, crime_id: str, mo_id: Optional[str]) -> bool:
+        """Return True when a parent seizure can be resolved for this MO reference.
+
+        Uses resolve_mo_reference so ObjectId→mo_seizure_id remaps count as present.
+        Empty MO_ID is treated as valid (trigger allows NULL).
+        """
+        _resolved, status = self.resolve_mo_reference(crime_id, mo_id)
+        return status in ('empty', 'mo_id_label', 'mo_seizure_id_remap')
 
     def normalize_media_items(self, media_items: List) -> List[Dict]:
         """Normalize API MEDIA payload into media child rows without losing source entries."""
@@ -1181,11 +1233,20 @@ class FSLCasePropertyETL:
                                    original_crime_id, _qe)
             return False, reason
 
-        # PRODUCTION FIX: MO_ID validation is informational only, not blocking.
-        # API returns MongoDB ObjectIDs as mo_id reference; they don't map 1:1 to mo_seizures.mo_id.
-        # Check exists for logging but allow inserts to proceed.
+        # Resolve CCTNS MO_ID (often mo_seizure_id ObjectId) to mo_seizures.mo_id
+        # label so the existing (crime_id, mo_id) trigger can accept the row.
+        # True orphans stay unresolved and are queued by the trigger-failure path.
         if mo_id:
-            self.mo_id_exists_for_crime(crime_id, mo_id)  # Logs warning if not found, but allows insert
+            resolved_mo_id, mo_status = self.resolve_mo_reference(crime_id, mo_id)
+            if mo_status == 'mo_seizure_id_remap':
+                case_property['mo_id'] = resolved_mo_id
+                mo_id = resolved_mo_id
+            elif mo_status == 'unresolved':
+                logger.warning(
+                    "⚠️  Unresolved MO_ID %s for crime_id=%s — insert may queue for FK retry",
+                    mo_id,
+                    crime_id,
+                )
         
         try:
             logger.trace(f"Processing case property: case_property_id={case_property_id}, crime_id={crime_id}")
@@ -1706,18 +1767,18 @@ class FSLCasePropertyETL:
             if not cur.fetchone():
                 return False  # Crime still missing
 
-            # If this record was queued because of a missing mo_id (not a
-            # missing crime_id), pre-check mo_seizures directly instead of
-            # relying on the trigger to reject it again — avoids a redundant
-            # rollback/re-push cycle on every still-unresolved retry attempt.
+            # Resolve MO reference before insert. ObjectId values that match
+            # mo_seizure_id are rewritten to the parent mo_id label so the
+            # existing trigger accepts the row. True orphans stay queued.
             mo_id = record.get('mo_id')
             if mo_id:
-                cur.execute(
-                    f"SELECT 1 FROM {MO_SEIZURES_TABLE} WHERE crime_id = %s AND mo_id = %s",
-                    (original_crime_id, mo_id)
+                resolved_mo_id, mo_status = self.resolve_mo_reference(
+                    original_crime_id, mo_id, cur
                 )
-                if not cur.fetchone():
-                    return False  # MO seizure still missing
+                if mo_status == 'unresolved':
+                    return False  # Parent seizure still missing
+                if mo_status == 'mo_seizure_id_remap':
+                    record['mo_id'] = resolved_mo_id
 
             record['crime_id'] = original_crime_id
             record['_original_crime_id'] = original_crime_id

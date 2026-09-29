@@ -669,13 +669,18 @@ class ArrestsETL:
                 time.sleep(2 ** attempt)
             except Exception as e:
                 logger.error(f"API error: {e}")
-                if attempt == API_CONFIG['max_retries'] - 1:
-                    self.stats['failed_api_calls'] += 1
-                    self.stats['errors'].append(f"{from_date} to {to_date}: {str(e)}")
-                    self.log_api_chunk(from_date, to_date, 0, [], [], error=str(e))
                 time.sleep(2 ** attempt)
         
+        # Exhausted retries (HTTP non-200/404, timeout, or other errors).
+        # Count exactly once here so HTTP 400 exhaustion is visible in the
+        # summary and forces run() to fail closed — previously only the
+        # generic Exception path incremented failed_api_calls, so 400s
+        # returned None with Failed API Calls still 0.
+        err_msg = f"{from_date} to {to_date}: Failed after max retries"
         logger.error(f"❌ Failed to fetch arrests for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
+        with self.stats_lock:
+            self.stats['failed_api_calls'] += 1
+            self.stats['errors'].append(err_msg)
         self.log_api_chunk(from_date, to_date, 0, [], [], error="Failed after max retries")
         return None
     
@@ -1216,39 +1221,7 @@ class ArrestsETL:
                 self.stats['errors'].append(f"Arrests crime_id={crime_id}: {str(e)}")
             self.log_failed_record(arrests, reason, error_details)
             return False, reason
-    
-    def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None):
-        """Process arrests records for a specific date range"""
-        chunk_range = f"{from_date} to {to_date}"
-        logger.info(f"📅 Processing: {chunk_range}")
-        
-        # Fetch arrests from API
-        arrests_raw = self.fetch_arrests_api(from_date, to_date)
-        
-        if arrests_raw is None:
-            logger.error(f"❌ Failed to fetch arrests for {chunk_range}")
-            self.log_db_chunk(from_date, to_date, 0, [], [], [], [], [], error="API fetch failed")
-            return
-        
-        if not arrests_raw:
-            logger.info(f"ℹ️  No arrests records found for {chunk_range}")
-            self.log_db_chunk(from_date, to_date, 0, [], [], [], [], [], error="No arrests records in API response")
-            return
-        
-        # Check for schema evolution if we got data
-        if table_columns is not None and len(arrests_raw) > 0:
-            # Check for new fields in first record
-            new_fields = self.detect_new_fields(arrests_raw[0], table_columns)
-            if new_fields:
-                logger.info(f"🔍 New fields detected in API response: {list(new_fields.keys())}")
-                # Add new columns to table
-                for api_field, db_column in new_fields.items():
-                    if self.add_column_to_table(db_column):
-                        # Update table_columns set
-                        table_columns.add(db_column)
-                # Update existing records from start_date to current chunk end_date
-                self.update_existing_records_with_new_fields(new_fields, to_date)
-        
+
     def process_record_worker(self, idx: int, total_records: int, arrests_record: Dict, chunk_range: str, 
                               chunk_state: Dict, chunk_lock: threading.Lock):
         """Worker method to process a single arrests record"""
@@ -1399,8 +1372,13 @@ class ArrestsETL:
                     f"(crime_id={arrests_record.get('CRIME_ID', 'unknown')}): {e}"
                 )
 
-    def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None):
-        """Process arrests records for a specific date range"""
+    def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None) -> bool:
+        """Process arrests records for a specific date range.
+
+        Returns:
+            True on successful fetch (including legitimate empty/404 results).
+            False when the API fetch exhausted retries and returned None.
+        """
         chunk_range = f"{from_date} to {to_date}"
         logger.info(f"📅 Processing: {chunk_range}")
         
@@ -1410,12 +1388,12 @@ class ArrestsETL:
         if arrests_raw is None:
             logger.error(f"❌ Failed to fetch arrests for {chunk_range}")
             self.log_db_chunk(from_date, to_date, 0, [], [], [], [], [], error="API fetch failed")
-            return
+            return False
         
         if not arrests_raw:
             logger.info(f"ℹ️  No arrests records found for {chunk_range}")
             self.log_db_chunk(from_date, to_date, 0, [], [], [], [], [], error="No arrests records in API response")
-            return
+            return True
         
         # Check for schema evolution if we got data
         if table_columns is not None and len(arrests_raw) > 0:
@@ -1487,6 +1465,7 @@ class ArrestsETL:
         
         logger.info(f"✅ Completed: {chunk_range} - Inserted: {len(chunk_state['inserted_keys'])}, Updated: {len(chunk_state['updated_keys'])}, No Change: {len(chunk_state['no_change_keys'])}, Failed: {len(chunk_state['failed_keys'])}, Duplicates: {len(chunk_state['duplicates'])}, Invalid IDs: {len(chunk_state['invalid_ids_in_chunk'])}")
         logger.trace(f"Chunk processing complete for {chunk_range}")
+        return True
     
     def log_db_chunk(self, from_date: str, to_date: str, total_fetched: int,
                     inserted_keys: List[str], updated_keys: List[str], no_change_keys: List[str],
@@ -1641,16 +1620,26 @@ class ArrestsETL:
             logger.debug(f"[Worker {worker_id}] START chunk: {chunk_range}")
             start_time = time.time()
 
-            # Process the chunk
-            self.process_date_range(from_date, to_date, table_columns)
+            # Process the chunk — False means API fetch exhausted retries.
+            chunk_ok = self.process_date_range(from_date, to_date, table_columns)
 
             elapsed = time.time() - start_time
-            logger.debug(f"[Worker {worker_id}] DONE chunk: {chunk_range} ({elapsed:.2f}s)")
+            logger.debug(f"[Worker {worker_id}] DONE chunk: {chunk_range} ({elapsed:.2f}s) ok={chunk_ok}")
 
             # Update progress bar
             with progress_lock:
                 pbar_dict['completed'] += 1
                 pbar_dict['total_time'] += elapsed
+
+            if not chunk_ok:
+                result_queue.put({
+                    'success': False,
+                    'chunk': chunk_range,
+                    'worker_id': worker_id,
+                    'elapsed': elapsed,
+                    'error': 'API fetch failed after max retries',
+                })
+                return False
 
             result_queue.put({
                 'success': True,
@@ -1776,8 +1765,11 @@ class ArrestsETL:
                     for from_date, to_date, _ in failed_chunks:
                         try:
                             logger.info(f"📅 Retrying: {from_date} to {to_date}")
-                            self.process_date_range(from_date, to_date, table_columns)
-                            retried_success += 1
+                            ok = self.process_date_range(from_date, to_date, table_columns)
+                            if ok:
+                                retried_success += 1
+                            else:
+                                logger.error(f"❌ Retry failed for {from_date} to {to_date}: API fetch exhausted")
                             time.sleep(0.5)  # Be nice to API on retry
                         except Exception as e:
                             logger.error(f"❌ Retry failed for {from_date} to {to_date}: {e}")
@@ -1950,6 +1942,17 @@ class ArrestsETL:
                     f"invalid_crime_id={self.stats['total_arrests_failed_crime_id']}, "
                     f"self-healing via FK retry). These records were NOT inserted and are NOT "
                     f"queued for automatic retry -- see the errors above and the failed records log."
+                )
+                return False
+
+            # API/date-range fetch exhaustion must fail the module so master
+            # does not advance LAST_RUN over a window that was never fetched.
+            # Legitimate empty/404 responses do not increment failed_api_calls.
+            if self.stats['failed_api_calls'] > 0:
+                logger.error(
+                    f"❌ ETL Pipeline completed with {self.stats['failed_api_calls']} failed API "
+                    f"chunk fetch(es). At least one required date range was not retrieved after "
+                    f"retries — see Errors above and the API chunk log."
                 )
                 return False
 
