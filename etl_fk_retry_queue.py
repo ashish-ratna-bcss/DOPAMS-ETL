@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 etl_fk_retry_queue.py — Shared FK retry queue for child ETL modules.
 
@@ -34,8 +35,15 @@ drain_fk_queue(conn, source_table='disposal',
                retry_fn=lambda conn, record: insert_disposal(conn, record))
 """
 
+from __future__ import annotations
+
 import json
 import logging
+import threading
+import time
+
+import psycopg2
+from psycopg2 import errorcodes
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +99,74 @@ CREATE INDEX IF NOT EXISTS idx_etl_bookkeeping_fk_retry_unresolved
 """
 
 _MAX_ATTEMPTS = int(__import__('os').environ.get('FK_RETRY_MAX_ATTEMPTS', '5'))
+_PUSH_DEADLOCK_RETRIES = int(__import__('os').environ.get('FK_RETRY_PUSH_DEADLOCK_RETRIES', '5'))
+
+# Process-local gate: concurrent push_fk_failure used to run CREATE INDEX /
+# CREATE TABLE DDL inside every worker transaction. Concurrent DDL + INSERT
+# on etl_bookkeeping deadlocks (RowExclusiveLock cycles). Ensure once, on a
+# dedicated autocommit connection, then only INSERT on the caller connection.
+_ensure_lock = threading.Lock()
+_table_ready = False
+
+
+def _dsn_kwargs_from_conn(conn) -> dict:
+    """Rebuild connect kwargs from an open psycopg2 connection."""
+    import os
+    try:
+        info = conn.info
+        kwargs = {
+            "host": info.host or os.environ.get("POSTGRES_HOST") or os.environ.get("DB_HOST"),
+            "port": info.port or os.environ.get("POSTGRES_PORT") or os.environ.get("DB_PORT") or "5432",
+            "dbname": info.dbname or os.environ.get("POSTGRES_DB") or os.environ.get("DB_NAME"),
+            "user": info.user or os.environ.get("POSTGRES_USER") or os.environ.get("DB_USER"),
+        }
+        password = getattr(info, "password", None) or os.environ.get("POSTGRES_PASSWORD") or os.environ.get("DB_PASSWORD")
+        if password:
+            kwargs["password"] = password
+        return kwargs
+    except Exception:
+        # Fallback for older psycopg2: parse DSN string + env password
+        kwargs = dict(psycopg2.extensions.parse_dsn(conn.dsn))
+        password = kwargs.get("password") or os.environ.get("POSTGRES_PASSWORD") or os.environ.get("DB_PASSWORD")
+        if password:
+            kwargs["password"] = password
+        return kwargs
 
 
 def _ensure_queue_table(conn):
-    """Create etl_bookkeeping if it does not exist (idempotent)."""
-    with conn.cursor() as cur:
-        cur.execute(_CREATE_DDL)
+    """Create etl_bookkeeping if it does not exist (idempotent, once per process).
+
+    DDL runs on a short-lived autocommit connection so it never shares lock
+    lifetime with the caller's INSERT transaction. Subsequent callers skip DDL.
+    """
+    global _table_ready
+    if _table_ready:
+        return
+    with _ensure_lock:
+        if _table_ready:
+            return
+        ddl_conn = None
+        try:
+            ddl_conn = psycopg2.connect(**_dsn_kwargs_from_conn(conn))
+            ddl_conn.autocommit = True
+            with ddl_conn.cursor() as cur:
+                cur.execute(_CREATE_DDL)
+            _table_ready = True
+        finally:
+            if ddl_conn is not None:
+                try:
+                    ddl_conn.close()
+                except Exception:
+                    pass
+
+
+def _is_deadlock(exc: BaseException) -> bool:
+    pgcode = getattr(exc, "pgcode", None)
+    if pgcode == errorcodes.DEADLOCK_DETECTED:
+        return True
+    # Some pool wrappers wrap the original exception
+    msg = str(exc).lower()
+    return "deadlock detected" in msg
 
 
 def push_fk_failure(conn, source_table: str, record_id: str,
@@ -113,19 +183,53 @@ def push_fk_failure(conn, source_table: str, record_id: str,
         missing_fk_value:   Value of the unresolved FK key.
     """
     _ensure_queue_table(conn)
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO public.etl_bookkeeping
-                (kind, module_name, record_key, record_json,
-                 missing_fk_column, missing_fk_value)
-            VALUES ('fk_retry', %s, %s, %s::jsonb, %s, %s)
-            ON CONFLICT DO NOTHING
-            """,
-            (source_table, record_id,
-             record_json if isinstance(record_json, str) else json.dumps(record_json),
-             missing_fk_column, missing_fk_value),
-        )
+    payload = (
+        source_table,
+        record_id,
+        record_json if isinstance(record_json, str) else json.dumps(record_json),
+        missing_fk_column,
+        missing_fk_value,
+    )
+
+    # Unique-index INSERT contention can still deadlock under high worker
+    # concurrency even without DDL. Retry the same idempotent INSERT so a
+    # transient deadlock cannot permanently drop a legitimate retry record.
+    last_exc = None
+    for attempt in range(_PUSH_DEADLOCK_RETRIES):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.etl_bookkeeping
+                        (kind, module_name, record_key, record_json,
+                         missing_fk_column, missing_fk_value)
+                    VALUES ('fk_retry', %s, %s, %s::jsonb, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    payload,
+                )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if not _is_deadlock(exc):
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # Brief backoff; keep total delay small under production load.
+            time.sleep(0.05 * (attempt + 1))
+            logger.warning(
+                "FK retry queue: deadlock on push %s record_id=%s (attempt %d/%d); retrying",
+                source_table,
+                record_id,
+                attempt + 1,
+                _PUSH_DEADLOCK_RETRIES,
+            )
+    if last_exc is not None:
+        raise last_exc
+
     logger.warning(
         "FK retry queue: parked %s record_id=%s (missing %s=%s)",
         source_table, record_id, missing_fk_column, missing_fk_value,
