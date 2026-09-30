@@ -19,6 +19,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_pooling import PostgreSQLConnectionPool
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 from tqdm import tqdm
 import logging
 import colorlog
@@ -96,6 +97,7 @@ class HierarchyETL:
         self.db_pool = None
         self.stats_lock = threading.Lock()
         self.schema_lock = threading.Lock()
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_hierarchy_fetched': 0,
@@ -500,6 +502,7 @@ class HierarchyETL:
         
         logger.error(f"❌ Failed to fetch hierarchy for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
         self.log_api_chunk(from_date, to_date, 0, [], [], error="Failed after max retries")
+        self.window_guard.fail(from_date, to_date)
         return None
     
     def log_api_chunk(self, from_date: str, to_date: str, count: int, ps_codes: List[str], 
@@ -827,6 +830,7 @@ class HierarchyETL:
             logger.error(f"❌ Error inserting hierarchy {record['ps_code']}: {e}")
             with self.stats_lock:
                 self.stats['errors'].append(f"Hierarchy {record['ps_code']}: {str(e)}")
+            self.window_guard.fail_current()
             return False, 'skipped_error'
     
     def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None):
@@ -1110,6 +1114,7 @@ class HierarchyETL:
             logger.debug(f"Existing table columns: {sorted(table_columns)}")
             
             # Generate date ranges with overlap to ensure no data is missed
+            effective_start_date = apply_replay_floor(self, 'hierarchy', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1126,20 +1131,13 @@ class HierarchyETL:
             logger.trace(f"Generated date ranges: {date_ranges[:5]}{'...' if len(date_ranges) > 5 else ''} (showing first 5)")
             logger.info("")
             
-            # Process each date range concurrently
-            max_workers = ETL_CONFIG.get('max_workers', 5)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(self.process_date_range, from_date, to_date, table_columns): (from_date, to_date)
-                    for from_date, to_date in date_ranges
-                }
-                
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Processing chunks", unit="chunk"):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.error(f"❌ Unhandled error in thread: {e}")
-            
+            logger.info("Processing date windows in order; a failed window stops the run")
+            begin_run(self, 'hierarchy', effective_start_date)
+            run_ordered_windows(
+                date_ranges,
+                lambda from_date, to_date: self.process_date_range(from_date, to_date, table_columns),
+                self.window_guard,
+            )
             # Get database counts
             with self.db_pool.get_connection_context() as conn:
                 cursor = conn.cursor()
@@ -1189,6 +1187,8 @@ class HierarchyETL:
             # Write summary to log files
             self.write_log_summaries()
             
+            if not release_checkpoint(self, 'hierarchy'):
+                return False
             logger.info("✅ ETL Pipeline completed successfully!")
             logger.info(f"📝 API chunk log saved to: {self.api_log_file}")
             logger.info(f"📝 DB chunk log saved to: {self.db_log_file}")

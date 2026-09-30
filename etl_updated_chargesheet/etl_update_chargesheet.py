@@ -26,6 +26,7 @@ if PROJECT_ROOT not in sys.path:
 
 from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 try:
     from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
@@ -165,6 +166,7 @@ class UpdatedChargesheetETL:
         self.log_lock = threading.Lock()
         self.schema_lock = threading.Lock()
         self.max_workers = min(32, int(os.environ.get('MAX_WORKERS', (os.cpu_count() or 1) * 4)))
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_chargesheets_fetched': 0,
@@ -635,6 +637,7 @@ class UpdatedChargesheetETL:
         
         logger.error(f"❌ Failed to fetch updated chargesheet for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
         self.log_api_chunk(from_date, to_date, 0, [], [], error="Failed after max retries")
+        self.window_guard.fail(from_date, to_date)
         return None
     
     def log_api_chunk(self, from_date: str, to_date: str, count: int, crime_ids: List[str], 
@@ -1163,6 +1166,7 @@ class UpdatedChargesheetETL:
             with self.stats_lock:
                 self.stats['total_chargesheets_failed'] += 1
             self.log_failed_record(chargesheet, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
         except Exception as e:
             try:
@@ -1176,6 +1180,7 @@ class UpdatedChargesheetETL:
                 self.stats['total_chargesheets_failed'] += 1
                 self.stats['errors'].append(f"Chargesheet update_charge_sheet_id={update_charge_sheet_id}: {str(e)}")
             self.log_failed_record(chargesheet, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
     
     def process_record_worker(self, idx: int, chargesheet_record: Dict, chunk_range: str,
@@ -1270,6 +1275,7 @@ class UpdatedChargesheetETL:
 
         except Exception as e:
             logger.error(f"❌ Error in worker processing record {idx}: {e}")
+            self.window_guard.fail_current()
             with self.stats_lock:
                 self.stats['total_chargesheets_failed'] += 1
                 # Feed the same counter the final "Errors:" summary line reads,
@@ -1337,6 +1343,7 @@ class UpdatedChargesheetETL:
                     future.result()
                 except Exception as e:
                     logger.error(f"❌ Worker thread failed: {e}")
+                    self.window_guard.fail_current()
 
         inserted_keys = chunk_state['inserted_keys']
         updated_keys = chunk_state['updated_keys']
@@ -1542,6 +1549,7 @@ class UpdatedChargesheetETL:
             logger.debug(f"Existing table columns: {sorted(table_columns)}")
             
             # Generate date ranges with overlap to ensure no data is missed
+            effective_start_date = apply_replay_floor(self, 'charge_sheet_updates', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1565,10 +1573,11 @@ class UpdatedChargesheetETL:
             logger.info("")
             
             # Process each date range with progress bar
-            for from_date, to_date in tqdm(date_ranges, desc="Processing date ranges", unit="range"):
-                # Process the chunk (will check for schema evolution and process data)
+            def _process_window(from_date, to_date, table_columns=table_columns):
                 self.process_date_range(from_date, to_date, table_columns)
-                time.sleep(1)  # Be nice to the API
+                time.sleep(1)
+            begin_run(self, 'charge_sheet_updates', effective_start_date)
+            run_ordered_windows(date_ranges, _process_window, self.window_guard)
             
             # Get database counts
             self._cursor.execute(f"SELECT COUNT(*) FROM {UPDATE_CHARGESHEET_TABLE}")
@@ -1655,6 +1664,9 @@ class UpdatedChargesheetETL:
             logger.info(f"📝 Duplicates log saved to: {self.duplicates_log_file}")
 
             if unhandled_failures > 0:
+                if not self.window_guard.failed:
+                    self.window_guard.fail(str(effective_start_date)[:10], str(calculated_end_date)[:10])
+                release_checkpoint(self, 'charge_sheet_updates')
                 logger.error(
                     f"❌ ETL Pipeline completed with {unhandled_failures} unhandled record failure(s) "
                     f"(total failed={self.stats['total_chargesheets_failed']}, "
@@ -1663,6 +1675,8 @@ class UpdatedChargesheetETL:
                 )
                 return False
 
+            if not release_checkpoint(self, 'charge_sheet_updates'):
+                return False
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
 

@@ -19,6 +19,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_pooling import PostgreSQLConnectionPool
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 from tqdm import tqdm
 import logging
@@ -121,6 +122,7 @@ class CrimesETL:
         self.db_pool = None
         self.stats_lock = threading.Lock()
         self.schema_lock = threading.Lock()
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_crimes_fetched': 0,
@@ -457,6 +459,7 @@ class CrimesETL:
         
         logger.error(f"❌ Failed to fetch crimes for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
         self.log_api_chunk(from_date, to_date, 0, [], [], error="Failed after max retries")
+        self.window_guard.fail(from_date, to_date)
         return None
     
     def log_api_chunk(self, from_date: str, to_date: str, count: int, crime_ids: List[str], 
@@ -803,6 +806,7 @@ class CrimesETL:
             logger.error(f"Row error for {crime_id}: {e}")
             with self.stats_lock:
                 self.stats['total_crimes_failed'] += 1
+            self.window_guard.fail_current()
             return False, 'error'
     def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None):
         """Process crimes for a specific date range"""
@@ -893,6 +897,7 @@ class CrimesETL:
                     success, operation = self.insert_crime(crime, conn, cursor, chunk_range)
             except Exception as e:
                 logger.error(f"Connection error for {crime_id}: {e}")
+                self.window_guard.fail_current()
                 success = False
                 operation = 'error'
             
@@ -1058,6 +1063,7 @@ class CrimesETL:
             
             table_columns = self.get_table_columns(CRIMES_TABLE)
             
+            effective_start_date = apply_replay_floor(self, 'crimes', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1079,25 +1085,14 @@ class CrimesETL:
             logger.info(f"ℹ️  ETL Server Timezone: UTC")
             logger.info("")
             
-            max_workers = ETL_CONFIG.get('max_workers', 5)
-            logger.info(f"🚀 Starting parallel processing with {max_workers} workers")
-            
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(self.process_date_range, from_date, to_date, table_columns): (from_date, to_date)
-                    for from_date, to_date in date_ranges
-                }
-                
-                with tqdm(total=len(date_ranges), desc="Processing date ranges", unit="range") as pbar:
-                    for future in as_completed(futures):
-                        from_date, to_date = futures[future]
-                        try:
-                            future.result()
-                        except Exception as e:
-                            logger.error(f"❌ Worker error for {from_date} to {to_date}: {e}")
-                        finally:
-                            pbar.update(1)
-            
+            logger.info("Processing date windows in order; a failed window stops the run")
+            begin_run(self, 'crimes', effective_start_date)
+            run_ordered_windows(
+                date_ranges,
+                lambda from_date, to_date: self.process_date_range(from_date, to_date, table_columns),
+                self.window_guard,
+            )
+
             with self.db_pool.get_connection_context() as conn:
                 cursor = conn.cursor()
                 cursor.execute(f"SELECT COUNT(*) FROM {CRIMES_TABLE}")
@@ -1148,6 +1143,8 @@ class CrimesETL:
             
             self.write_log_summaries()
             
+            if not release_checkpoint(self, 'crimes'):
+                return False
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
             

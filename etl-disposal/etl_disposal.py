@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover — queue module not yet deployed
     _drain_fk_queue = None
 
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG
 
@@ -205,6 +206,7 @@ class DisposalETL:
     def __init__(self):
         self.db_conn = None
         self.db_cursor = None
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_disposals_fetched': 0,
@@ -778,6 +780,7 @@ class DisposalETL:
         
         logger.error(f"❌ Failed to fetch disposal for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts (max timeout was {adaptive_timeout}s)")
         self.log_api_chunk(from_date, to_date, 0, [], [], error=f"Failed after {API_CONFIG['max_retries']} attempts (timeout={adaptive_timeout}s)")
+        self.window_guard.fail(from_date, to_date)
         return None
     
     def log_api_chunk(self, from_date: str, to_date: str, count: int, crime_ids: List[str], 
@@ -1125,6 +1128,7 @@ class DisposalETL:
                 with self.stats_lock:
                     self.stats['total_disposals_failed'] += 1
                 self.log_failed_record(disposal, reason, error_details)
+                self.window_guard.fail_current()
                 return False, reason
         except Exception as e:
             conn.rollback()
@@ -1135,6 +1139,7 @@ class DisposalETL:
                 self.stats['total_disposals_failed'] += 1
                 self.stats['errors'].append(f"Disposal crime_id={crime_id}: {str(e)}")
             self.log_failed_record(disposal, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
     
     def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None):
@@ -1264,6 +1269,7 @@ class DisposalETL:
 
         except Exception as e:
             logger.error(f"❌ Error in worker processing record {idx}: {e}")
+            self.window_guard.fail_current()
             with self.stats_lock:
                 self.stats['total_disposals_failed'] += 1
                 # Feed the same counter the final "Errors:" summary line reads,
@@ -1705,6 +1711,7 @@ class DisposalETL:
             logger.debug(f"Existing table columns: {sorted(table_columns)}")
             
             # Generate date ranges with overlap to ensure no data is missed
+            effective_start_date = apply_replay_floor(self, 'disposal', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1729,7 +1736,12 @@ class DisposalETL:
             logger.info("")
 
             # Process each date range in parallel for significant speedup
-            self.process_date_ranges_parallel(date_ranges, table_columns)
+            begin_run(self, 'disposal', effective_start_date)
+            run_ordered_windows(
+                date_ranges,
+                lambda from_date, to_date: self.process_date_range(from_date, to_date, table_columns),
+                self.window_guard,
+            )
             
             # Get database counts
             with self.db_pool.get_connection_context() as conn:
@@ -1790,7 +1802,6 @@ class DisposalETL:
             logger.info(f"Errors:               {len(self.stats['errors'])}")
             logger.info("=" * 80)
 
-            self.update_run_checkpoint('disposal', calculated_end_date)
             
             if self.stats['errors']:
                 logger.warning("⚠️  Errors encountered:")
@@ -1817,6 +1828,9 @@ class DisposalETL:
             logger.info(f"📝 Duplicates log saved to: {self.duplicates_log_file}")
 
             if unhandled_failures > 0:
+                if not self.window_guard.failed:
+                    self.window_guard.fail(str(effective_start_date)[:10], str(calculated_end_date)[:10])
+                release_checkpoint(self, 'disposal')
                 logger.error(
                     f"❌ ETL Pipeline completed with {unhandled_failures} unhandled record failure(s) "
                     f"(total failed={self.stats['total_disposals_failed']}, "
@@ -1826,6 +1840,9 @@ class DisposalETL:
                 )
                 return False
 
+            if not release_checkpoint(self, 'disposal'):
+                return False
+            self.update_run_checkpoint('disposal', calculated_end_date)
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
             

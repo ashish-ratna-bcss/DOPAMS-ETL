@@ -27,6 +27,7 @@ if PROJECT_ROOT not in sys.path:
 from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG
 from db_pooling import PostgreSQLConnectionPool, compute_safe_workers
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 try:
     from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
@@ -194,6 +195,7 @@ class MoSeizureETL:
             logger.error(f"❌ Failed to create connection pool: {e}")
             raise
             
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_seizures_fetched': 0,
@@ -638,6 +640,7 @@ class MoSeizureETL:
         
         logger.error(f"❌ Failed to fetch MO seizures for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
         self.log_api_chunk(from_date, to_date, 0, [], [], error="Failed after max retries")
+        self.window_guard.fail(from_date, to_date)
         return None
     
     def log_api_chunk(self, from_date: str, to_date: str, count: int, crime_ids: List[str], 
@@ -1301,6 +1304,7 @@ class MoSeizureETL:
             with self.stats_lock:
                 self.stats['total_seizures_failed'] += 1
             self.log_failed_record(seizure, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
         except Exception as e:
             conn.rollback()
@@ -1311,6 +1315,7 @@ class MoSeizureETL:
                 self.stats['total_seizures_failed'] += 1
                 self.stats['errors'].append(f"Seizure mo_seizure_id={mo_seizure_id}: {str(e)}")
             self.log_failed_record(seizure, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
     
     def process_record_worker(self, seizure_record: Dict, chunk_range: str, chunk_state: Dict):
@@ -1404,6 +1409,7 @@ class MoSeizureETL:
                             chunk_state['failed_reasons'][operation].append(unique_key)
         except Exception as e:
             logger.error(f"❌ Error in worker thread for mo_seizure_id {seizure_record.get('MO_SEIZURE_ID')}: {e}")
+            self.window_guard.fail_current()
             with self.stats_lock:
                 self.stats['total_seizures_failed'] += 1
                 # Feed the same counter the final "Errors:" summary line reads,
@@ -1478,6 +1484,7 @@ class MoSeizureETL:
                     future.result()
                 except Exception as e:
                     logger.error(f"Thread failed: {e}")
+                    self.window_guard.fail_current()
         
         # Log duplicates for this chunk (for reporting, but they were all processed)
         if chunk_state['duplicates_in_chunk']:
@@ -1662,6 +1669,7 @@ class MoSeizureETL:
             logger.debug(f"Existing table columns: {sorted(table_columns)}")
             
             # Generate date ranges with overlap to ensure no data is missed
+            effective_start_date = apply_replay_floor(self, 'mo_seizures', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1685,10 +1693,11 @@ class MoSeizureETL:
             logger.info("")
             
             # Process each date range with progress bar
-            for from_date, to_date in tqdm(date_ranges, desc="Processing date ranges", unit="range"):
-                # Process the chunk (will check for schema evolution and process data)
+            def _process_window(from_date, to_date, table_columns=table_columns):
                 self.process_date_range(from_date, to_date, table_columns)
-                time.sleep(1)  # Be nice to the API
+                time.sleep(1)
+            begin_run(self, 'mo_seizures', effective_start_date)
+            run_ordered_windows(date_ranges, _process_window, self.window_guard)
             
             # Get database counts
             with self.db_pool.get_connection_context() as conn:
@@ -1777,6 +1786,9 @@ class MoSeizureETL:
             logger.info(f"📝 Duplicates log saved to: {self.duplicates_log_file}")
 
             if unhandled_failures > 0:
+                if not self.window_guard.failed:
+                    self.window_guard.fail(str(effective_start_date)[:10], str(calculated_end_date)[:10])
+                release_checkpoint(self, 'mo_seizures')
                 logger.error(
                     f"❌ ETL Pipeline completed with {unhandled_failures} unhandled record failure(s) "
                     f"(total failed={self.stats['total_seizures_failed']}, "
@@ -1785,6 +1797,8 @@ class MoSeizureETL:
                 )
                 return False
 
+            if not release_checkpoint(self, 'mo_seizures'):
+                return False
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
             

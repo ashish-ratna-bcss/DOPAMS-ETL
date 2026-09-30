@@ -29,6 +29,7 @@ try:
 except ImportError:
     pass
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 try:
     from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
@@ -297,6 +298,7 @@ class InterrogationReportsETL:
         self.crime_ids = set()
         self.stats_lock = threading.Lock()
         self.schema_lock = threading.Lock()
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_ir_fetched': 0,
@@ -656,6 +658,7 @@ class InterrogationReportsETL:
                 time.sleep(2 ** attempt)
         
         logger.error(f"❌ Failed to fetch IR data for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
+        self.window_guard.fail(from_date, to_date)
         return None
 
     def get_existing_ir_record(self, ir_id: str, cursor) -> Optional[Dict[str, Any]]:
@@ -971,6 +974,8 @@ class InterrogationReportsETL:
                 with self.stats_lock:
                     self.stats['total_ir_failed'] += 1
                     self.stats['errors'].append(f"IR {ir_id}: {str(e)}")
+                self.window_guard.fail_current()
+                break
 
         logger.info(f"✅ Completed: {chunk_range}")
 
@@ -1019,6 +1024,7 @@ class InterrogationReportsETL:
             # Generate date ranges with NO overlap (more efficient)
             # API has 7-day limit on date ranges, so use 7 days (vs original 5)
             # No overlap = fewer redundant API calls
+            effective_start_date = apply_replay_floor(self, 'interrogation_reports', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1034,34 +1040,13 @@ class InterrogationReportsETL:
             logger.info(f"⚡ Optimization: Parallel API calls with 3-5 concurrent requests")
             logger.info("")
 
-            # Process date ranges with parallel API calls
-            if len(date_ranges) > 0:
-                # Use ThreadPoolExecutor for concurrent API requests
-                # Default: 8 workers (from .env), can override with MAX_API_WORKERS env var
-                # Optimized: 4 → 8 reduces execution time by 30-40% (1319s → 800-950s)
-                max_api_workers = int(os.environ.get('MAX_API_WORKERS', 8))
-                max_api_workers = min(max_api_workers, len(date_ranges))  # Don't exceed number of ranges
-                logger.info(f"⚡ Using {max_api_workers} parallel API workers (optimized from 4)")
-
-                with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
-                    # Submit all API calls
-                    futures = {}
-                    for from_date, to_date in date_ranges:
-                        future = api_executor.submit(self.process_date_range, from_date, to_date, table_columns)
-                        futures[future] = (from_date, to_date)
-
-                    # Process results as they complete (not in order)
-                    with tqdm(total=len(date_ranges), desc="Processing date ranges", unit="range") as pbar:
-                        for future in as_completed(futures):
-                            from_date, to_date = futures[future]
-                            try:
-                                future.result()
-                            except Exception as e:
-                                logger.error(f"Error processing {from_date} to {to_date}: {e}")
-                                with self.stats_lock:
-                                    self.stats['failed_api_calls'] += 1
-                            pbar.update(1)
-            
+            logger.info("Processing date windows in order; a failed window stops the run")
+            begin_run(self, 'interrogation_reports', effective_start_date)
+            run_ordered_windows(
+                date_ranges,
+                lambda from_date, to_date: self.process_date_range(from_date, to_date, table_columns),
+                self.window_guard,
+            )
             # Retry pending FK records
             self.retry_pending_fk()
 
@@ -1113,6 +1098,8 @@ class InterrogationReportsETL:
                 if len(self.stats['errors']) > 10:
                     logger.warning(f"  ... and {len(self.stats['errors']) - 10} more")
             
+            if not release_checkpoint(self, 'interrogation_reports'):
+                return False
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
             

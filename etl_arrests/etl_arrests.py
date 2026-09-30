@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover
     _drain_fk_queue = None
 
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 # Add TRACE level support (lower than DEBUG)
 TRACE_LEVEL = 5
@@ -233,6 +234,7 @@ class ArrestsETL:
             logger.error(f"❌ Failed to create connection pool: {e}")
             raise
             
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_arrests_fetched': 0,
@@ -682,6 +684,7 @@ class ArrestsETL:
             self.stats['failed_api_calls'] += 1
             self.stats['errors'].append(err_msg)
         self.log_api_chunk(from_date, to_date, 0, [], [], error="Failed after max retries")
+        self.window_guard.fail(from_date, to_date)
         return None
     
     def log_api_chunk(self, from_date: str, to_date: str, count: int, crime_ids: List[str], 
@@ -1210,6 +1213,7 @@ class ArrestsETL:
             with self.stats_lock:
                 self.stats['total_arrests_failed'] += 1
             self.log_failed_record(arrests, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
         except Exception as e:
             conn.rollback()
@@ -1220,6 +1224,7 @@ class ArrestsETL:
                 self.stats['total_arrests_failed'] += 1
                 self.stats['errors'].append(f"Arrests crime_id={crime_id}: {str(e)}")
             self.log_failed_record(arrests, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
 
     def process_record_worker(self, idx: int, total_records: int, arrests_record: Dict, chunk_range: str, 
@@ -1362,6 +1367,7 @@ class ArrestsETL:
 
         except Exception as e:
             logger.error(f"❌ Error in worker processing record {idx}: {e}")
+            self.window_guard.fail_current()
             with self.stats_lock:
                 self.stats['total_arrests_failed'] += 1
                 # Feed the same counter the final "Errors:" summary line reads,
@@ -1827,6 +1833,7 @@ class ArrestsETL:
             logger.debug(f"Existing table columns: {sorted(table_columns)}")
             
             # Generate date ranges with overlap to ensure no data is missed
+            effective_start_date = apply_replay_floor(self, 'arrests', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1850,7 +1857,12 @@ class ArrestsETL:
             logger.info("")
 
             # Process date ranges with parallel chunk processing (production-grade)
-            self.process_date_ranges_parallel(date_ranges, table_columns)
+            begin_run(self, 'arrests', effective_start_date)
+            run_ordered_windows(
+                date_ranges,
+                lambda from_date, to_date: self.process_date_range(from_date, to_date, table_columns),
+                self.window_guard,
+            )
             
             # Get database counts
             with self.db_pool.get_connection_context() as conn:
@@ -1936,6 +1948,9 @@ class ArrestsETL:
             logger.info(f"📝 Duplicates log saved to: {self.duplicates_log_file}")
 
             if unhandled_failures > 0:
+                if not self.window_guard.failed:
+                    self.window_guard.fail(str(effective_start_date)[:10], str(calculated_end_date)[:10])
+                release_checkpoint(self, 'arrests')
                 logger.error(
                     f"❌ ETL Pipeline completed with {unhandled_failures} unhandled record failure(s) "
                     f"(total failed={self.stats['total_arrests_failed']}, "
@@ -1949,6 +1964,9 @@ class ArrestsETL:
             # does not advance LAST_RUN over a window that was never fetched.
             # Legitimate empty/404 responses do not increment failed_api_calls.
             if self.stats['failed_api_calls'] > 0:
+                if not self.window_guard.failed:
+                    self.window_guard.fail(str(effective_start_date)[:10], str(calculated_end_date)[:10])
+                release_checkpoint(self, 'arrests')
                 logger.error(
                     f"❌ ETL Pipeline completed with {self.stats['failed_api_calls']} failed API "
                     f"chunk fetch(es). At least one required date range was not retrieved after "
@@ -1956,6 +1974,8 @@ class ArrestsETL:
                 )
                 return False
 
+            if not release_checkpoint(self, 'arrests'):
+                return False
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
             

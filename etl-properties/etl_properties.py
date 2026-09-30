@@ -26,6 +26,7 @@ try:
 except ImportError:
     pass
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 try:
     from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
@@ -93,6 +94,7 @@ class PropertiesETL:
         self.stats_lock = threading.Lock()
         self.schema_lock = threading.Lock()
         self.has_file_media_bookkeeping_table = False
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_properties_fetched': 0,
@@ -535,6 +537,7 @@ class PropertiesETL:
                 time.sleep(2 ** attempt)
         
         logger.error(f"❌ Failed to fetch properties for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
+        self.window_guard.fail(from_date, to_date)
         return None
     
     def parse_date_field(self, date_value) -> Optional[datetime]:
@@ -924,12 +927,14 @@ class PropertiesETL:
             logger.warning(f"⚠️  Integrity error for property {prop['property_id']}: {e}")
             with self.stats_lock:
                 self.stats['total_properties_failed'] += 1
+            self.window_guard.fail_current()
             return False
         except Exception as e:
             conn.rollback()
             logger.error(f"❌ Error inserting property {prop['property_id']}: {e}")
             with self.stats_lock:
                 self.stats['errors'].append(f"Property {prop['property_id']}: {str(e)}")
+            self.window_guard.fail_current()
             return False
     
     def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None):
@@ -1011,6 +1016,7 @@ class PropertiesETL:
                 logger.error(f"Error in process_prop: {e}")
                 with self.stats_lock:
                     self.stats['total_properties_failed'] += 1
+                self.window_guard.fail_current()
         
         requested_workers = int(os.environ.get('MAX_WORKERS', min(32, (os.cpu_count() or 1) * 4)))
         max_workers = compute_safe_workers(self.db_pool, requested_workers)
@@ -1084,6 +1090,7 @@ class PropertiesETL:
             logger.debug(f"Existing table columns: {sorted(table_columns)}")
             
             # Generate date ranges with overlap to ensure no data is missed
+            effective_start_date = apply_replay_floor(self, 'properties', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -1100,10 +1107,11 @@ class PropertiesETL:
             logger.info("")
             
             # Process each date range with progress bar
-            for from_date, to_date in tqdm(date_ranges, desc="Processing date ranges", unit="range"):
-                # Process the chunk (will check for schema evolution and process data)
+            def _process_window(from_date, to_date, table_columns=table_columns):
                 self.process_date_range(from_date, to_date, table_columns)
-                time.sleep(1)  # Be nice to the API
+                time.sleep(1)
+            begin_run(self, 'properties', effective_start_date)
+            run_ordered_windows(date_ranges, _process_window, self.window_guard)
             
             # Retry pending FK records (crime_id may now exist after earlier ETLs)
             self.retry_pending_fk()
@@ -1156,8 +1164,10 @@ class PropertiesETL:
                 if len(self.stats['errors']) > 10:
                     logger.warning(f"  ... and {len(self.stats['errors']) - 10} more")
 
-            self.update_run_checkpoint('properties', calculated_end_date)
             
+            if not release_checkpoint(self, 'properties'):
+                return False
+            self.update_run_checkpoint('properties', calculated_end_date)
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
             

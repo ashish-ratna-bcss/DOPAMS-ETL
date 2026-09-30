@@ -25,6 +25,7 @@ import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_pooling import PostgreSQLConnectionPool
 from env_utils import get_float_env, get_int_env, get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 try:
     from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
@@ -121,6 +122,7 @@ class AccusedETL:
         self.run_state_enabled = True
         self.stats_lock = threading.Lock()
         self.schema_lock = threading.Lock()
+        self.window_guard = WindowGuard()
         self.stats = {
             'total_api_calls': 0,
             'total_accused_fetched': 0,
@@ -722,6 +724,7 @@ class AccusedETL:
                     self.stats['errors'].append(f"{from_date} to {to_date}: {str(e)}")
                 time.sleep(2 ** attempt)
         logger.error(f"❌ Failed to fetch accused for {from_date} to {to_date}")
+        self.window_guard.fail(from_date, to_date)
         return None
 
     def fetch_crime_by_id(self, crime_id: str) -> Optional[Dict]:
@@ -900,6 +903,7 @@ class AccusedETL:
             logger.error(f"❌ Error inserting crime {crime_id}: {e}")
             with self.stats_lock:
                 self.stats['errors'].append(f"Crime {crime_id}: {str(e)}")
+            self.window_guard.fail_current()
             return False, 'error'
     
     def fetch_accused_by_crime_id(self, crime_id: str) -> Optional[List[Dict]]:
@@ -1267,6 +1271,7 @@ class AccusedETL:
         except Exception as e:
             conn.rollback()
             logger.error(f"❌ Error inserting fallback accused {accused_id}: {e}")
+            self.window_guard.fail_current()
             return False, f'insert_error: {str(e)}'
     
     def _retry_accused_record(self, conn, record):
@@ -1719,6 +1724,7 @@ class AccusedETL:
             with self.stats_lock:
                 self.stats['total_accused_failed'] += 1
             self.log_failed_record(accused, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
         except Exception as e:
             conn.rollback()
@@ -1729,6 +1735,7 @@ class AccusedETL:
                 self.stats['total_accused_failed'] += 1
                 self.stats['errors'].append(f"Accused {accused_id}: {str(e)}")
             self.log_failed_record(accused, reason, error_details)
+            self.window_guard.fail_current()
             return False, reason
 
     def log_api_chunk(self, from_date: str, to_date: str, accused_list: List[Dict], error: Optional[str] = None):
@@ -2118,6 +2125,7 @@ class AccusedETL:
             table_columns = self.get_table_columns(ACCUSED_TABLE)
             logger.debug(f"Existing table columns: {sorted(table_columns)}")
             
+            effective_start_date = apply_replay_floor(self, 'accused', effective_start_date)
             ranges = self.generate_date_ranges(
                 effective_start_date, 
                 calculated_end_date, 
@@ -2140,29 +2148,13 @@ class AccusedETL:
             chunk_workers = get_int_env('ACCUSED_CHUNK_WORKERS', 4)
             inter_chunk_sleep = get_float_env('ACCUSED_INTER_CHUNK_SLEEP', 0.0)
 
-            if chunk_workers <= 1:
-                for fd, td in tqdm(ranges, desc="Processing date ranges", unit="range"):
-                    self.process_date_range(fd, td, table_columns)
-                    if inter_chunk_sleep > 0:
-                        time.sleep(inter_chunk_sleep)
-            else:
-                logger.info(f"🚀 Starting parallel chunk processing with {chunk_workers} workers")
-                with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
-                    future_to_range = {
-                        executor.submit(self.process_date_range, fd, td, table_columns): (fd, td)
-                        for fd, td in ranges
-                    }
-                    with tqdm(total=len(ranges), desc="Processing date ranges", unit="range") as pbar:
-                        for future in as_completed(future_to_range):
-                            fd, td = future_to_range[future]
-                            try:
-                                future.result()
-                            except Exception as exc:
-                                logger.error(f"Chunk failed {fd} to {td}: {exc}")
-                                with self.stats_lock:
-                                    self.stats['errors'].append(f"Chunk failed {fd} to {td}: {exc}")
-                            pbar.update(1)
+            def _process_window(from_date, to_date, table_columns=table_columns):
+                self.process_date_range(from_date, to_date, table_columns)
+                if inter_chunk_sleep > 0:
+                    time.sleep(inter_chunk_sleep)
 
+            begin_run(self, 'accused', effective_start_date)
+            run_ordered_windows(ranges, _process_window, self.window_guard)
             # Get database counts
             with self.db_pool.get_connection_context() as conn:
                 cursor = conn.cursor()
@@ -2228,8 +2220,10 @@ class AccusedETL:
             
             # Write summary to log files
             self.write_log_summaries()
-            self.update_run_checkpoint('accused', calculated_end_date)
             
+            if not release_checkpoint(self, 'accused'):
+                return False
+            self.update_run_checkpoint('accused', calculated_end_date)
             logger.info("✅ ETL Pipeline completed successfully!")
             logger.info(f"📝 API chunk log saved to: {self.api_log_file}")
             logger.info(f"📝 DB chunk log saved to: {self.db_log_file}")

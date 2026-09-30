@@ -23,6 +23,7 @@ from typing import Dict, Optional, List, Set, Tuple, Any
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_pooling import PostgreSQLConnectionPool, compute_safe_workers
 from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 
 from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG, PERSON_GENDER_CONFIG, PERSON_GENDER_LLM_CONFIG
 
@@ -89,6 +90,7 @@ class PersonsETL:
         self.llm_gender_timeout = int(PERSON_GENDER_LLM_CONFIG.get('timeout', 20))
         self.llm_gender_batch_size = int(PERSON_GENDER_LLM_CONFIG.get('batch_size', 20))
         self._llm_gender_cache: Dict[str, Tuple[str, float]] = {}
+        self.window_guard = WindowGuard()
         self.stats = {
             'person_ids': 0,
             'api_calls': 0,
@@ -1611,6 +1613,7 @@ class PersonsETL:
         logger.error(f"❌ Failed to fetch person {person_id} after {API_CONFIG['max_retries']} attempts")
         with self.stats_lock:
             self.stats['failed_api_calls'] += 1
+        self.window_guard.fail(from_date, to_date)
         return None
 
     def truncate_string(self, value: Optional[str], max_length: int = 100, field_name: str = "") -> Optional[str]:
@@ -1962,6 +1965,7 @@ class PersonsETL:
             with self.stats_lock:
                 self.stats['failed'] += 1
                 self.stats['errors'] += 1
+            self.window_guard.fail_current()
 
     def run(self):
         logger.info("=" * 80)
@@ -2028,6 +2032,7 @@ class PersonsETL:
             chunk_days = int(os.environ.get('CHUNK_DAYS', '5'))
             overlap_days = int(os.environ.get('CHUNK_OVERLAP_DAYS', '1'))
 
+            effective_start_date = apply_replay_floor(self, 'persons', effective_start_date)
             date_ranges = self.generate_date_ranges(
                 effective_start_date,
                 calculated_end_date,
@@ -2090,7 +2095,11 @@ class PersonsETL:
             requested_workers = int(os.environ.get('MAX_WORKERS', min(32, (os.cpu_count() or 1) * 4)))
             max_workers = compute_safe_workers(self.db_pool, requested_workers)
 
+            begin_run(self, 'persons', effective_start_date)
             for from_date, to_date in tqdm(date_ranges, desc="Processing date ranges", unit="range"):
+                if self.window_guard.failed:
+                    break
+                self.window_guard.begin(from_date, to_date)
                 window_person_ids = self.get_person_ids_for_window(from_date, to_date)
                 window_person_ids = [pid for pid in window_person_ids if pid not in processed_person_ids]
 
@@ -2119,6 +2128,11 @@ class PersonsETL:
                                 with self.stats_lock:
                                     self.stats['failed'] += 1
                                     self.stats['errors'] += 1
+                                self.window_guard.fail_current()
+                            if self.window_guard.failed:
+                                for pending in futures:
+                                    pending.cancel()
+                                break
 
                             pbar.update(1)
                             if idx % batch_size == 0:
@@ -2128,6 +2142,10 @@ class PersonsETL:
                                         f"Inserted: {self.stats['inserted']}, Updated: {self.stats['updated']}, "
                                         f"Failed: {self.stats['failed']}"
                                     )
+
+            if self.window_guard.failed:
+                release_checkpoint(self, 'persons')
+                return False
 
             # Process queued LLM retry records with available parallel workers
             with self.llm_queue_lock:
@@ -2222,9 +2240,11 @@ class PersonsETL:
                 logger.info(f"  Would Insert:             {self.stats['dry_run_inserts']}")
                 logger.info(f"  Would Update:             {self.stats['dry_run_changes']}")
                 logger.info(f"  No Change:                {self.stats['dry_run_no_change']}")
-            else:
-                self.update_run_checkpoint('persons', calculated_end_date)
             logger.info("=" * 80)
+            if not release_checkpoint(self, 'persons'):
+                return False
+            if not self.person_gender_dry_run:
+                self.update_run_checkpoint('persons', calculated_end_date)
             logger.info("✅ ETL Pipeline completed successfully!")
             return True
         except KeyboardInterrupt:
