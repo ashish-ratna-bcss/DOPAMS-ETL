@@ -1,0 +1,4 @@
+[submodule "cctns-v2"]
+	path = cctns-v2
+	url = https://github.com/ashish-ratna-bcss/DOPAMS-ETL.git
+	branch = cctns-v2
