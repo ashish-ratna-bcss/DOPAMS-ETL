@@ -108,7 +108,7 @@ CCTNSV1_DAILY_ETL_RUN/
 ├── .env.example
 ├── config/settings.py      # loads .env; single config entry point
 ├── apis/
-│   ├── client.py           # HTTP retry, month chunks, ORA-06502 halving
+│   ├── client.py           # HTTP retry, 7-day chunks, ORA-06502 halving
 │   ├── fir.py, court.py, accused_details.py, accused.py
 ├── db/
 │   ├── connection.py       # psycopg2 + search_path=cctns,public
@@ -226,7 +226,7 @@ Registry and flags: **`dags/pipeline_run.py`** (`SIMPLE_ENTITIES`, `ACCUSED_YEAR
 
 ### Accused dossier (date range)
 
-- **`month_ranges`**: split `[ACCUSED_FULL_PULL_START_DATE, today]` by calendar month.
+- **`date_chunk_ranges`**: split `[ACCUSED_FULL_PULL_START_DATE, today]` into inclusive 7-day windows.
 - For each chunk: POST with `from_date` / `to_date` (and alias keys).
 - If response message contains **`ORA-06502`**, split the date range in half recursively (up to **`MAX_SPLIT_DEPTH`**).
 - Returns `(records, failed_windows)` — any window that still fails is listed; pipeline does not pretend success for missing data.
@@ -234,20 +234,20 @@ Registry and flags: **`dags/pipeline_run.py`** (`SIMPLE_ENTITIES`, `ACCUSED_YEAR
 ```mermaid
 flowchart TD
     START["Start: start_date → today"]
-    MONTH["Next month window"]
+    WEEK["Next 7-day window"]
     POST["POST accused API"]
     OK{"Success?"}
     ORA{"ORA-06502?"}
     HALVE["Halve date range\nand retry"]
     FAIL["Record failed_window"]
     MERGE["Append records"]
-    START --> MONTH --> POST --> OK
+    START --> WEEK --> POST --> OK
     OK -->|yes| MERGE
     OK -->|no| FAIL
     POST --> ORA
     ORA -->|yes, depth OK| HALVE --> POST
     ORA -->|max depth| FAIL
-    MERGE --> MONTH
+    MERGE --> WEEK
 ```
 
 ---

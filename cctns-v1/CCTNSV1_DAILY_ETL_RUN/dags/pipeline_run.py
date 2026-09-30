@@ -5,7 +5,7 @@ separate DAGs in this folder:
     run_simple_apis()    -- FIR, Court, Accused Details (plain unfiltered
                              GET each, no date chunking needed)
     run_accused_yearly() -- Accused date-range endpoint only (needs
-                             month-by-month chunking + adaptive halving
+                             7-day chunking + adaptive halving
                              against the flaky Oracle backend)
 
 Data goes straight from the API into Postgres in memory -- no intermediate
@@ -217,7 +217,7 @@ def run_simple_apis():
 
 
 def run_accused_yearly():
-    """Accused date-range endpoint only -- month-chunked + adaptive halving."""
+    """Accused date-range endpoint only -- 7-day chunks + adaptive halving."""
     run_id = str(uuid.uuid4())
     logger.info("=== Starting accused-yearly run_id=%s (accused date-range) ===", run_id)
     conn = get_connection()

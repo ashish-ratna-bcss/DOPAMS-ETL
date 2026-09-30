@@ -1,5 +1,5 @@
 // ==============================================================================
-// 4. Accused Date-Range API (with Automatic Monthly Batching)
+// 4. Accused Date-Range API (with automatic 7-day batching)
 // Uses environment variable: ACCUSED_API_URL
 // ==============================================================================
 
@@ -59,37 +59,27 @@ function parseDate(dateStr) {
 }
 
 /**
- * Splits a date range into safe month-by-month chunks to avoid
+ * Splits a date range into inclusive 7-day chunks to avoid
  * Oracle DB's "ORA-06502: character string buffer too small" error.
+ * The last chunk is shorter when fewer than 7 days remain.
  */
-function generateMonthlyRanges(startInput, endInput) {
+function generateDateRanges(startInput, endInput, chunkDays = 7) {
   const start = parseDate(startInput);
   const end = parseDate(endInput);
   const ranges = [];
 
-  let current = new Date(start.getFullYear(), start.getMonth(), 1);
-  const endMonth = new Date(end.getFullYear(), end.getMonth(), 1);
+  let current = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate());
 
-  while (current <= endMonth) {
-    const year = current.getFullYear();
-    const month = current.getMonth();
+  while (current <= endDay) {
+    const rangeEnd = new Date(current.getFullYear(), current.getMonth(), current.getDate());
+    rangeEnd.setDate(rangeEnd.getDate() + chunkDays - 1);
+    if (rangeEnd > endDay) {
+      rangeEnd.setTime(endDay.getTime());
+    }
 
-    const firstDay =
-      current.getFullYear() === start.getFullYear() && current.getMonth() === start.getMonth()
-        ? start.getDate()
-        : 1;
-
-    const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
-    const lastDay =
-      current.getFullYear() === end.getFullYear() && current.getMonth() === end.getMonth()
-        ? end.getDate()
-        : lastDayOfMonth;
-
-    const rangeStart = `${String(firstDay).padStart(2, '0')}-${String(month + 1).padStart(2, '0')}-${year}`;
-    const rangeEnd = `${String(lastDay).padStart(2, '0')}-${String(month + 1).padStart(2, '0')}-${year}`;
-
-    ranges.push({ start: rangeStart, end: rangeEnd });
-    current = new Date(year, month + 1, 1);
+    ranges.push({ start: toDDMMYYYY(current), end: toDDMMYYYY(rangeEnd) });
+    current = new Date(rangeEnd.getFullYear(), rangeEnd.getMonth(), rangeEnd.getDate() + 1);
   }
 
   return ranges;
@@ -227,7 +217,7 @@ async function fetchSafeChunk({
 }
 
 /**
- * Fetches Accused records from ACCUSED_API_URL with automatic monthly & adaptive batching.
+ * Fetches Accused records from ACCUSED_API_URL in 7-day chunks with adaptive batching.
  * Prevents Oracle ORA-06502 buffer overflow errors on large date ranges.
  *
  * @param {Object} options
@@ -247,10 +237,10 @@ async function getAccused({
   extraPayload = {},
   customHeaders = {},
 } = {}) {
-  const chunks = generateMonthlyRanges(startDate, endDate);
+  const chunks = generateDateRanges(startDate, endDate, 7);
 
   console.log(`\n[ACCUSED_API_URL] Querying range ${toDDMMYYYY(startDate)} to ${toDDMMYYYY(endDate)}`);
-  console.log(`[ACCUSED_API_URL] Split into ${chunks.length} monthly request(s) with adaptive auto-splitting.`);
+  console.log(`[ACCUSED_API_URL] Split into ${chunks.length} 7-day request(s) with adaptive auto-splitting.`);
 
   const allRecords = [];
 
@@ -299,7 +289,7 @@ if (require.main === module) {
       });
 
       const records = result.data || [];
-      console.log(`\n🎉 Successfully fetched ${records.length} total records across all months!\n`);
+      console.log(`\n🎉 Successfully fetched ${records.length} total records across all 7-day windows!\n`);
 
       if (records.length > 0) {
         console.table(

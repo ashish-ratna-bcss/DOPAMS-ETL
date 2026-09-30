@@ -1,5 +1,5 @@
 """
-DAG 2 of 2 — Accused dossier date-range API (month-chunked, adaptive halving).
+DAG 2 of 2 — Accused dossier date-range API (7-day chunks, adaptive halving).
 
 Graph (Airflow UI):
     bootstrap_database → sync_accused_dossier
@@ -25,7 +25,7 @@ DAG_DOC = """
 ## CCTNS V1 — accused dossier (daily **01:30 IST**, after simple-apis DAG)
 
 Separate DAG because this endpoint is **slow** and **Oracle-sensitive**
-(ORA-06502 buffer errors → month chunks + adaptive day splitting).
+(ORA-06502 buffer errors → 7-day chunks + adaptive day splitting).
 
 | Task | CCTNS API | Target table | Load today? |
 |------|-----------|--------------|-------------|
@@ -39,8 +39,8 @@ Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
 @dag(
     dag_id="cctnsv1_accused_yearly_etl",
     description=(
-        "CCTNS V1 nightly: month-chunked Accused dossier API "
-        "(date-range POST → Postgres cctns_accused, month-chunked full pull)"
+        "CCTNS V1 nightly: 7-day-chunked Accused dossier API "
+        "(date-range POST → Postgres cctns_accused, 7-day full pull)"
     ),
     schedule=SCHEDULE_ACCUSED_DOSSIER_IST,
     start_date=START_DATE,
@@ -69,7 +69,7 @@ def cctnsv1_accused_yearly_etl():
         execution_timeout=timedelta(hours=8),
         doc_md=(
             "Accused date-range POST from ACCUSED_FULL_PULL_START_DATE → today, "
-            "month-by-month with halving on ORA-06502. Then validate + upsert + logs. "
+            "7 days at a time with halving on ORA-06502. Then validate + upsert + logs. "
             "Check task log for `failed_windows` if any chunk never succeeded."
         ),
     )

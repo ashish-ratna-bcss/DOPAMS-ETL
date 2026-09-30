@@ -9,7 +9,7 @@ def fetch_accused():
     backend throws ORA-06502 on wide date ranges (confirmed from real
     captured runs with failedWindows in cctnsv1/response/accused_list_yearly_range/).
 
-    Pulls month by month across the full configured history, every night
+    Pulls 7 days at a time across the full configured history, every night
     (no incremental/"since last run" filter -- this API doesn't reliably
     support one). failed_windows lists any date ranges that never succeeded,
     even after adaptive halving, so nothing silently disappears."""

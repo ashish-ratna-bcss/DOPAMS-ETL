@@ -24,6 +24,8 @@ import os
 
 ORA_BUFFER_ERROR = "ORA-06502"
 MAX_SPLIT_DEPTH = 5
+# Accused POST is pulled in 7-day windows (inclusive). A wider range hits ORA-06502.
+DATE_CHUNK_DAYS = 7
 REQUEST_TIMEOUT_SECS = int(os.environ.get("CCTNS_REQUEST_TIMEOUT_SECS", "300"))
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECS = 5
@@ -68,15 +70,20 @@ def fetch_unfiltered(method: str, url: str, extra_params: dict = None):
     return [], []
 
 
-def month_ranges(start: date, end: date):
+def date_chunk_ranges(start: date, end: date, chunk_days: int = DATE_CHUNK_DAYS):
+    """Inclusive windows of `chunk_days` from start through end.
+
+    Example with 7 days: 01-01-2002→07-01-2002, then 08-01-2002→14-01-2002.
+    The last window is shorter when the remaining span is under 7 days.
+    """
+    if chunk_days < 1:
+        raise ValueError("chunk_days must be at least 1")
     ranges = []
-    cursor = date(start.year, start.month, 1)
+    cursor = start
     while cursor <= end:
-        next_month = date(cursor.year + 1, 1, 1) if cursor.month == 12 else date(cursor.year, cursor.month + 1, 1)
-        range_start = max(cursor, start)
-        range_end = min(next_month - timedelta(days=1), end)
-        ranges.append((range_start, range_end))
-        cursor = next_month
+        range_end = min(cursor + timedelta(days=chunk_days - 1), end)
+        ranges.append((cursor, range_end))
+        cursor = range_end + timedelta(days=1)
     return ranges
 
 
@@ -112,9 +119,9 @@ def fetch_date_chunk_safe(method: str, url: str, base_params: dict, start: date,
 
 
 def fetch_full_range_chunked(method: str, url: str, base_params: dict, start: date, end: date):
-    """Month-by-month pull with adaptive halving. Used by Accused date-range only."""
+    """7-day pull with adaptive halving. Used by Accused date-range only."""
     all_records, all_failed = [], []
-    for range_start, range_end in month_ranges(start, end):
+    for range_start, range_end in date_chunk_ranges(start, end):
         logger.info("Fetching %s to %s from %s", range_start, range_end, url)
         records, failed = fetch_date_chunk_safe(method, url, base_params, range_start, range_end)
         all_records.extend(records)

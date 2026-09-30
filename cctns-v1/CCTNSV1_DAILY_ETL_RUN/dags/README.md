@@ -102,7 +102,7 @@ Court and accused details run **in parallel** after FIR (both depend on `sync_fi
 
 ## DAG 2 — `cctnsv1_accused_yearly_etl`
 
-**Purpose:** One **POST date-range** API that must be pulled in **month chunks** with **adaptive day halving** when Oracle returns `ORA-06502` (buffer too small).
+**Purpose:** One **POST date-range** API that must be pulled in **7-day chunks** with **adaptive day halving** when Oracle returns `ORA-06502` (buffer too small).
 
 ```mermaid
 flowchart TB
@@ -181,7 +181,7 @@ UI: `http://<dopams-new-ip>:9001` — credentials template in `deploy/airflow-cr
 
 | DAG 1 | DAG 2 |
 |-------|--------|
-| 3× fast GET | 1× slow POST, many months |
+| 3× fast GET | 1× slow POST, many 7-day windows |
 | ~seconds to minutes | Can take a long time; may record `failed_windows` |
 | FIR load is operational today | Accused load blocked on `natural_key` review |
 
