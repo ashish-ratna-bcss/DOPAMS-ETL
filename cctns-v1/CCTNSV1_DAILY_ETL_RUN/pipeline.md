@@ -229,7 +229,8 @@ Registry and flags: **`dags/pipeline_run.py`** (`SIMPLE_ENTITIES`, `ACCUSED_YEAR
 - **`date_chunk_ranges`**: split `[ACCUSED_FULL_PULL_START_DATE, today]` into inclusive 7-day windows.
 - For each chunk: POST with `from_date` / `to_date` (and alias keys).
 - If response message contains **`ORA-06502`**, split the date range in half recursively (up to **`MAX_SPLIT_DEPTH`**).
-- Returns `(records, failed_windows)` — any window that still fails is listed; pipeline does not pretend success for missing data.
+- Returns `(records, failed_windows)` — any window that still fails is listed.
+- **Fail-closed:** if `failed_windows` is non-empty, pipeline sets `extract_partial_failed`, **skips upsert**, writes OPEN rows to `cctns.cctns_v1_failed_fetch_window`, and Airflow fails the task. Prior OPEN windows no longer failing are marked `RESOLVED`.
 
 ```mermaid
 flowchart TD
@@ -342,7 +343,7 @@ flowchart TB
 |--------|----------|
 | Fetch / load summary | Airflow task logs (`fetched=`, `inserted=`, `updated=`, `unchanged=`) |
 | Fetch-only warning | Log line: `NOT loaded -- natural_key/unique constraint not applied yet` |
-| Accused gaps | Log `failed_windows` count and details in accused task log |
+| Accused gaps | Task fails (`extract_partial_failed`); check `cctns_v1_failed_fetch_window` + run log |
 | Postgres row counts | `SELECT COUNT(*) FROM cctns.cctns_fir;` (set `search_path` or qualify schema) |
 | Durable run history | `cctns.cctns_v1_etl_run_log` (after schema fix migration) |
 | Field-level changes | `cctns.cctns_v1_audit_log` (after migration + updates) |

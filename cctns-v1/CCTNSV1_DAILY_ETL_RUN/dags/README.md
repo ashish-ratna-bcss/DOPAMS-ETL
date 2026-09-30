@@ -94,7 +94,7 @@ Court and accused details run **in parallel** after FIR (both depend on `sync_fi
 3. `get_connection()` may call `ensure_schema()` again (idempotent).
 4. `fetch_fir()` → HTTP GET → list of dicts.
 5. If `upsert_ready`, `upsert_records()` → commit; else warning log and status `not_loaded_pending_key`.
-6. `raise_if_task_failed()` — task **fails** only on `extract_failed` or `load_failed`, not on fetch-only entities.
+6. `raise_if_task_failed()` — task **fails** on `extract_failed`, `load_failed`, or `extract_partial_failed` (any date window failed).
 
 **Retries:** `default_args`: 2 retries, 5 minutes apart (`cctnsv1_dag_common.py`).
 
@@ -129,6 +129,7 @@ Airflow marks a task **success** when the Python callable returns without raisin
 |-----------------------------------|--------------|------------|
 | `loaded` | Success (if no exception) | Insert/update/skip via upsert |
 | `not_loaded_pending_key` | **Success** | **None** for that entity |
+| `extract_partial_failed` | **Failed** | **None** this run (upsert skipped); failures in `cctns_v1_failed_fetch_window` |
 | `extract_failed` | **Failed** (after retries) | None |
 | `load_failed` | **Failed** (after retries) | None (transaction rolled back) |
 

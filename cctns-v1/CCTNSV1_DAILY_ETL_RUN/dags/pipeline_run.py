@@ -40,12 +40,21 @@ from apis.court import fetch_court  # noqa: E402
 from apis.accused_details import fetch_accused_details  # noqa: E402
 from apis.accused import fetch_accused  # noqa: E402
 from db.connection import get_connection  # noqa: E402
+from db.failed_windows import (  # noqa: E402
+    failed_windows_for_run_log,
+    normalize_failed_windows,
+    record_open_failed_windows,
+    resolve_windows_not_failing,
+)
 from db.run_log import finish_entity_run, start_entity_run  # noqa: E402
 from db.upsert import upsert_records  # noqa: E402
 from db.validate import dedupe_batch, filter_orphan_fir  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("cctns_v1_etl.pipeline")
+
+# Incomplete extract: windows failed → no upsert, Airflow must fail.
+STATUS_EXTRACT_PARTIAL_FAILED = "extract_partial_failed"
 
 SIMPLE_ENTITIES = {
     "fir":             {"fetch": fetch_fir,             "table": "cctns_fir",            "conflict_col": "fir_reg_num", "upsert_ready": True},
@@ -59,9 +68,19 @@ ACCUSED_YEARLY_ENTITY = {
 
 
 def raise_if_task_failed(entity: str, result: dict) -> None:
-    """Airflow tasks fail only on extract/load errors — fetch-only is success."""
-    if result.get("status") in ("extract_failed", "load_failed"):
+    """Airflow fails on extract/load errors and on any incomplete date-window extract."""
+    if result.get("status") in (
+        "extract_failed",
+        "load_failed",
+        STATUS_EXTRACT_PARTIAL_FAILED,
+    ):
         raise RuntimeError(f"{entity} failed: {result}")
+
+
+def _sync_failed_window_ledger(cur, entity: str, run_id: str, windows: list) -> None:
+    """OPEN still-failing windows; RESOLVE prior OPEN windows no longer failing."""
+    record_open_failed_windows(cur, entity, run_id, windows)
+    resolve_windows_not_failing(cur, entity, run_id, windows)
 
 
 def run_single_entity(entity_key: str) -> dict:
@@ -89,6 +108,7 @@ def _run_entities(entities: dict, run_id: str, conn) -> dict:
         3. Load — compare with DB: insert / update / ignore unchanged
         4. Log — cctns_v1_etl_run_log (summary) + cctns_v1_etl_row_action (insert/update)
                  + cctns_v1_audit_log (field-level on update, DB trigger)
+                 + cctns_v1_failed_fetch_window (OPEN / RESOLVED)
     """
     summary = {}
     for entity, cfg in entities.items():
@@ -98,7 +118,7 @@ def _run_entities(entities: dict, run_id: str, conn) -> dict:
 
         logger.info("--- %s [1/4] API extract ---", entity)
         try:
-            records, failed_windows = cfg["fetch"]()
+            records, failed_windows_raw = cfg["fetch"]()
         except Exception as err:
             conn.rollback()
             logger.exception("%s: EXTRACT FAILED", entity)
@@ -113,8 +133,41 @@ def _run_entities(entities: dict, run_id: str, conn) -> dict:
             summary[entity] = {"status": "extract_failed"}
             continue
 
+        failed_windows = normalize_failed_windows(failed_windows_raw)
+        fw_log = failed_windows_for_run_log(failed_windows) if failed_windows else None
         fetched = len(records)
         logger.info("%s: fetched=%d failed_windows=%d", entity, fetched, len(failed_windows))
+
+        # Fail-closed: any failed date window means incomplete source → no upsert,
+        # durable OPEN ledger rows, Airflow task failure via raise_if_task_failed.
+        if failed_windows:
+            logger.error(
+                "%s: extract incomplete — %d failed window(s); skipping upsert",
+                entity,
+                len(failed_windows),
+            )
+            cur = conn.cursor()
+            _sync_failed_window_ledger(cur, entity, run_id, failed_windows)
+            finish_entity_run(
+                cur,
+                log_id,
+                status=STATUS_EXTRACT_PARTIAL_FAILED,
+                rows_fetched=fetched,
+                failed_windows=fw_log,
+                error_message=f"{len(failed_windows)} date window(s) failed; load skipped",
+            )
+            conn.commit()
+            summary[entity] = {
+                "status": STATUS_EXTRACT_PARTIAL_FAILED,
+                "fetched": fetched,
+                "failed_windows": len(failed_windows),
+            }
+            continue
+
+        # Full extract succeeded: any prior OPEN gaps for this entity are resolved.
+        cur = conn.cursor()
+        _sync_failed_window_ledger(cur, entity, run_id, [])
+        conn.commit()
 
         if not cfg["upsert_ready"]:
             logger.warning(
@@ -128,13 +181,13 @@ def _run_entities(entities: dict, run_id: str, conn) -> dict:
                 log_id,
                 status="not_loaded",
                 rows_fetched=fetched,
-                failed_windows=failed_windows if failed_windows else None,
+                failed_windows=None,
             )
             conn.commit()
             summary[entity] = {
                 "status": "not_loaded_pending_key",
                 "fetched": fetched,
-                "failed_windows": len(failed_windows),
+                "failed_windows": 0,
             }
             continue
 
@@ -170,13 +223,13 @@ def _run_entities(entities: dict, run_id: str, conn) -> dict:
                 rows_unchanged=result["unchanged"],
                 rows_batch_dupes_removed=dupes_removed,
                 rows_orphan_fir_skipped=orphan_skipped,
-                failed_windows=failed_windows if failed_windows else None,
+                failed_windows=None,
             )
             conn.commit()
             summary[entity] = {
                 "status": "loaded",
                 "fetched": fetched,
-                "failed_windows": len(failed_windows),
+                "failed_windows": 0,
                 "batch_dupes_removed": dupes_removed,
                 "orphan_fir_skipped": orphan_skipped,
                 **result,
@@ -194,7 +247,7 @@ def _run_entities(entities: dict, run_id: str, conn) -> dict:
                 rows_batch_dupes_removed=dupes_removed,
                 rows_orphan_fir_skipped=orphan_skipped,
                 error_message=str(err),
-                failed_windows=failed_windows if failed_windows else None,
+                failed_windows=None,
             )
             conn.commit()
             summary[entity] = {"status": "load_failed"}

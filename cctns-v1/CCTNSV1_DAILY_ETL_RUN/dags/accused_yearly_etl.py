@@ -70,7 +70,8 @@ def cctnsv1_accused_yearly_etl():
         doc_md=(
             "Accused date-range POST from ACCUSED_FULL_PULL_START_DATE → today, "
             "7 days at a time with halving on ORA-06502. Then validate + upsert + logs. "
-            "Check task log for `failed_windows` if any chunk never succeeded."
+            "Any failed window → status extract_partial_failed (Airflow red); "
+            "OPEN rows in cctns_v1_failed_fetch_window; upsert skipped."
         ),
     )
     def sync_accused_dossier() -> dict:
