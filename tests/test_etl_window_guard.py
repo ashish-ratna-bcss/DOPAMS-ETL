@@ -440,6 +440,19 @@ class WindowCheckpointTests(unittest.TestCase):
         self.assertFalse(release_checkpoint(run, "properties"))
         self.assertEqual(run.store["properties__replay_from"][:10], "2026-09-01")
 
+    def test_accused_worker_exception_fails_the_window(self):
+        source = (ROOT / "etl-accused/etl_accused.py").read_text()
+        at = source.index("Record generated an exception")
+        self.assertIn("self.window_guard.fail_current()", source[at:at + 280])
+        stub_at = source.index("Failed to batch create person stubs")
+        self.assertIn("self.window_guard.fail_current()", source[stub_at:stub_at + 220])
+
+    def test_hierarchy_non_duplicate_integrity_error_fails_the_window(self):
+        source = (ROOT / "etl-hierarchy/etl_hierarchy.py").read_text()
+        at = source.index("Integrity error for hierarchy")
+        self.assertIn("self.window_guard.fail_current()", source[at:at + 280])
+        self.assertIn("duplicate", source[at - 400:at].lower())
+
     def test_accused_integrity_error_fails_the_window(self):
         source = (ROOT / "etl-accused/etl_accused.py").read_text()
         at = source.index("Integrity error for accused")

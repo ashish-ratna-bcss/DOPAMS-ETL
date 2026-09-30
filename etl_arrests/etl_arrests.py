@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover
 
 from env_utils import get_etl_run_id
 from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
+from etl_run_config import half_open_api_to_date
 
 # Add TRACE level support (lower than DEBUG)
 TRACE_LEVEL = 5
@@ -604,7 +605,7 @@ class ArrestsETL:
         url = API_CONFIG.get('arrests_url', f"{API_CONFIG['base_url']}/arrests")
         params = {
             'fromDate': from_date,
-            'toDate': to_date
+            'toDate': half_open_api_to_date(to_date),
         }
         headers = {
             'x-api-key': API_CONFIG['api_key']

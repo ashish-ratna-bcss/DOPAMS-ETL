@@ -20,6 +20,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_pooling import PostgreSQLConnectionPool
 from env_utils import get_etl_run_id
 from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
+from etl_run_config import half_open_api_to_date
+from etl_fk_retry_queue import persist_source_failure
 
 from tqdm import tqdm
 import logging
@@ -395,7 +397,7 @@ class CrimesETL:
         url = f"{API_CONFIG['base_url']}/crimes"
         params = {
             'fromDate': from_date,
-            'toDate': to_date
+            'toDate': half_open_api_to_date(to_date),
         }
         headers = {
             'x-api-key': API_CONFIG['api_key']
@@ -678,8 +680,16 @@ class CrimesETL:
                     self.log_failed_record(crime, 'ps_code_not_found')
                     with self.stats_lock:
                         self.stats['total_crimes_failed_ps_code'] += 1
+                    persist_source_failure(
+                        conn, 'crimes', crime_id, 'ps_code_not_found',
+                        {'crime_id': crime_id, 'ps_code': crime.get('ps_code')},
+                    )
                     return False, 'ps_code_not_found'
             else:
+                persist_source_failure(
+                    conn, 'crimes', crime_id, 'missing_ps_code',
+                    {'crime_id': crime_id},
+                )
                 return False, 'missing_ps_code'
 
             # 2. Use atomic UPSERT to avoid race conditions with parallel workers

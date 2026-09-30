@@ -24,6 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_pooling import PostgreSQLConnectionPool, compute_safe_workers
 from env_utils import get_etl_run_id
 from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
+from etl_fk_retry_queue import persist_source_failure
 
 from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG, PERSON_GENDER_CONFIG, PERSON_GENDER_LLM_CONFIG
 
@@ -1587,6 +1588,14 @@ class PersonsETL:
                     logger.error(f"API rejected person_id {person_id} (400 Bad Request). Skipping.")
                     with self.stats_lock:
                         self.stats['no_data'] += 1
+                    try:
+                        with self.db_pool.get_connection_context() as fail_conn:
+                            persist_source_failure(
+                                fail_conn, 'persons', str(person_id), 'http_400',
+                                {'person_id': person_id},
+                            )
+                    except Exception as exc:
+                        logger.error("Could not persist HTTP 400 person %s: %s", person_id, exc)
                     return None
                 else:
                     # Other status codes - retry

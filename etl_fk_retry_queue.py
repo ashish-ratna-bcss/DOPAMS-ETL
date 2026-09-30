@@ -169,6 +169,57 @@ def _is_deadlock(exc: BaseException) -> bool:
     return "deadlock detected" in msg
 
 
+def record_source_failure(conn, module_name: str, record_key: str, reason: str,
+                          details=None, *, ensure: bool = True) -> None:
+    """Store a structurally invalid source row. It is not queued for retry.
+
+    Commits on conn. Callers use this only before any business write on that
+    connection, so the commit does not publish a partial entity upsert.
+    """
+    if ensure:
+        _ensure_queue_table(conn)
+    payload = json.dumps(details or {}, default=str)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO public.etl_bookkeeping
+                (kind, module_name, record_key, reason, record_json,
+                 attempt_count, last_attempted_at)
+            VALUES ('failure', %s, %s, %s, %s::jsonb, 1, now())
+            ON CONFLICT (kind, module_name, record_key) WHERE kind = 'failure'
+            DO UPDATE SET
+                reason = EXCLUDED.reason,
+                record_json = EXCLUDED.record_json,
+                attempt_count = etl_bookkeeping.attempt_count + 1,
+                last_attempted_at = now()
+            """,
+            (module_name, str(record_key), reason, payload),
+        )
+    conn.commit()
+
+
+def persist_source_failure(conn, module_name: str, record_key: str, reason: str,
+                           details=None) -> None:
+    """Record a non-retryable source failure. A bookkeeping error stays local."""
+    try:
+        record_source_failure(conn, module_name, record_key, reason, details)
+    except Exception as exc:
+        logger.error(
+            "Could not persist %s failure %s/%s: %s",
+            reason, module_name, record_key, exc,
+        )
+
+
+def missing_accused_record_key(accused: dict) -> str:
+    crime_id = str(accused.get('crime_id') or '')
+    person_id = str(accused.get('person_id') or '')
+    seq_num = str(accused.get('seq_num') or '')
+    key = f"{crime_id}|{person_id}|{seq_num}"
+    if key.replace('|', ''):
+        return key
+    return 'missing_accused_id'
+
+
 def push_fk_failure(conn, source_table: str, record_id: str,
                     record_json: str, missing_fk_column: str,
                     missing_fk_value: str):

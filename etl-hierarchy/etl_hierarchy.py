@@ -822,9 +822,19 @@ class HierarchyETL:
                 return True, 'inserted'
             
         except psycopg2.IntegrityError as e:
+            error_str = str(e).lower()
+            if 'duplicate' in error_str or 'unique' in error_str:
+                with self.stats_lock:
+                    self.stats['total_hierarchy_no_change'] += 1
+                logger.trace(
+                    "Duplicate key for hierarchy (expected with overlaps): %s",
+                    record.get('ps_code'),
+                )
+                return True, 'no_change'
             logger.warning(f"⚠️  Integrity error for hierarchy {record['ps_code']}: {e}")
             with self.stats_lock:
                 self.stats['total_hierarchy_skipped'] += 1
+            self.window_guard.fail_current()
             return False, 'skipped_integrity_error'
         except Exception as e:
             logger.error(f"❌ Error inserting hierarchy {record['ps_code']}: {e}")

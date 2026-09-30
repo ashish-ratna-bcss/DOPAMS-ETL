@@ -26,12 +26,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_pooling import PostgreSQLConnectionPool
 from env_utils import get_float_env, get_int_env, get_etl_run_id
 from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
+from etl_run_config import half_open_api_to_date
 
 try:
-    from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
+    from etl_fk_retry_queue import (
+        push_fk_failure, drain_fk_queue as _drain_fk_queue,
+        persist_source_failure, missing_accused_record_key,
+    )
 except ImportError:  # pragma: no cover
     push_fk_failure = None
     _drain_fk_queue = None
+    persist_source_failure = None
+    missing_accused_record_key = None
 
 from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG
 
@@ -681,7 +687,7 @@ class AccusedETL:
         url = f"{API_CONFIG['base_url']}/accused"
         params = {
             'fromDate': from_date,
-            'toDate': to_date
+            'toDate': half_open_api_to_date(to_date),
         }
         headers = {
             'x-api-key': API_CONFIG['api_key']
@@ -1326,6 +1332,17 @@ class AccusedETL:
             with self.stats_lock:
                 self.stats['total_accused_failed'] += 1
             self.log_failed_record(accused, reason, error_details)
+            if persist_source_failure is not None:
+                persist_source_failure(
+                    conn, 'accused',
+                    missing_accused_record_key(accused),
+                    'missing_accused_id',
+                    {
+                        'crime_id': crime_id,
+                        'person_id': person_id,
+                        'seq_num': accused.get('seq_num'),
+                    },
+                )
             return False, reason
 
         if not crime_id:
@@ -1933,6 +1950,17 @@ class AccusedETL:
                 if not accused_id:
                     with self.stats_lock:
                         self.stats['total_accused_failed'] += 1
+                    if persist_source_failure is not None:
+                        persist_source_failure(
+                            conn, 'accused',
+                            missing_accused_record_key(accused),
+                            'missing_accused_id',
+                            {
+                                'crime_id': accused.get('crime_id'),
+                                'person_id': accused.get('person_id'),
+                                'seq_num': accused.get('seq_num'),
+                            },
+                        )
                     return {'accused_id': None, 'operation': 'missing_accused_id', 'success': False, 'crime_id': accused.get('crime_id'), 'person_id': accused.get('person_id')}
                 success, operation = self.insert_accused(
                     accused, conn, cursor, chunk_range,
@@ -2008,6 +2036,10 @@ class AccusedETL:
                         failed_reasons[operation].append(accused_id)
                 except Exception as exc:
                     logger.error(f"Record generated an exception: {exc}")
+                    self.window_guard.fail_current()
+                    for pending in future_to_row:
+                        pending.cancel()
+                    break
 
         # OPTIMIZATION: Batch create person stubs at end of chunk (instead of per-record)
         if person_stubs_to_create:
@@ -2027,6 +2059,7 @@ class AccusedETL:
                     logger.trace(f"Batch created {len(person_stubs_to_create)} person stubs for chunk {chunk_range}")
             except Exception as e:
                 logger.warning(f"Failed to batch create person stubs for chunk {chunk_range}: {e}")
+                self.window_guard.fail_current()
 
         # Log duplicates for this chunk (for reporting, but they were all processed)
         if duplicates_in_chunk:

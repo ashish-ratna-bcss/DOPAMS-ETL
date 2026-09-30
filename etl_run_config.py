@@ -87,6 +87,17 @@ def get_to_date() -> str:
     return _today_ist()
 
 
+def half_open_api_to_date(inclusive_to_date: str) -> str:
+    """Exclusive API toDate for list endpoints that filter [fromDate, toDate).
+
+    ETL windows name inclusive calendar days. Those APIs exclude toDate, so a
+    window that starts and ends on D is requested as D through the next day.
+    The same shift keeps the last day of a longer window inside the request.
+    """
+    day = datetime.strptime(str(inclusive_to_date)[:10], "%Y-%m-%d").date()
+    return (day + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def persist_last_run(to_date: str) -> None:
     """Write LAST_RUN=<to_date> back into the project-root .env file."""
     try:

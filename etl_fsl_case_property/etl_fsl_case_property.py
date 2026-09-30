@@ -25,6 +25,7 @@ if PROJECT_ROOT not in sys.path:
 from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG
 from env_utils import get_etl_run_id
 from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
+from etl_run_config import half_open_api_to_date
 
 try:
     from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
@@ -702,7 +703,7 @@ class FSLCasePropertyETL:
         url = API_CONFIG.get('fsl_case_property_url', f"{API_CONFIG['base_url']}/case-property")
         params = {
             'fromDate': from_date,
-            'toDate': to_date
+            'toDate': half_open_api_to_date(to_date),
         }
         headers = {
             'x-api-key': API_CONFIG['api_key']

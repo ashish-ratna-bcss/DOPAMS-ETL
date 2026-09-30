@@ -30,6 +30,7 @@ except ImportError:
     pass
 from env_utils import get_etl_run_id
 from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
+from etl_run_config import half_open_api_to_date
 
 try:
     from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
@@ -568,7 +569,7 @@ class InterrogationReportsETL:
         # Convert ISO datetime to date-only format (YYYY-MM-DD) for API compatibility
         # The API expects date-only format, not ISO format with time
         from_date_only = from_date.split('T')[0] if 'T' in from_date else from_date
-        to_date_only = to_date.split('T')[0] if 'T' in to_date else to_date
+        to_date_only = half_open_api_to_date(to_date)
         
         url = API_CONFIG['ir_url']
         params = {
