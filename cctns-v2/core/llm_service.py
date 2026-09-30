@@ -1,0 +1,323 @@
+import os
+import re
+import json
+import logging
+import atexit
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from typing import Dict, Any, Optional
+from functools import lru_cache
+
+from dotenv import load_dotenv
+from langchain_core.output_parsers import JsonOutputParser
+
+# Load central environment configurations
+load_dotenv()
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+# Fallback defaults if env vars are missing
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+class LLMService:
+    """Unified Service for LLM API Generation"""
+    
+    def __init__(self, model: str, temperature: float = 0.0, max_tokens: int = 1000, context_window: int = 4096, stream: bool = False):
+        self.api_url = os.getenv("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.context_window = context_window
+        self.stream = stream
+        self._langchain_model_instance = None
+
+    def get_langchain_model(self):
+        """Returns a Langchain ChatOllama instance for structured abstraction tasks
+        Caches the model instance internally to prevent multiple instantiations per service."""
+        
+        if self._langchain_model_instance is not None:
+            return self._langchain_model_instance
+            
+        from langchain_ollama import ChatOllama
+        
+        # Ensure base URL is correctly formatted for Langchain (remove trailing /api if present in some configs)
+        base_url = self.api_url
+        if base_url.endswith("/api"):
+            base_url = base_url.replace("/api", "")
+            
+        keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "60m")
+        self._langchain_model_instance = ChatOllama(
+            base_url=base_url,
+            model=self.model,
+            temperature=self.temperature,
+            num_ctx=self.context_window,
+            num_predict=self.max_tokens,
+            keep_alive=keep_alive,
+        )
+        return self._langchain_model_instance
+
+    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> Optional[str]:
+        """Direct HTTP generation primarily used for Chatbot SQL and legacy routing"""
+        import requests
+        
+        endpoint = f"{self.api_url}/api/generate"
+        if not self.api_url.endswith("/api") and not endpoint.endswith("/api/generate"):
+             # Normalise ollama urls
+             endpoint = f"{self.api_url.rstrip('/')}/api/generate"
+        
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+            
+        payload = {
+            "model": self.model,
+            "prompt": full_prompt,
+            "stream": self.stream,
+            "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "60m"),
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+                "num_ctx": self.context_window
+            }
+        }
+        
+        logger.info(f"Sending request to LLM: {self.model} with context_window {self.context_window}")
+        
+        try:
+            # Explicit timeout to prevent silent hangs
+            response = requests.post(endpoint, json=payload, timeout=120)
+            response.raise_for_status()
+            
+            result = response.json()
+            return result.get('response', '').strip()
+            
+        except requests.exceptions.Timeout:
+            logger.error("LLM request timed out")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Could not connect to LLM at {endpoint}")
+            return None
+        except Exception as e:
+            logger.error(f"LLM request failed: {e}")
+            return None
+
+@lru_cache(maxsize=10)
+def get_llm(task_type: str) -> LLMService:
+    """
+    Factory Function to route the correct LLM model, temperature, and context based on task.
+    """
+    task_type = task_type.lower()
+    
+    if task_type == 'extraction':
+        model = os.getenv("LLM_MODEL_EXTRACTION")
+        return LLMService(
+            model=model,
+            temperature=0.0,          # Deterministic JSON
+            max_tokens=1536,          # Reduced from 4096; accused JSON rarely exceeds this
+            context_window=8192,      # Reduced from 16384 for 2x faster inference
+            stream=False
+        )
+        
+    elif task_type == 'sql':
+        model = os.getenv("LLM_MODEL_SQL")
+        return LLMService(
+            model=model,
+            temperature=0.0,
+            max_tokens=1500,
+            context_window=4096,
+            stream=False              # Disabled streaming as required by chatbot architecture
+        )
+        
+    elif task_type == 'classification':
+        model = os.getenv("LLM_MODEL_CLASSIFICATION")
+        return LLMService(
+            model=model,
+            temperature=0.1,          # Slight variability is okay, mostly deterministic
+            max_tokens=512,
+            context_window=2048,      # Small context window for speed
+            stream=False
+        )
+        
+    elif task_type == 'reasoning':
+        model = os.getenv("LLM_MODEL_REASONING")
+        return LLMService(
+            model=model,
+            temperature=0.2,          # Requires some reasoning variance
+            max_tokens=1000,
+            context_window=4096,
+            stream=False
+        )
+
+    elif task_type == 'address':
+        model = os.getenv("LLM_MODEL_ADDRESS", "qwen2.5:14b-instruct")
+        return LLMService(
+            model=model,
+            temperature=0.0,          # deterministic KB-validated extraction
+            max_tokens=256,
+            context_window=4096,
+            stream=False
+        )
+
+    else:
+        logger.warning(f"Unknown task_type '{task_type}', defaulting to extraction parameters.")
+        model = os.getenv("LLM_MODEL_EXTRACTION")
+        return LLMService(model=model)
+
+# --- Retry Loop Wrapper for Extraction ---
+
+# Shared executor for LLM timeout enforcement.
+# Keep >1 workers so parallel ETL workers do not get serialized through this wrapper.
+_llm_timeout_workers = max(
+    1,
+    int(
+        os.getenv(
+            "LLM_TIMEOUT_EXECUTOR_WORKERS",
+            str(int(os.getenv("PARALLEL_LLM_WORKERS", "4")) * 4),
+        )
+    ),
+)
+_llm_timeout_executor = ThreadPoolExecutor(
+    max_workers=_llm_timeout_workers,
+    thread_name_prefix="llm_timeout",
+)
+atexit.register(_llm_timeout_executor.shutdown, wait=False)
+
+
+def invoke_extraction_with_retry(chain, input_data: dict, max_retries: int = 2) -> dict:
+    """
+    Executes a LangChain extraction chain with retry on ANY error.
+    Catches both JSON parsing errors and connection/HTTP errors.
+    Includes timeout protection to prevent hanging.
+    """
+    import time as _time
+    from langchain_core.exceptions import OutputParserException
+
+    retries = 0
+    last_error = None
+    timeout_seconds = float(os.getenv("LLM_TIMEOUT", "300"))
+
+    def _invoke_with_timeout(chain_obj, data):
+        future = _llm_timeout_executor.submit(chain_obj.invoke, data)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError:
+            future.cancel()
+            raise TimeoutError(f"LLM chain.invoke() timed out after {timeout_seconds}s")
+
+    # Run once normally
+    try:
+        logger.info(f"[LLM] Invoking chain (attempt 1)...")
+        t0 = _time.time()
+        result = _invoke_with_timeout(chain, input_data)
+        logger.info(f"[LLM] chain.invoke() returned in {_time.time()-t0:.2f}s")
+        if result:
+            return result
+        logger.warning("LLM returned None/empty on first attempt.")
+    except TimeoutError as e:
+        logger.warning(f"LLM invoke timed out on first attempt: {e}")
+        last_error = e
+    except OutputParserException as e:
+        logger.warning(f"JSON Parsing failed on first attempt: {e}")
+        last_error = e
+    except Exception as e:
+        logger.warning(f"LLM invocation failed on first attempt ({type(e).__name__}): {e}")
+        last_error = e
+
+    retries += 1
+
+    correction_instruction = (
+        "\n\n[SYSTEM OVERRIDE: Your previous response was INVALID JSON. "
+        "You MUST fix the JSON formatting to exactly match the requested schema. "
+        "Ensure all brackets are closed and keys are properly quoted.]"
+    )
+
+    # Retry loop
+    while retries <= max_retries:
+        logger.info(f"Retry {retries}/{max_retries} for JSON Extraction")
+
+        retry_data = input_data.copy()
+        for key in retry_data:
+            if isinstance(retry_data[key], str):
+                retry_data[key] = retry_data[key] + correction_instruction
+                break
+
+        try:
+            result = _invoke_with_timeout(chain, retry_data)
+            if result:
+                logger.info(f"Retry {retries} succeeded.")
+                return result
+        except TimeoutError as e:
+            logger.error(f"LLM invoke timed out on retry {retries}: {e}")
+            last_error = e
+        except OutputParserException as e:
+            logger.error(f"JSON Parsing failed on retry {retries}: {e}")
+            last_error = e
+        except Exception as e:
+            logger.error(f"LLM invocation failed on retry {retries} ({type(e).__name__}): {e}")
+            last_error = e
+
+        retries += 1
+
+    # If we get here, all retries failed
+    logger.error(f"All {max_retries + 1} extraction attempts failed. Last error: {last_error}")
+    return {}
+
+
+# --- Robust JSON Output Parser ---
+
+_RE_LINE_COMMENT   = re.compile(r'(?m)(?<!:)//[^\n\r]*')        # // ...  (avoid URLs http://)
+_RE_BLOCK_COMMENT  = re.compile(r'/\*.*?\*/', re.DOTALL)         # /* ... */
+_RE_TRAILING_COMMA = re.compile(r',(\s*[}\]])')                  # ,} or ,]
+_RE_FENCE_OPEN     = re.compile(r'^\s*```(?:json)?\s*', re.IGNORECASE)
+_RE_FENCE_CLOSE    = re.compile(r'\s*```\s*$')
+# LLM sometimes writes arithmetic in numeric positions: 11829.0 / 57.0  or  43 * 2
+_RE_ARITHMETIC     = re.compile(r'(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)')
+
+
+def _eval_arithmetic(m: re.Match) -> str:
+    """Replace a simple binary arithmetic expression with its evaluated result."""
+    try:
+        a, op, b = float(m.group(1)), m.group(2), float(m.group(3))
+        if op == '+': result = a + b
+        elif op == '-': result = a - b
+        elif op == '*': result = a * b
+        elif op == '/' and b != 0: result = a / b
+        else: return m.group(0)
+        return str(int(result)) if result == int(result) else f"{result:.6g}"
+    except Exception:
+        return m.group(0)
+
+
+def _sanitize_json_text(text: str) -> str:
+    """Strip common LLM-emitted non-JSON artefacts before strict parse."""
+    if not isinstance(text, str):
+        return text
+    cleaned = _RE_FENCE_OPEN.sub('', text)
+    cleaned = _RE_FENCE_CLOSE.sub('', cleaned)
+    cleaned = _RE_BLOCK_COMMENT.sub('', cleaned)
+    cleaned = _RE_LINE_COMMENT.sub('', cleaned)
+    cleaned = _RE_TRAILING_COMMA.sub(r'\1', cleaned)
+    # Evaluate inline arithmetic expressions the LLM emitted (e.g. 11829.0 / 57.0)
+    cleaned = _RE_ARITHMETIC.sub(_eval_arithmetic, cleaned)
+    return cleaned.strip()
+
+
+class RobustJsonOutputParser(JsonOutputParser):
+    """JsonOutputParser that tolerates JS-style comments, trailing commas,
+    and markdown code fences in LLM output before strict JSON parse."""
+
+    def parse(self, text: str):
+        try:
+            return super().parse(text)
+        except Exception:
+            cleaned = _sanitize_json_text(text)
+            return super().parse(cleaned)
+
+    def parse_result(self, result, *, partial: bool = False):
+        try:
+            return super().parse_result(result, partial=partial)
+        except Exception:
+            if result and hasattr(result[0], 'text'):
+                result[0].text = _sanitize_json_text(result[0].text)
+            return super().parse_result(result, partial=partial)
+

@@ -1,0 +1,65 @@
+"""Configuration file for DOPAMAS ETL Pipeline"""
+
+from env_utils import get_bool_env, get_int_env, load_repo_environment, resolve_db_config, resolve_table_name, first_env
+
+load_repo_environment()
+
+import os as _os
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+_IST = _tz(_td(hours=5, minutes=30))
+_from_date = _os.environ.get('ETL_FROM_DATE', '2022-06-01')
+_to_date = _os.environ.get('ETL_TO_DATE', (_dt.now(_IST) - _td(days=1)).strftime('%Y-%m-%d'))
+
+DB_CONFIG = resolve_db_config()
+API_BASE_URL = first_env('DOPAMAS_API_URL')
+
+API_CONFIG = {
+    'base_url': API_BASE_URL,
+    'api_key': first_env('DOPAMAS_API_KEY'),
+    'timeout': get_int_env('API_TIMEOUT', 180),
+    'max_retries': get_int_env('API_MAX_RETRIES', 5),
+    'crimes_url': f"{API_BASE_URL}/crimes",
+    'accused_url': f"{API_BASE_URL}/accused",
+    'persons_url': f"{API_BASE_URL}/person-details",
+    'hierarchy_url': f"{API_BASE_URL}/master-data/hierarchy",
+    'ir_url': f"{API_BASE_URL}/interrogation-reports/v1/",
+}
+
+ETL_CONFIG = {
+    'start_date': f"{_from_date}T00:00:00+05:30",
+    'end_date': f"{_to_date}T23:59:59+05:30",
+    'chunk_days': 5,
+    'chunk_overlap_days': get_int_env('CHUNK_OVERLAP_DAYS', 1),
+    'batch_size': 100,
+    'enable_embeddings': get_bool_env('ENABLE_EMBEDDINGS', False),
+}
+
+EMBEDDING_CONFIG = {
+    'model_name': first_env('EMBEDDING_MODEL'),
+    'brief_facts_model': 'all-mpnet-base-v2',
+    'pattern_model': 'all-MiniLM-L6-v2',
+    'batch_size': 32,
+}
+
+LOG_CONFIG = {
+    'level': first_env('LOG_LEVEL', default='INFO'),
+    'format': '%(log_color)s%(asctime)s - %(levelname)s - %(message)s',
+    'date_format': '%Y-%m-%d %H:%M:%S',
+}
+
+
+def _table_name(env_key: str, default: str) -> str:
+    return resolve_table_name(env_key, default)
+
+
+TABLE_CONFIG = {
+    'crimes': _table_name('CRIMES_TABLE', 'crimes'),
+    'accused': _table_name('ACCUSED_TABLE', 'accused'),
+    'persons': _table_name('PERSONS_TABLE', 'persons'),
+    'hierarchy': _table_name('HIERARCHY_TABLE', 'hierarchy'),
+    'properties': _table_name('PROPERTIES_TABLE', 'properties'),
+    'interrogation_reports': _table_name('IR_TABLE', 'interrogation_reports'),
+    'ir_media': _table_name('IR_MEDIA_TABLE', 'ir_media'),
+}
+
+
