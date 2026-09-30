@@ -20,9 +20,11 @@ import requests
 
 logger = logging.getLogger("cctns_v1_etl.apis")
 
+import os
+
 ORA_BUFFER_ERROR = "ORA-06502"
 MAX_SPLIT_DEPTH = 5
-REQUEST_TIMEOUT_SECS = 60
+REQUEST_TIMEOUT_SECS = int(os.environ.get("CCTNS_REQUEST_TIMEOUT_SECS", "300"))
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECS = 5
 
