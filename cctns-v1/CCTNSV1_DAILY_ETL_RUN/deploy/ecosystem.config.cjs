@@ -18,8 +18,10 @@ module.exports = {
     },
     {
       name: "cctnsv1-airflow-webserver",
+      // Port/host come from .env via airflow_with_env.sh
+      // (AIRFLOW_WEBSERVER_PORT / AIRFLOW_WEBSERVER_HOST).
       script: WRAPPER,
-      args: "webserver --port 9001 --hostname 0.0.0.0",
+      args: "webserver",
       cwd: ETL_ROOT,
       interpreter: "bash",
     },

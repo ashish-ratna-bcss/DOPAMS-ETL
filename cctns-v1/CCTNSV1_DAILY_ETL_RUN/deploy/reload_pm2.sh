@@ -16,4 +16,4 @@ cd "$ETL_DIR"
 pm2 delete cctnsv1-airflow-scheduler cctnsv1-airflow-webserver 2>/dev/null || true
 pm2 start "${ETL_DIR}/deploy/ecosystem.config.cjs"
 pm2 save
-echo "PM2 started (Airflow + ETL metadata in PG_DATABASE, LocalExecutor, UI :9001)"
+echo "PM2 started (ETL in PG_DATABASE; Airflow UI :${AIRFLOW_WEBSERVER_PORT:-9001}; admin password from AIRFLOW_ADMIN_PASSWORD)"

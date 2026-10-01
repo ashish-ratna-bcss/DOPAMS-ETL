@@ -57,9 +57,7 @@ ssh "$REMOTE_HOST" "
   export AIRFLOW__CORE__DAGS_FOLDER='${REMOTE_DIR}/dags' &&
   export AIRFLOW__CORE__LOAD_EXAMPLES=False &&
   ./venv/bin/airflow db migrate &&
-  (./venv/bin/airflow users list 2>/dev/null | grep -q admin || \
-   ./venv/bin/airflow users create --username admin --password admin \
-     --firstname CCTNS --lastname Admin --role Admin --email admin@example.com)
+  echo 'Skip user create here — use PM2 path (./deploy/reload_pm2.sh) which requires AIRFLOW_ADMIN_PASSWORD in .env'
 "
 
 echo "==> [4/4] (Re)starting Airflow scheduler + webserver on ${REMOTE_HOST}"
@@ -81,7 +79,7 @@ ssh "$REMOTE_HOST" "
 "
 
 echo "==> Deploy complete."
-echo "    Airflow UI:   http://<dopams-new-ip>:${WEBSERVER_PORT}  (login: admin / admin -- change this)"
+echo "    Airflow UI:   http://<dopams-new-ip>:${WEBSERVER_PORT}  (set AIRFLOW_ADMIN_PASSWORD in .env; prefer ./deploy/reload_pm2.sh)"
 echo "    DAGs:         cctnsv1_simple_apis_etl (00:30 IST), cctnsv1_accused_yearly_etl (01:30 IST)"
 echo "    Scheduler log: ${REMOTE_HOST}:${REMOTE_DIR}/airflow_scheduler.log"
 echo "    Webserver log: ${REMOTE_HOST}:${REMOTE_DIR}/airflow_webserver.log"

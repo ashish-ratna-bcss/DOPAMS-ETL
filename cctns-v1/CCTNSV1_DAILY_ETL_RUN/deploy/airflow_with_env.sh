@@ -86,11 +86,25 @@ _ensure_airflow_tables() {
 }
 
 _ensure_admin_user() {
-  if ! "${AF}" users list 2>/dev/null | grep -qE '[[:space:]]admin[[:space:]]'; then
-    echo "Creating Airflow admin user (admin / admin — change in UI)" >&2
+  # Never ship a default password. Require a strong secret from .env.
+  local user="${AIRFLOW_ADMIN_USERNAME:-admin}"
+  local email="${AIRFLOW_ADMIN_EMAIL:-admin@localhost}"
+  if [[ -z "${AIRFLOW_ADMIN_PASSWORD:-}" ]]; then
+    echo "AIRFLOW_ADMIN_PASSWORD is required in .env (min 12 chars, not 'admin')." >&2
+    exit 1
+  fi
+  if [[ "${AIRFLOW_ADMIN_PASSWORD}" == "admin" || ${#AIRFLOW_ADMIN_PASSWORD} -lt 12 ]]; then
+    echo "AIRFLOW_ADMIN_PASSWORD must be at least 12 characters and must not be 'admin'." >&2
+    exit 1
+  fi
+  if "${AF}" users list 2>/dev/null | grep -qE "[[:space:]]${user}[[:space:]]"; then
+    echo "Resetting Airflow user '${user}' password from AIRFLOW_ADMIN_PASSWORD" >&2
+    "${AF}" users reset-password --username "${user}" --password "${AIRFLOW_ADMIN_PASSWORD}" >/dev/null
+  else
+    echo "Creating Airflow Admin user '${user}' (password from AIRFLOW_ADMIN_PASSWORD)" >&2
     "${AF}" users create \
-      --username admin --password admin \
-      --firstname CCTNS --lastname Admin --role Admin --email admin@example.com
+      --username "${user}" --password "${AIRFLOW_ADMIN_PASSWORD}" \
+      --firstname CCTNS --lastname Admin --role Admin --email "${email}"
   fi
 }
 
@@ -104,6 +118,14 @@ if [[ "$1" == "scheduler" || "$1" == "webserver" ]]; then
   if [[ "$1" == "scheduler" ]]; then
     _ensure_admin_user
   fi
+fi
+
+# Web UI bind: set AIRFLOW_WEBSERVER_HOST to a private IP (recommended) instead of 0.0.0.0.
+if [[ "$1" == "webserver" ]]; then
+  AF_PORT="${AIRFLOW_WEBSERVER_PORT:-9001}"
+  AF_HOST="${AIRFLOW_WEBSERVER_HOST:-0.0.0.0}"
+  shift
+  exec "${AF}" webserver --port "${AF_PORT}" --hostname "${AF_HOST}" "$@"
 fi
 
 exec "${AF}" "$@"
