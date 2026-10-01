@@ -9,8 +9,8 @@ Nightly pipeline: pull data from **four CCTNS V1 HTTP APIs** on dopams infrastru
 
 | DAG | **IST (India)** | UTC (Airflow cron) | Why |
 |-----|-----------------|---------------------|-----|
-| `cctnsv1_simple_apis_etl` | **00:30** | `0 19 * * *` | Fast 3× GET; FIR loads first for FK checks |
-| `cctnsv1_accused_yearly_etl` | **01:30** | `0 20 * * *` | Long date-range POST; **1 hour after** simple APIs |
+| `cctns_v1_daily_sync_fir_court_accused_details` | **00:30** | `0 19 * * *` | Fast 3× GET; FIR loads first for FK checks |
+| `cctns_v1_daily_sync_accused_dossier` | **01:30** | `0 20 * * *` | Long date-range POST; **1 hour after** simple APIs |
 
 IST = UTC + 5 hours 30 minutes (no DST).
 
@@ -72,8 +72,8 @@ flowchart TB
     end
 
     subgraph Airflow["Airflow on dopams-new"]
-        D1["DAG cctnsv1_simple_apis_etl"]
-        D2["DAG cctnsv1_accused_yearly_etl"]
+        D1["DAG cctns_v1_daily_sync_fir_court_accused_details"]
+        D2["DAG cctns_v1_daily_sync_accused_dossier"]
     end
 
     subgraph Code["Python ETL package"]
@@ -123,8 +123,8 @@ CCTNSV1_DAILY_ETL_RUN/
 │       ├── 000_dedupe_exact_only.sql # ops: safe dedupe on live DB
 │       └── 001_schema_fix.sql        # DRAFT: natural_key + upsert enablement
 ├── dags/
-│   ├── simple_apis_etl.py
-│   ├── accused_yearly_etl.py
+│   ├── daily_sync_fir_court_accused_details.py
+│   ├── daily_sync_accused_dossier.py
 │   ├── cctnsv1_dag_common.py
 │   ├── pipeline_run.py
 │   └── README.md           # DAG-focused doc
@@ -297,13 +297,13 @@ flowchart TB
         C3 -->|false| C5
     end
 
-    subgraph D1["cctnsv1_simple_apis_etl"]
+    subgraph D1["cctns_v1_daily_sync_fir_court_accused_details"]
         B1["bootstrap_database"] --> F["sync_fir ✅ load"]
         F --> C["sync_court ⛔ fetch"]
         F --> AD["sync_accused_details ⛔ fetch"]
     end
 
-    subgraph D2["cctnsv1_accused_yearly_etl"]
+    subgraph D2["cctns_v1_daily_sync_accused_dossier"]
         B2["bootstrap_database"] --> A["sync_accused_dossier ⛔ fetch"]
     end
 

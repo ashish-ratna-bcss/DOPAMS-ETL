@@ -50,19 +50,19 @@ After every `git pull` on the server, run **`./deploy/reload_pm2.sh`** so schedu
 
 | File | Role |
 |------|------|
-| **`simple_apis_etl.py`** | DAG 1: FIR + Court + Accused Details |
-| **`accused_yearly_etl.py`** | DAG 2: Accused date-range dossier |
+| **`daily_sync_fir_court_accused_details.py`** | DAG 1: FIR + Court + Accused Details |
+| **`daily_sync_accused_dossier.py`** | DAG 2: Accused date-range dossier |
 | **`cctnsv1_dag_common.py`** | Shared `start_date`, schedule, retries, tags |
 | **`pipeline_run.py`** | Extract/load for each entity; used by every sync task |
 
 DAG IDs (what you see in the UI):
 
-- `cctnsv1_simple_apis_etl`
-- `cctnsv1_accused_yearly_etl`
+- `cctns_v1_daily_sync_fir_court_accused_details`
+- `cctns_v1_daily_sync_accused_dossier`
 
 ---
 
-## DAG 1 — `cctnsv1_simple_apis_etl`
+## DAG 1 — `cctns_v1_daily_sync_fir_court_accused_details`
 
 **Purpose:** Three **unfiltered GET** APIs that return the full dataset each run (no date chunking).
 
@@ -91,7 +91,7 @@ Court and accused details run **in parallel** after FIR (both depend on `sync_fi
 
 ### Task code path (example: `sync_fir`)
 
-1. Airflow starts a subprocess and calls the `@task` function in `simple_apis_etl.py`.
+1. Airflow starts a subprocess and calls the `@task` function in `daily_sync_fir_court_accused_details.py`.
 2. That calls `run_single_entity("fir")` in `pipeline_run.py`.
 3. `get_connection()` may call `ensure_schema()` again (idempotent).
 4. `fetch_fir()` → HTTP GET → list of dicts.
@@ -102,7 +102,7 @@ Court and accused details run **in parallel** after FIR (both depend on `sync_fi
 
 ---
 
-## DAG 2 — `cctnsv1_accused_yearly_etl`
+## DAG 2 — `cctns_v1_daily_sync_accused_dossier`
 
 **Purpose:** One **POST date-range** API that must be pulled in **7-day chunks** with **adaptive day halving** when Oracle returns `ORA-06502` (buffer too small).
 
@@ -172,8 +172,8 @@ PYTHONPATH=. ./venv/bin/python -c "from dags.pipeline_run import run_single_enti
 
 ```bash
 cd ~/dopams/DOPAMS-ETL/cctns-v1/CCTNSV1_DAILY_ETL_RUN
-./deploy/airflow_with_env.sh dags trigger cctnsv1_simple_apis_etl
-./deploy/airflow_with_env.sh dags trigger cctnsv1_accused_yearly_etl
+./deploy/airflow_with_env.sh dags trigger cctns_v1_daily_sync_fir_court_accused_details
+./deploy/airflow_with_env.sh dags trigger cctns_v1_daily_sync_accused_dossier
 ```
 
 UI: `http://<dopams-new-ip>:9001` — credentials template in `deploy/airflow-credentials.example.txt`.
