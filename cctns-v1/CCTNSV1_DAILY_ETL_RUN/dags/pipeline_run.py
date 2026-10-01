@@ -45,6 +45,7 @@ from db.failed_windows import (  # noqa: E402
     FailedWindowParseError,
     failed_windows_for_run_log,
     normalize_failed_windows,
+    partition_failed_windows,
     record_open_failed_windows,
     resolve_windows_not_failing,
 )
@@ -56,8 +57,10 @@ from db.validate import dedupe_batch, filter_orphan_fir  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("cctns_v1_etl.pipeline")
 
-# Incomplete extract: windows failed → no upsert, Airflow must fail.
+# Incomplete extract: unexpected failed windows → no upsert, Airflow must fail.
 STATUS_EXTRACT_PARTIAL_FAILED = "extract_partial_failed"
+# Loaded successfully while known permanent ORA single-day gaps remain OPEN in ledger.
+STATUS_LOADED_WITH_KNOWN_GAPS = "loaded_with_known_gaps"
 # Child rows missing parent FIR → no upsert, Airflow must fail.
 STATUS_VALIDATE_ORPHAN_FIR = "validate_orphan_fir_failed"
 
@@ -73,7 +76,11 @@ ACCUSED_YEARLY_ENTITY = {
 
 
 def raise_if_task_failed(entity: str, result: dict) -> None:
-    """Airflow fails on extract/load/validate errors and incomplete extracts."""
+    """Airflow fails on extract/load/validate errors and unexpected incomplete extracts.
+
+    `loaded_with_known_gaps` is success: known permanent ORA-06502 single-day gaps
+    were recorded in the ledger and the rest of the extract was loaded.
+    """
     if result.get("status") in (
         "extract_failed",
         "load_failed",
@@ -181,13 +188,26 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
     fw_log = failed_windows_for_run_log(failed_windows) if failed_windows else None
     logger.info("%s: fetched=%d failed_windows=%d", entity, fetched, len(failed_windows))
 
-    # Fail-closed: any failed date window means incomplete source → no upsert,
-    # durable OPEN ledger rows, Airflow task failure via raise_if_task_failed.
+    known_gaps: list = []
+    blocking_gaps: list = []
     if failed_windows:
-        logger.error(
-            "%s: extract incomplete — %d failed window(s); skipping upsert",
+        known_gaps, blocking_gaps = partition_failed_windows(failed_windows)
+        logger.info(
+            "%s: failed_windows known_ora_gaps=%d blocking=%d",
             entity,
-            len(failed_windows),
+            len(known_gaps),
+            len(blocking_gaps),
+        )
+
+    # Fail-closed only on unexpected failures (timeouts, multi-day, non-ORA, etc.).
+    # Known permanent single-day ORA-06502 gaps stay in the ledger but do not block load.
+    if blocking_gaps:
+        logger.error(
+            "%s: extract incomplete — %d blocking failed window(s) "
+            "(%d known ORA gaps); skipping upsert",
+            entity,
+            len(blocking_gaps),
+            len(known_gaps),
         )
         cur = conn.cursor()
         _sync_failed_window_ledger(cur, entity, run_id, failed_windows)
@@ -197,19 +217,32 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
             status=STATUS_EXTRACT_PARTIAL_FAILED,
             rows_fetched=fetched,
             failed_windows=fw_log,
-            error_message=f"{len(failed_windows)} date window(s) failed; load skipped",
+            error_message=(
+                f"{len(blocking_gaps)} unexpected date window(s) failed "
+                f"({len(known_gaps)} known ORA gaps); load skipped"
+            ),
         )
         conn.commit()
         return {
             "status": STATUS_EXTRACT_PARTIAL_FAILED,
             "fetched": fetched,
             "failed_windows": len(failed_windows),
+            "known_ora_gaps": len(known_gaps),
+            "blocking_failed_windows": len(blocking_gaps),
         }
 
-    # Full extract succeeded: any prior OPEN gaps for this entity are resolved.
+    # No blocking gaps: keep known ORA gaps OPEN in ledger (or clear if none).
     cur = conn.cursor()
-    _sync_failed_window_ledger(cur, entity, run_id, [])
+    _sync_failed_window_ledger(cur, entity, run_id, known_gaps)
     conn.commit()
+    if known_gaps:
+        logger.warning(
+            "%s: accepting %d known permanent ORA-06502 single-day gap(s); "
+            "loading %d fetched row(s)",
+            entity,
+            len(known_gaps),
+            fetched,
+        )
 
     if not cfg["upsert_ready"]:
         logger.warning(
@@ -223,13 +256,14 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
             log_id,
             status="not_loaded",
             rows_fetched=fetched,
-            failed_windows=None,
+            failed_windows=fw_log,
         )
         conn.commit()
         return {
             "status": "not_loaded_pending_key",
             "fetched": fetched,
-            "failed_windows": 0,
+            "failed_windows": len(failed_windows),
+            "known_ora_gaps": len(known_gaps),
         }
 
     logger.info("--- %s [2/4] validate — dedupe batch + FIR relationship ---", entity)
@@ -258,7 +292,7 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
             rows_fetched=fetched,
             rows_batch_dupes_removed=dupes_removed,
             rows_orphan_fir_skipped=orphan_skipped,
-            failed_windows=None,
+            failed_windows=fw_log,
             error_message=msg,
         )
         conn.commit()
@@ -269,6 +303,7 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
             "orphan_fir_skipped": orphan_skipped,
         }
 
+    load_status = STATUS_LOADED_WITH_KNOWN_GAPS if known_gaps else "loaded"
     logger.info("--- %s [3/4] load — insert / update / ignore unchanged ---", entity)
     cur = conn.cursor()
     try:
@@ -283,21 +318,27 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
         finish_entity_run(
             cur,
             log_id,
-            status="loaded",
+            status=load_status,
             rows_fetched=fetched,
             rows_inserted=result["inserted"],
             rows_updated=result["updated"],
             rows_unchanged=result["unchanged"],
             rows_batch_dupes_removed=dupes_removed,
             rows_orphan_fir_skipped=orphan_skipped,
-            failed_windows=None,
+            failed_windows=fw_log,
+            error_message=(
+                f"{len(known_gaps)} known ORA-06502 single-day gap(s); rest loaded"
+                if known_gaps
+                else None
+            ),
         )
         conn.commit()
         logger.info("--- %s [4/4] run log + row actions committed ---", entity)
         return {
-            "status": "loaded",
+            "status": load_status,
             "fetched": fetched,
-            "failed_windows": 0,
+            "failed_windows": len(failed_windows),
+            "known_ora_gaps": len(known_gaps),
             "batch_dupes_removed": dupes_removed,
             "orphan_fir_skipped": orphan_skipped,
             **result,
@@ -314,7 +355,7 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
             rows_batch_dupes_removed=dupes_removed,
             rows_orphan_fir_skipped=orphan_skipped,
             error_message=str(err),
-            failed_windows=None,
+            failed_windows=fw_log,
         )
         conn.commit()
         return {"status": "load_failed"}

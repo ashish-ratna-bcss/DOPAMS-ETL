@@ -59,7 +59,9 @@ def finish_entity_run(cur, log_id: int, *, status: str, **fields: Any) -> None:
         if key not in fields:
             continue
         value = fields[key]
-        if key == "failed_windows" and value is not None and not isinstance(value, str):
+        if value is None:
+            continue
+        if key == "failed_windows" and not isinstance(value, str):
             value = json.dumps(value)
         sets.append(f"{key} = %s")
         params.append(value)
