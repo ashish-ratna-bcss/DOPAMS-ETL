@@ -1,0 +1,23 @@
+# Database Configuration
+# Prod
+# POSTGRES_PASSWORD=your_prod_db_password
+# POSTGRES_USER=your_prod_db_user
+# POSTGRES_DB=your_prod_db_name
+# POSTGRES_HOST=your_prod_db_host
+# POSTGRES_PORT=5432
+
+
+# Dev
+POSTGRES_PASSWORD=your_dev_db_password
+POSTGRES_USER=your_dev_db_user
+POSTGRES_DB=your_dev_db_name
+POSTGRES_HOST=your_dev_db_host
+POSTGRES_PORT=5432
+
+# API Configuration
+DOPAMAS_API_URL=http://your-api-host:3000/api/DOPAMS
+DOPAMAS_API_KEY=your_api_key_here
+
+# Application Configuration
+DEBUG=True
+LOG_LEVEL=INFO

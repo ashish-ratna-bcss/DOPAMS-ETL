@@ -1,0 +1,1977 @@
+#!/usr/bin/env python3
+"""
+DOPAMAS ETL Pipeline - Chargesheets API
+Fetches chargesheets data in 5-day chunks and loads into PostgreSQL
+Handles: chargesheets,
+and the chargesheet's uploadChargeSheet file/media reference (in the consolidated
+file_media_bookkeeping table -- formerly chargesheet_files/chargesheet_media)
+"""
+
+import sys
+import time
+import requests
+import psycopg2
+from psycopg2.extras import execute_batch
+from datetime import datetime, timedelta, timezone
+from tqdm import tqdm
+import logging
+import colorlog
+from typing import List, Dict, Optional, Tuple, Set
+import json
+import uuid
+import threading
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Add project root to Python path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from config import DB_CONFIG, API_CONFIG, ETL_CONFIG, LOG_CONFIG, TABLE_CONFIG
+from env_utils import get_etl_run_id
+from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
+
+try:
+    from etl_fk_retry_queue import push_fk_failure, drain_fk_queue as _drain_fk_queue
+except ImportError:  # pragma: no cover
+    push_fk_failure = None
+    _drain_fk_queue = None
+
+# Add TRACE level support (lower than DEBUG)
+TRACE_LEVEL = 5
+logging.addLevelName(TRACE_LEVEL, 'TRACE')
+
+def trace(self, message, *args, **kws):
+    """Custom trace method for logger"""
+    if self.isEnabledFor(TRACE_LEVEL):
+        self._log(TRACE_LEVEL, message, args, **kws)
+
+logging.Logger.trace = trace
+
+# Setup colored logging
+handler = colorlog.StreamHandler()
+handler.setFormatter(colorlog.ColoredFormatter(
+    LOG_CONFIG['format'],
+    datefmt=LOG_CONFIG['date_format'],
+    log_colors={
+        'TRACE': 'white',
+        'DEBUG': 'cyan',
+        'INFO': 'green',
+        'WARNING': 'yellow',
+        'ERROR': 'red',
+        'CRITICAL': 'red,bg_white',
+    }
+))
+logger = colorlog.getLogger()
+logger.addHandler(handler)
+
+# Ensure trace method is available on the logger instance (for colorlog compatibility)
+if not hasattr(logger, 'trace') or not callable(getattr(logger, 'trace', None)):
+    import types
+    logger.trace = types.MethodType(trace, logger)
+
+# Handle TRACE level
+log_level = LOG_CONFIG['level'].upper()
+if log_level == 'TRACE':
+    logger.setLevel(TRACE_LEVEL)
+else:
+    logger.setLevel(log_level)
+
+# Target tables (allows redirecting ETL into test tables)
+CHARGESHEETS_TABLE = TABLE_CONFIG.get('chargesheets', 'chargesheets')
+# chargesheet_files and chargesheet_media were consolidated into file_media_bookkeeping
+# (source_type='chargesheets', source_field='uploadChargeSheet').
+CRIMES_TABLE = TABLE_CONFIG.get('crimes', 'crimes')
+
+# CCTNS V2 source-provenance constants (see migrations/2026-09-23_add_cctns_provenance_columns.sql)
+SOURCE_SYSTEM = 'CCTNS_V2'
+SOURCE_ENDPOINT = '/chargesheets'
+ETL_RUN_ID = get_etl_run_id()
+
+# IST timezone offset (UTC+05:30)
+IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
+
+def parse_iso_date(iso_date_str: str) -> datetime:
+    """
+    Parse ISO 8601 date string to datetime object
+    Supports formats:
+    - YYYY-MM-DDTHH:MM:SS+TZ:TZ (e.g., '2022-10-01T00:00:00+05:30')
+    - YYYY-MM-DD (e.g., '2022-10-01') - defaults to 00:00:00 IST
+    - YYYY-MM-DD HH:MM:SS (e.g., '2025-08-23 10:20:00') - defaults to IST
+    
+    Args:
+        iso_date_str: ISO 8601 date string or date-time string
+        
+    Returns:
+        datetime object with timezone info
+    """
+    try:
+        # Try parsing as ISO format with timezone
+        if 'T' in iso_date_str or ' ' in iso_date_str:
+            # ISO format with time: 2022-10-01T00:00:00+05:30
+            return datetime.fromisoformat(iso_date_str.replace('Z', '+00:00'))
+        elif ' ' in iso_date_str and ':' in iso_date_str:
+            # Format: YYYY-MM-DD HH:MM:SS (from API)
+            dt = datetime.strptime(iso_date_str, '%Y-%m-%d %H:%M:%S')
+            return dt.replace(tzinfo=IST_OFFSET)
+        else:
+            # Date only format: 2022-10-01 - default to 00:00:00 IST
+            dt = datetime.strptime(iso_date_str, '%Y-%m-%d')
+            return dt.replace(tzinfo=IST_OFFSET)
+    except ValueError:
+        # Fallback: try parsing as date only
+        try:
+            dt = datetime.strptime(iso_date_str.split('T')[0].split(' ')[0], '%Y-%m-%d')
+            return dt.replace(tzinfo=IST_OFFSET)
+        except:
+            return None
+
+def iso_to_date_only(iso_date_str: str) -> str:
+    """
+    Extract date part from ISO 8601 format string
+    Converts '2022-10-01T00:00:00+05:30' to '2022-10-01'
+    
+    Args:
+        iso_date_str: ISO 8601 date string
+    
+    Returns:
+        Date string in YYYY-MM-DD format
+    """
+    if 'T' in iso_date_str or ' ' in iso_date_str:
+        return iso_date_str.split('T')[0]
+    return iso_date_str
+
+def format_iso_date(dt: datetime, include_time: bool = True) -> str:
+    """
+    Format datetime to ISO 8601 string
+    
+    Args:
+        dt: datetime object
+        include_time: If True, includes time and timezone; if False, only date
+    
+    Returns:
+        ISO 8601 formatted string
+    """
+    if include_time:
+        # Ensure timezone info
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST_OFFSET)
+        return dt.isoformat()
+    else:
+        return dt.strftime('%Y-%m-%d')
+
+
+def get_yesterday_end_ist() -> str:
+    """Get yesterday's date at 23:59:59 in IST (UTC+05:30) as ISO format string."""
+    now_ist = datetime.now(IST_OFFSET)
+    yesterday = now_ist - timedelta(days=1)
+    yesterday_end = yesterday.replace(hour=23, minute=59, second=59, microsecond=0)
+    return yesterday_end.isoformat()
+
+
+class ChargesheetsETL:
+    """ETL Pipeline for Chargesheets API"""
+    
+    def __init__(self):
+        self._local = threading.local()
+        self._table_columns_cache = {}
+        self.stats_lock = threading.Lock()
+        self.log_lock = threading.Lock()
+        self.schema_lock = threading.Lock()
+        self.max_workers = min(32, int(os.environ.get('MAX_WORKERS', (os.cpu_count() or 1) * 4)))
+        self.window_guard = WindowGuard()
+        self.stats = {
+            'total_api_calls': 0,
+            'total_chargesheets_fetched': 0,
+            'total_chargesheets_inserted': 0,
+            'total_chargesheets_updated': 0,
+            'total_chargesheets_no_change': 0,
+            'total_chargesheets_failed': 0,
+            'total_chargesheets_failed_crime_id': 0,  # Chargesheets failed due to CRIME_ID not found
+            'total_files_inserted': 0,
+            'total_files_updated': 0,
+            'total_acts_inserted': 0,
+            'total_acts_updated': 0,
+            'total_accused_inserted': 0,
+            'total_accused_updated': 0,
+            'total_duplicates': 0,
+            'failed_api_calls': 0,
+            'errors': []
+        }
+        
+        # Setup chunk-wise logging files
+        self.setup_chunk_loggers()
+    
+    def setup_chunk_loggers(self):
+        """Setup separate log files for API responses, DB operations, and failed records"""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Create logs directory if it doesn't exist
+        import os
+        os.makedirs('logs', exist_ok=True)
+        
+        # API response log file
+        self.api_log_file = f'logs/chargesheets_api_chunks_{timestamp}.log'
+        self.api_log = open(self.api_log_file, 'w', encoding='utf-8')
+        self.api_log.write(f"# Chargesheets API Chunk-wise Log\n")
+        self.api_log.write(f"# Generated: {datetime.now().isoformat()}\n")
+        self.api_log.write(f"# Date Range (ISO 8601): {ETL_CONFIG['start_date']} to {ETL_CONFIG['end_date']}\n")
+        overlap_days = ETL_CONFIG.get('chunk_overlap_days', 1)
+        self.api_log.write(f"# Chunk Size: {ETL_CONFIG['chunk_days']} days (overlap: {overlap_days} day(s) between chunks)\n")
+        self.api_log.write(f"# API Server Timezone: IST (UTC+05:30)\n")
+        start_dt = parse_iso_date(ETL_CONFIG['start_date'])
+        end_dt = parse_iso_date(ETL_CONFIG['end_date'])
+        self.api_log.write(f"#   - Start: {format_iso_date(start_dt)} (IST)\n")
+        self.api_log.write(f"#   - End: {format_iso_date(end_dt)} (IST)\n")
+        self.api_log.write(f"# ETL Server Timezone: UTC\n")
+        self.api_log.write(f"{'='*80}\n\n")
+        
+        # Database operations log file
+        self.db_log_file = f'logs/chargesheets_db_chunks_{timestamp}.log'
+        self.db_log = open(self.db_log_file, 'w', encoding='utf-8')
+        self.db_log.write(f"# Chargesheets Database Operations Chunk-wise Log\n")
+        self.db_log.write(f"# Generated: {datetime.now().isoformat()}\n")
+        self.db_log.write(f"# Date Range (ISO 8601): {ETL_CONFIG['start_date']} to {ETL_CONFIG['end_date']}\n")
+        overlap_days = ETL_CONFIG.get('chunk_overlap_days', 1)
+        self.db_log.write(f"# Chunk Size: {ETL_CONFIG['chunk_days']} days (overlap: {overlap_days} day(s) between chunks)\n")
+        self.db_log.write(f"# API Server Timezone: IST (UTC+05:30)\n")
+        start_dt = parse_iso_date(ETL_CONFIG['start_date'])
+        end_dt = parse_iso_date(ETL_CONFIG['end_date'])
+        self.db_log.write(f"#   - Start: {format_iso_date(start_dt)} (IST)\n")
+        self.db_log.write(f"#   - End: {format_iso_date(end_dt)} (IST)\n")
+        self.db_log.write(f"{'='*80}\n\n")
+        
+        # Failed records log file
+        self.failed_log_file = f'logs/chargesheets_failed_{timestamp}.log'
+        self.failed_log = open(self.failed_log_file, 'w', encoding='utf-8')
+        self.failed_log.write(f"# Chargesheets Failed Records Log\n")
+        self.failed_log.write(f"# Generated: {datetime.now().isoformat()}\n")
+        self.failed_log.write(f"# Records that failed to insert or update with reasons\n")
+        self.failed_log.write(f"{'='*80}\n\n")
+        
+        # Duplicates log file
+        self.duplicates_log_file = f'logs/chargesheets_duplicates_{timestamp}.log'
+        self.duplicates_log = open(self.duplicates_log_file, 'w', encoding='utf-8')
+        self.duplicates_log.write(f"# Chargesheets Duplicates Log\n")
+        self.duplicates_log.write(f"# Generated: {datetime.now().isoformat()}\n")
+        self.duplicates_log.write(f"# Duplicate records found within the same chunk\n")
+        self.duplicates_log.write(f"{'='*80}\n\n")
+        
+        # Invalid crime_id log file (chargesheets with crime_id not found in crimes table)
+        self.invalid_crime_id_log_file = f'logs/chargesheets_invalid_crime_id_{timestamp}.log'
+        self.invalid_crime_id_log = open(self.invalid_crime_id_log_file, 'w', encoding='utf-8')
+        self.invalid_crime_id_log.write(f"# Chargesheets Invalid CRIME_ID Log\n")
+        self.invalid_crime_id_log.write(f"# Generated: {datetime.now().isoformat()}\n")
+        self.invalid_crime_id_log.write(f"# Chargesheets that failed because CRIME_ID not found in crimes table\n")
+        self.invalid_crime_id_log.write(f"# These records are SKIPPED and NOT inserted/updated\n")
+        self.invalid_crime_id_log.write(f"{'='*80}\n\n")
+        
+        logger.info(f"📝 API chunk log: {self.api_log_file}")
+        logger.info(f"📝 DB chunk log: {self.db_log_file}")
+        logger.info(f"📝 Failed records log: {self.failed_log_file}")
+        logger.info(f"📝 Duplicates log: {self.duplicates_log_file}")
+        logger.info(f"📝 Invalid CRIME_ID log: {self.invalid_crime_id_log_file}")
+    
+    def close_chunk_loggers(self):
+        """Close chunk log files"""
+        if hasattr(self, 'api_log') and self.api_log:
+            self.api_log.close()
+        if hasattr(self, 'db_log') and self.db_log:
+            self.db_log.close()
+        if hasattr(self, 'failed_log') and self.failed_log:
+            self.failed_log.close()
+        if hasattr(self, 'duplicates_log') and self.duplicates_log:
+            self.duplicates_log.close()
+        if hasattr(self, 'invalid_crime_id_log') and self.invalid_crime_id_log:
+            self.invalid_crime_id_log.close()
+    
+    @property
+    def _conn(self):
+        if not hasattr(self._local, 'conn') or self._local.conn is None or self._local.conn.closed:
+            self._local.conn = psycopg2.connect(**DB_CONFIG)
+            self._local.cursor = self._local.conn.cursor()
+        return self._local.conn
+
+    @property
+    def _cursor(self):
+        if not hasattr(self._local, 'conn') or self._local.conn is None or self._local.conn.closed:
+            self._local.conn = psycopg2.connect(**DB_CONFIG)
+            self._local.cursor = self._local.conn.cursor()
+        return self._local.cursor
+
+    def connect_db(self):
+        """Connect to PostgreSQL database (thread-local connection)"""
+        try:
+            _ = self._conn
+            logger.info(f"✅ Connected to database: {DB_CONFIG['dbname']}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            return False
+    
+    def close_db(self):
+        """Close thread-local database connection"""
+        try:
+            if hasattr(self._local, 'cursor') and self._local.cursor:
+                self._local.cursor.close()
+        except Exception:
+            pass
+        try:
+            if hasattr(self._local, 'conn') and self._local.conn:
+                self._local.conn.close()
+        except Exception:
+            pass
+        self._local.conn = None
+        self._local.cursor = None
+        logger.info("Database connection closed")
+    
+    def get_table_columns(self, table_name: str) -> Set[str]:
+        """Get all column names from a table."""
+        try:
+            self._conn.rollback()
+            self._cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = %s
+            """, (table_name,))
+            return {row[0] for row in self._cursor.fetchall()}
+        except Exception as e:
+            logger.error(f"Error getting table columns for {table_name}: {e}")
+            self._conn.rollback()
+            return set()
+    
+    def get_effective_start_date(self) -> str:
+        """
+        Get effective start date for ETL by checking all 4 chargesheet tables:
+        - If all tables are empty: return 2022-01-01T00:00:00+05:30
+        - If any table has data: return max(date_created, date_modified) across all tables
+        - Uses overlap: goes back by overlap_days to ensure no data is missed
+        """
+        force_start = os.environ.get('FORCE_START_DATE')
+        if force_start:
+            logger.info(f"⚠️  FORCE_START_DATE override: {force_start}")
+            return force_start
+        try:
+            # Rollback any previous failed transaction
+            self._conn.rollback()
+            
+            # acts/accused are now parallel array columns on chargesheets itself
+            # (chargesheet_acts/chargesheet_acts_sections/chargesheet_accused no
+            # longer exist as separate tables), and chargesheet_files/media were
+            # consolidated into the shared file_media_bookkeeping table (written
+            # by every entity ETL, so an unfiltered MAX(date) scan of it would
+            # bleed in unrelated entities' dates) -- chargesheets.date_created/
+            # date_modified alone is sufficient signal for this resume-date
+            # detection since acts/accused/files are now written in the same
+            # transaction as the parent chargesheet row.
+            table_configs = [
+                {
+                    'table': CHARGESHEETS_TABLE,
+                    'date_columns': ['date_created', 'date_modified'],  # chargesheets table uses date_created/date_modified
+                    'name': 'chargesheets'
+                }
+            ]
+            
+            max_dates = []
+            
+            for config in table_configs:
+                table = config['table']
+                date_columns = config['date_columns']
+                table_name = config['name']
+                
+                try:
+                    # Check if table exists and has any data
+                    self._cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = self._cursor.fetchone()[0]
+                    
+                    if count > 0:
+                        # Build query with appropriate date columns for this table
+                        date_checks = []
+                        for col in date_columns:
+                            date_checks.append(f"COALESCE(MAX(CASE WHEN {col} >= '2022-01-01'::timestamp THEN {col} END), '2022-01-01'::timestamp)")
+                        
+                        query = f"""
+                            SELECT GREATEST({', '.join(date_checks)})
+                            FROM {table}
+                        """
+                        self._cursor.execute(query)
+                        result = self._cursor.fetchone()
+                        if result and result[0]:
+                            max_dates.append(result[0])
+                            logger.debug(f"📊 {table_name} table max date: {result[0]}")
+                except Exception as e:
+                    # Rollback on error and continue with next table
+                    self._conn.rollback()
+                    logger.warning(f"⚠️  Error checking {table_name} table: {e}")
+                    continue
+            
+            if not max_dates:
+                # All tables are empty, start from beginning
+                logger.info("📊 All chargesheet tables are empty, starting from 2022-01-01")
+                return '2022-01-01T00:00:00+05:30'
+            
+            # Get the maximum date across all tables
+            max_date = max(max_dates)
+            min_start_dt = parse_iso_date('2022-01-01T00:00:00+05:30')
+            
+            # Convert to IST timezone if needed
+            if isinstance(max_date, datetime):
+                if max_date.tzinfo is None:
+                    max_date = max_date.replace(tzinfo=IST_OFFSET)
+                else:
+                    max_date = max_date.astimezone(IST_OFFSET)
+                
+                # Ensure we never go before 2022-01-01
+                if max_date < min_start_dt:
+                    logger.warning(f"⚠️  Max date ({max_date.isoformat()}) is before 2022-01-01, using 2022-01-01")
+                    return '2022-01-01T00:00:00+05:30'
+                
+                # Apply overlap: go back by overlap_days to ensure no data is missed
+                overlap_days = ETL_CONFIG.get('chunk_overlap_days', 1)
+                effective_start = max_date - timedelta(days=overlap_days)
+                
+                # Ensure we never go before 2022-01-01
+                if effective_start < min_start_dt:
+                    effective_start = min_start_dt
+                
+                logger.info(f"📊 Chargesheet tables have data, latest date: {max_date.isoformat()}")
+                logger.info(f"📊 Effective start date (with {overlap_days} day overlap): {effective_start.isoformat()}")
+                return effective_start.isoformat()
+            
+            # Fallback to start date
+            logger.warning("⚠️  Could not determine max date, using 2022-01-01")
+            return '2022-01-01T00:00:00+05:30'
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting effective start date: {e}")
+            self._conn.rollback()
+            logger.warning("⚠️  Using default start date: 2022-01-01")
+            return '2022-01-01T00:00:00+05:30'
+    
+    def detect_new_fields(self, api_record: Dict, table_columns: Set[str]) -> Dict[str, str]:
+        """
+        Detect new fields in API response that don't exist in chargesheets table.
+        Returns dict mapping API field name to database column name (snake_case).
+        API uses camelCase field names.
+        """
+        new_fields = {}
+        
+        # Map API field names (camelCase) to database column names (snake_case)
+        field_mapping = {
+            'crimeId': 'crime_id',
+            'chargeSheetNo': 'chargesheet_no',
+            'chargeSheetNoForIcjs': 'chargesheet_no_icjs',
+            'chargeSheetDate': 'chargesheet_date',
+            'chargeSheetType': 'chargesheet_type',
+            'courtName': 'court_name',
+            'isCcl': 'is_ccl',
+            'isEsigned': 'is_esigned',
+            'dateCreated': 'date_created',
+            'dateModified': 'date_modified',
+            # Also support uppercase for backward compatibility
+            'CRIME_ID': 'crime_id',
+            'CHARGESHEET_NO': 'chargesheet_no',
+            'CHARGESHEET_NO_ICJS': 'chargesheet_no_icjs',
+            'CHARGESHEET_DATE': 'chargesheet_date',
+            'CHARGESHEET_TYPE': 'chargesheet_type',
+            'COURT_NAME': 'court_name',
+            'IS_CCL': 'is_ccl',
+            'IS_ESIGNED': 'is_esigned',
+            'DATE_CREATED': 'date_created',
+            'DATE_MODIFIED': 'date_modified'
+        }
+        
+        for api_field, db_column in field_mapping.items():
+            if api_field in api_record and db_column not in table_columns:
+                new_fields[api_field] = db_column
+        
+        return new_fields
+    
+    def add_column_to_table(self, column_name: str, column_type: str = 'TEXT'):
+        """Add a new column to the chargesheets table."""
+        try:
+            # Determine column type based on field name
+            if column_name == 'chargesheet_date' or 'date' in column_name.lower():
+                column_type = 'TIMESTAMP'
+            elif column_name == 'crime_id':
+                column_type = 'VARCHAR(50)'
+            elif column_name in ('chargesheet_no', 'chargesheet_no_icjs', 'chargesheet_type'):
+                column_type = 'VARCHAR(50)'
+            elif column_name in ('is_ccl', 'is_esigned'):
+                column_type = 'BOOLEAN'
+            elif column_name in ('court_name'):
+                column_type = 'TEXT'
+            else:
+                column_type = 'TEXT'
+            
+            with self.schema_lock:
+                alter_sql = f"ALTER TABLE {CHARGESHEETS_TABLE} ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                self._cursor.execute(alter_sql)
+                self._conn.commit()
+            logger.info(f"✅ Added column {column_name} ({column_type}) to {CHARGESHEETS_TABLE}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error adding column {column_name}: {e}")
+            self._conn.rollback()
+            return False
+    
+    def update_existing_records_with_new_fields(self, new_fields: Dict[str, str], chunk_end_date: str):
+        """
+        Update existing records from start_date to chunk_end_date with new fields.
+        For new fields, set to NULL (they will be updated when those records are processed).
+        """
+        if not new_fields:
+            return
+        
+        try:
+            logger.info(f"📝 New fields detected: {list(new_fields.keys())}")
+            logger.info(f"   Note: Existing records will be updated when processed in future ETL runs")
+            logger.info(f"   New fields are set to NULL for existing records until they are reprocessed")
+        except Exception as e:
+            logger.error(f"❌ Error updating existing records: {e}")
+    
+    def generate_date_ranges(self, start_date: str, end_date: str, chunk_days: int = 5, overlap_days: int = 1) -> List[Tuple[str, str]]:
+        """
+        Generate date ranges in chunks with overlap to ensure no data is missed
+        OVERLAP: Each chunk overlaps with the previous chunk by overlap_days to catch boundary records
+        
+        Accepts ISO 8601 format dates (e.g., '2022-10-01T00:00:00+05:30')
+        Returns date-only format (YYYY-MM-DD) for API compatibility
+        
+        API interprets dates as:
+        - fromDate: YYYY-MM-DD 00:00:00 IST (start of day)
+        - toDate: YYYY-MM-DD 23:59:59 IST (end of day)
+        
+        Example with chunk_days=5, overlap_days=1:
+        - Chunk 1: 2022-10-01 to 2022-10-05 (2022-10-01 00:00:00 IST to 2022-10-05 23:59:59 IST)
+        - Chunk 2: 2022-10-05 to 2022-10-10 (2022-10-05 00:00:00 IST to 2022-10-10 23:59:59 IST) - overlaps by 1 day
+        - Chunk 3: 2022-10-10 to 2022-10-15 (2022-10-10 00:00:00 IST to 2022-10-15 23:59:59 IST) - overlaps by 1 day
+        - Overlap ensures no records are missed at boundaries ✅
+        
+        Note: Duplicate records from overlap are handled by smart update logic (updates only if changed)
+        
+        Args:
+            start_date: Start date in ISO 8601 format (e.g., '2022-10-01T00:00:00+05:30')
+            end_date: End date in ISO 8601 format (e.g., '2025-11-18T23:59:59+05:30')
+            chunk_days: Number of days per chunk
+            overlap_days: Number of days to overlap between chunks (default: 1 to ensure no data loss)
+        
+        Returns:
+            List of (from_date, to_date) tuples in YYYY-MM-DD format (for API compatibility)
+        """
+        date_ranges = []
+        # Parse ISO format dates
+        current_date = parse_iso_date(start_date)
+        end = parse_iso_date(end_date)
+        
+        # Extract date part (without time) for comparison
+        current_date_only = current_date.date()
+        end_date_only = end.date()
+        
+        while current_date_only <= end_date_only:
+            # Calculate chunk end: current_date + (chunk_days - 1) days
+            chunk_end_date = current_date_only + timedelta(days=chunk_days - 1)
+            if chunk_end_date > end_date_only:
+                chunk_end_date = end_date_only
+            
+            # Return date-only format for API compatibility
+            date_ranges.append((
+                current_date_only.strftime('%Y-%m-%d'),
+                chunk_end_date.strftime('%Y-%m-%d')
+            ))
+            
+            # Next chunk starts with overlap
+            next_start = chunk_end_date - timedelta(days=overlap_days - 1)
+            
+            # If we've already reached or passed the end date, break
+            if chunk_end_date >= end_date_only:
+                break
+            
+            # Move to next chunk start
+            current_date_only = next_start
+        
+        return date_ranges
+    
+    def fetch_chargesheets_api(self, from_date: str, to_date: str) -> Optional[List[Dict]]:
+        """
+        Fetch chargesheets data from API for given date range
+        
+        Args:
+            from_date: Start date (YYYY-MM-DD)
+            to_date: End date (YYYY-MM-DD)
+        
+        Returns:
+            List of chargesheet records or None if failed
+        """
+        # Use chargesheets_url from config (which reads from .env)
+        url = API_CONFIG.get('chargesheets_url', f"{API_CONFIG['base_url']}/chargesheets")
+        params = {
+            'fromDate': from_date,
+            'toDate': to_date
+        }
+        headers = {
+            'x-api-key': API_CONFIG['api_key']
+        }
+        
+        for attempt in range(API_CONFIG['max_retries']):
+            try:
+                logger.debug(f"Fetching chargesheets: {from_date} to {to_date} (Attempt {attempt + 1})")
+                logger.trace(f"API Request - URL: {url}, Params: {params}, Headers: {headers}")
+                response = requests.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=API_CONFIG['timeout']
+                )
+                logger.trace(f"API Response - Status: {response.status_code}, Headers: {dict(response.headers)}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    self.stats['total_api_calls'] += 1
+                    
+                    # Handle both single object and array responses
+                    if data.get('status'):
+                        chargesheets_data = data.get('data')
+                        if chargesheets_data:
+                            # If single object, convert to list
+                            if isinstance(chargesheets_data, dict):
+                                chargesheets_data = [chargesheets_data]
+                            
+                            # Extract crime_ids for logging (API uses camelCase: 'crimeId')
+                            crime_ids = [d.get('crimeId') or d.get('CRIME_ID') for d in chargesheets_data if d.get('crimeId') or d.get('CRIME_ID')]
+                            
+                            # Log to API chunk file
+                            self.log_api_chunk(from_date, to_date, len(chargesheets_data), crime_ids, chargesheets_data)
+                            
+                            logger.info(f"✅ Fetched {len(chargesheets_data)} chargesheet records for {from_date} to {to_date}")
+                            logger.debug(f"📋 Crime IDs from API: {crime_ids[:10]}{'...' if len(crime_ids) > 10 else ''}")
+                            logger.trace(f"Full Crime IDs list: {crime_ids}")
+                            logger.trace(f"Sample chargesheet structure: {json.dumps(chargesheets_data[0] if chargesheets_data else {}, indent=2, default=str)}")
+                            return chargesheets_data
+                        else:
+                            # Log empty response
+                            self.log_api_chunk(from_date, to_date, 0, [], [])
+                            logger.warning(f"⚠️  No chargesheet records found for {from_date} to {to_date}")
+                            return []
+                    else:
+                        # Log failed status
+                        self.log_api_chunk(from_date, to_date, 0, [], [], error="API returned status=false")
+                        logger.warning(f"⚠️  API returned status=false for {from_date} to {to_date}")
+                        return []
+                
+                elif response.status_code == 404:
+                    # Log 404 response
+                    self.log_api_chunk(from_date, to_date, 0, [], [], error="404 Not Found")
+                    logger.warning(f"⚠️  No data found for {from_date} to {to_date}")
+                    return []
+                
+                else:
+                    logger.warning(f"API returned status code {response.status_code}, retrying...")
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                    
+            except requests.exceptions.Timeout:
+                logger.warning(f"API timeout, retrying... (Attempt {attempt + 1})")
+                time.sleep(2 ** attempt)
+            except Exception as e:
+                logger.error(f"API error: {e}")
+                if attempt == API_CONFIG['max_retries'] - 1:
+                    self.stats['failed_api_calls'] += 1
+                    self.stats['errors'].append(f"{from_date} to {to_date}: {str(e)}")
+                    self.log_api_chunk(from_date, to_date, 0, [], [], error=str(e))
+                time.sleep(2 ** attempt)
+        
+        logger.error(f"❌ Failed to fetch chargesheets for {from_date} to {to_date} after {API_CONFIG['max_retries']} attempts")
+        self.log_api_chunk(from_date, to_date, 0, [], [], error="Failed after max retries")
+        self.window_guard.fail(from_date, to_date)
+        return None
+    
+    def log_api_chunk(self, from_date: str, to_date: str, count: int, crime_ids: List[str], 
+                     chargesheets_data: List[Dict], error: Optional[str] = None):
+        """Log API response for a chunk"""
+        chunk_info = {
+            'chunk': f"{from_date} to {to_date}",
+            'timestamp': datetime.now().isoformat(),
+            'count': count,
+            'crime_ids': crime_ids,
+            'error': error
+        }
+        
+        with self.log_lock:
+            self.api_log.write(f"\n{'='*80}\n")
+            self.api_log.write(f"CHUNK: {from_date} to {to_date}\n")
+            self.api_log.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            self.api_log.write(f"{'-'*80}\n")
+            
+            if error:
+                self.api_log.write(f"ERROR: {error}\n")
+                self.api_log.write(f"Count: 0\n")
+                self.api_log.write(f"Crime IDs: []\n")
+            else:
+                self.api_log.write(f"Count: {count}\n")
+                self.api_log.write(f"Crime IDs ({len(crime_ids)}):\n")
+                for i, crime_id in enumerate(crime_ids, 1):
+                    self.api_log.write(f"  {i}. {crime_id}\n")
+                
+                self.api_log.write(f"\nJSON Format:\n")
+                self.api_log.write(json.dumps(chunk_info, indent=2, ensure_ascii=False))
+                self.api_log.write(f"\n")
+            
+            self.api_log.flush()
+    
+    def normalize_date_value(self, value):
+        """
+        Normalize date/timestamp values from API
+        Converts empty strings to None (NULL) for PostgreSQL compatibility
+        
+        Args:
+            value: Date/timestamp value from API (can be string, None, or empty string)
+        
+        Returns:
+            Normalized value (None if empty string, otherwise parsed datetime or original value)
+        """
+        if value == "" or value is None:
+            return None
+        # Try to parse as datetime if it's a string
+        if isinstance(value, str):
+            try:
+                return parse_iso_date(value)
+            except:
+                return value
+        return value
+    
+    def normalize_boolean_value(self, value):
+        """Normalize boolean values from API"""
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
+
+    def normalize_text_value(self, value):
+        """Normalize text values from API and convert blanks to NULL."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped if stripped else None
+        return value
+
+    def has_table_column(self, table_name: str, column_name: str) -> bool:
+        """Return whether a table has a given column, cached per run."""
+        cache_key = (table_name, column_name)
+        if cache_key in self._table_columns_cache:
+            return self._table_columns_cache[cache_key]
+        columns = self.get_table_columns(table_name)
+        exists = column_name in columns
+        self._table_columns_cache[cache_key] = exists
+        return exists
+
+    def normalize_sections(self, section_value):
+        """Return a list of non-empty section strings."""
+        if section_value is None:
+            return []
+        if isinstance(section_value, list):
+            return [self.normalize_text_value(item) for item in section_value if self.normalize_text_value(item) is not None]
+        normalized = self.normalize_text_value(section_value)
+        return [normalized] if normalized is not None else []
+
+    def build_acts_arrays(self, acts_list: List[Dict]) -> Tuple[List, List, List, List, List]:
+        """
+        Build the 5 parallel arrays for chargesheets.acts_* columns from the
+        API's actsAndSections[] array. One source item -> one position across
+        all 5 arrays. section is joined into a single string per item
+        (matches the pre-consolidation chargesheet_acts.section behavior,
+        since a section array observed in captured data is always length 1).
+        """
+        descriptions, sections, section_descs, grave_particulars, rw_required = [], [], [], [], []
+        for act_data in (acts_list or []):
+            if not isinstance(act_data, dict):
+                continue
+            section_values = self.normalize_sections(act_data.get('section') or act_data.get('SECTION'))
+            section = ', '.join(section_values) if section_values else None
+            if not section:
+                logger.warning("⚠️  Skipping act with empty section")
+                continue
+            descriptions.append(self.normalize_text_value(act_data.get('actDescription') or act_data.get('ACT_DESCRIPTION')))
+            sections.append(section)
+            section_descs.append(self.normalize_text_value(act_data.get('sectionDescription') or act_data.get('SECTION_DESCRIPTION')))
+            grave_particulars.append(self.normalize_text_value(act_data.get('graveParticulars') or act_data.get('GRAVE_PARTICULARS')))
+            rw_required.append(self.normalize_boolean_value(act_data.get('rwRequired') or act_data.get('RW_REQUIRED')))
+        return descriptions, sections, section_descs, grave_particulars, rw_required
+
+    def build_accused_arrays(self, accused_list: List[Dict]) -> Tuple[List, List, List, List]:
+        """
+        Build the 4 parallel arrays for chargesheets.accused_* columns from
+        the API's accusedParticulars[] array. One source item -> one
+        position across all 4 arrays.
+        """
+        person_ids, charge_statuses, reasons, requested_nbw = [], [], [], []
+        for accused_data in (accused_list or []):
+            if not isinstance(accused_data, dict):
+                continue
+            accused_person_id = self.normalize_text_value(accused_data.get('accusedPersonId') or accused_data.get('ACCUSED_PERSON_ID'))
+            if not accused_person_id:
+                logger.warning("⚠️  Skipping accused row with empty accusedPersonId")
+                continue
+            person_ids.append(accused_person_id)
+            charge_statuses.append(self.normalize_text_value(accused_data.get('chargeStatus') or accused_data.get('CHARGE_STATUS')))
+            reasons.append(self.normalize_text_value(accused_data.get('reasonForNoCharge') or accused_data.get('REASON_FOR_NO_CHARGE')))
+            requested_nbw.append(self.normalize_boolean_value(
+                accused_data.get('requestedForNBW') if 'requestedForNBW' in accused_data else accused_data.get('REQUESTED_FOR_NBW')
+            ))
+        return person_ids, charge_statuses, reasons, requested_nbw
+
+    def transform_chargesheet(self, chargesheet_raw: Dict) -> Dict:
+        """
+        Transform API response to database format
+        Dates are always taken from API (never use CURRENT_TIMESTAMP)
+        Validates crime_id exists in crimes table
+        API uses camelCase field names
+        
+        Args:
+            chargesheet_raw: Raw chargesheet data from API (camelCase fields)
+        
+        Returns:
+            Transformed chargesheet dict ready for database
+        """
+        logger.trace(f"Transforming chargesheet: crimeId={chargesheet_raw.get('crimeId')}")
+
+        charge_sheet_id = self.normalize_text_value(
+            chargesheet_raw.get('chargeSheetId')
+            or chargesheet_raw.get('CHARGE_SHEET_ID')
+            or chargesheet_raw.get('_id')
+        )
+        
+        # Get crime_id from API and validate it exists in crimes table
+        # API uses camelCase: 'crimeId'
+        crime_id_str = self.normalize_text_value(chargesheet_raw.get('crimeId') or chargesheet_raw.get('CRIME_ID'))
+        crime_id_valid = None
+        
+        if crime_id_str:
+            # Validate that crime_id exists in crimes table
+            try:
+                self._cursor.execute(f"SELECT crime_id FROM {CRIMES_TABLE} WHERE crime_id = %s", (crime_id_str,))
+                result = self._cursor.fetchone()
+                if result:
+                    crime_id_valid = crime_id_str
+                    logger.trace(f"CRIME_ID {crime_id_str} found in crimes table")
+                else:
+                    logger.trace(f"CRIME_ID {crime_id_str} not found in crimes table")
+            except Exception as e:
+                logger.error(f"Error validating crime_id {crime_id_str}: {e}")
+                self._conn.rollback()
+        
+        # Handle uploadChargeSheet.fileId for files
+        upload_charge_sheet = chargesheet_raw.get('uploadChargeSheet')
+        files_list = []
+        if isinstance(upload_charge_sheet, dict):
+            file_id = self.normalize_text_value(upload_charge_sheet.get('fileId') or upload_charge_sheet.get('FILE_ID'))
+            files_list = [{'fileId': file_id}] if file_id else []
+        elif isinstance(upload_charge_sheet, list):
+            for item in upload_charge_sheet:
+                if isinstance(item, dict):
+                    file_id = self.normalize_text_value(item.get('fileId') or item.get('FILE_ID'))
+                else:
+                    file_id = self.normalize_text_value(item)
+                if file_id:
+                    files_list.append({'fileId': file_id})
+        elif upload_charge_sheet:
+            file_id = self.normalize_text_value(upload_charge_sheet)
+            files_list = [{'fileId': file_id}] if file_id else []
+        
+        acts_descriptions, acts_sections, acts_section_descs, acts_grave_particulars, acts_rw_required = \
+            self.build_acts_arrays(chargesheet_raw.get('actsAndSections', []))
+        accused_person_ids, accused_charge_statuses, accused_reasons, accused_requested_nbw = \
+            self.build_accused_arrays(chargesheet_raw.get('accusedParticulars', []))
+
+        transformed = {
+            'charge_sheet_id': charge_sheet_id,
+            'crime_id': crime_id_valid,  # Validated crime_id (None if not found in crimes table)
+            'chargesheet_no': self.normalize_text_value(chargesheet_raw.get('chargeSheetNo')),
+            'chargesheet_no_icjs': self.normalize_text_value(chargesheet_raw.get('chargeSheetNoForIcjs')),
+            'chargesheet_date': self.normalize_date_value(chargesheet_raw.get('chargeSheetDate')),
+            'chargesheet_type': self.normalize_text_value(chargesheet_raw.get('chargeSheetType')),
+            'court_name': self.normalize_text_value(chargesheet_raw.get('courtName')),
+            'is_ccl': self.normalize_boolean_value(chargesheet_raw.get('isCcl')),
+            'is_esigned': self.normalize_boolean_value(chargesheet_raw.get('isEsigned')),
+            'date_created': self.normalize_date_value(chargesheet_raw.get('dateCreated')),
+            'date_modified': self.normalize_date_value(chargesheet_raw.get('dateModified')),
+            'acts_descriptions': acts_descriptions,
+            'acts_sections': acts_sections,
+            'acts_section_descriptions': acts_section_descs,
+            'acts_grave_particulars': acts_grave_particulars,
+            'acts_rw_required': acts_rw_required,
+            'accused_person_ids': accused_person_ids,
+            'accused_charge_statuses': accused_charge_statuses,
+            'accused_reasons_for_no_charge': accused_reasons,
+            'accused_requested_for_nbw': accused_requested_nbw,
+            # Store nested data not directly persisted as columns (API uses camelCase)
+            '_files': files_list,  # From uploadChargeSheet.fileId -> file_media_bookkeeping
+            # Store original CRIME_ID string for validation logging
+            '_original_crime_id': crime_id_str
+        }
+        logger.trace(f"Transformed chargesheet: {json.dumps({k: v for k, v in transformed.items() if k != '_original_crime_id'}, indent=2, default=str)}")
+        return transformed
+    
+    def chargesheet_exists(self, charge_sheet_id: Optional[str], crime_id: str, chargesheet_no: Optional[str], chargesheet_date: Optional[datetime]) -> bool:
+        """Check if chargesheet already exists in database"""
+        logger.trace(f"Checking if chargesheet exists: charge_sheet_id={charge_sheet_id}, crime_id={crime_id}, chargesheet_no={chargesheet_no}, chargesheet_date={chargesheet_date}")
+
+        if charge_sheet_id and self.has_table_column(CHARGESHEETS_TABLE, 'charge_sheet_id'):
+            query = f"""
+                SELECT 1 FROM {CHARGESHEETS_TABLE}
+                WHERE charge_sheet_id = %s
+            """
+            self._cursor.execute(query, (charge_sheet_id,))
+        elif chargesheet_no:
+            query = f"""
+                SELECT 1 FROM {CHARGESHEETS_TABLE} 
+                WHERE crime_id = %s AND chargesheet_no = %s AND chargesheet_date = %s
+            """
+            self._cursor.execute(query, (crime_id, chargesheet_no, chargesheet_date))
+        else:
+            query = f"""
+                SELECT 1 FROM {CHARGESHEETS_TABLE} 
+                WHERE crime_id = %s AND chargesheet_no IS NULL AND chargesheet_date = %s
+            """
+            self._cursor.execute(query, (crime_id, chargesheet_date))
+        
+        exists = self._cursor.fetchone() is not None
+        logger.trace(f"Chargesheet exists: {exists}")
+        return exists
+    
+    def get_existing_chargesheet(self, charge_sheet_id: Optional[str], crime_id: str, chargesheet_no: Optional[str], chargesheet_date: Optional[datetime]) -> Optional[Dict]:
+        """Get existing chargesheet record from database"""
+        has_api_key = self.has_table_column(CHARGESHEETS_TABLE, 'charge_sheet_id')
+
+        if charge_sheet_id and has_api_key:
+            query = f"""
+                SELECT id, charge_sheet_id, crime_id, chargesheet_no, chargesheet_no_icjs, chargesheet_date, chargesheet_type,
+                       court_name, is_ccl, is_esigned, date_created, date_modified
+                FROM {CHARGESHEETS_TABLE}
+                WHERE charge_sheet_id = %s
+            """
+            self._cursor.execute(query, (charge_sheet_id,))
+        elif chargesheet_no:
+            query = f"""
+                SELECT id, crime_id, chargesheet_no, chargesheet_no_icjs, chargesheet_date, chargesheet_type,
+                       court_name, is_ccl, is_esigned, date_created, date_modified
+                FROM {CHARGESHEETS_TABLE}
+                WHERE crime_id = %s AND chargesheet_no = %s AND chargesheet_date = %s
+            """
+            self._cursor.execute(query, (crime_id, chargesheet_no, chargesheet_date))
+        else:
+            query = f"""
+                SELECT id, crime_id, chargesheet_no, chargesheet_no_icjs, chargesheet_date, chargesheet_type,
+                       court_name, is_ccl, is_esigned, date_created, date_modified
+                FROM {CHARGESHEETS_TABLE}
+                WHERE crime_id = %s AND chargesheet_no IS NULL AND chargesheet_date = %s
+            """
+            self._cursor.execute(query, (crime_id, chargesheet_date))
+        
+        row = self._cursor.fetchone()
+        if row:
+            if has_api_key:
+                charge_sheet_id_value = row[1]
+                crime_id_index = 2
+                chargesheet_no_index = 3
+                chargesheet_no_icjs_index = 4
+                chargesheet_date_index = 5
+                chargesheet_type_index = 6
+                court_name_index = 7
+                is_ccl_index = 8
+                is_esigned_index = 9
+                date_created_index = 10
+                date_modified_index = 11
+            else:
+                charge_sheet_id_value = None
+                crime_id_index = 1
+                chargesheet_no_index = 2
+                chargesheet_no_icjs_index = 3
+                chargesheet_date_index = 4
+                chargesheet_type_index = 5
+                court_name_index = 6
+                is_ccl_index = 7
+                is_esigned_index = 8
+                date_created_index = 9
+                date_modified_index = 10
+            return {
+                'id': row[0],
+                'charge_sheet_id': charge_sheet_id_value,
+                'crime_id': row[crime_id_index],
+                'chargesheet_no': row[chargesheet_no_index],
+                'chargesheet_no_icjs': row[chargesheet_no_icjs_index],
+                'chargesheet_date': row[chargesheet_date_index],
+                'chargesheet_type': row[chargesheet_type_index],
+                'court_name': row[court_name_index],
+                'is_ccl': row[is_ccl_index],
+                'is_esigned': row[is_esigned_index],
+                'date_created': row[date_created_index],
+                'date_modified': row[date_modified_index]
+            }
+        return None
+    
+    def log_failed_record(self, chargesheet: Dict, reason: str, error_details: str = ""):
+        """Log a failed record to the failed records log file"""
+        failed_info = {
+            'crime_id': chargesheet.get('crime_id'),
+            'chargesheet_no': chargesheet.get('chargesheet_no'),
+            'chargesheet_date': chargesheet.get('chargesheet_date'),
+            'reason': reason,
+            'error_details': error_details,
+            'timestamp': datetime.now().isoformat(),
+            'chargesheet_data': chargesheet
+        }
+        
+        with self.log_lock:
+            self.failed_log.write(f"\n{'='*80}\n")
+            self.failed_log.write(f"CRIME_ID: {chargesheet.get('crime_id')}\n")
+            self.failed_log.write(f"CHARGESHEET_NO: {chargesheet.get('chargesheet_no')}\n")
+            self.failed_log.write(f"CHARGESHEET_DATE: {chargesheet.get('chargesheet_date')}\n")
+            self.failed_log.write(f"REASON: {reason}\n")
+            if error_details:
+                self.failed_log.write(f"ERROR: {error_details}\n")
+            self.failed_log.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            self.failed_log.write(f"\nJSON Format:\n")
+            self.failed_log.write(json.dumps(failed_info, indent=2, ensure_ascii=False, default=str))
+            self.failed_log.write(f"\n")
+            self.failed_log.flush()
+    
+    def log_invalid_crime_id(self, chargesheet: Dict, crime_id_str: str, chunk_range: str = ""):
+        """Log a chargesheet that failed due to invalid CRIME_ID (not found in crimes table)"""
+        failure_info = {
+            'crime_id': crime_id_str,
+            'chargesheet_no': chargesheet.get('chargesheet_no'),
+            'chargesheet_date': chargesheet.get('chargesheet_date'),
+            'chargesheet_type': chargesheet.get('chargesheet_type'),
+            'chunk': chunk_range,
+            'timestamp': datetime.now().isoformat(),
+            'chargesheet_data': chargesheet
+        }
+        
+        with self.log_lock:
+            self.invalid_crime_id_log.write(f"\n{'='*80}\n")
+            self.invalid_crime_id_log.write(f"CRIME_ID: {crime_id_str}\n")
+            self.invalid_crime_id_log.write(f"CHARGESHEET_NO: {chargesheet.get('chargesheet_no')}\n")
+            self.invalid_crime_id_log.write(f"CHARGESHEET_DATE: {chargesheet.get('chargesheet_date')}\n")
+            self.invalid_crime_id_log.write(f"CHARGESHEET_TYPE: {chargesheet.get('chargesheet_type')}\n")
+            self.invalid_crime_id_log.write(f"REASON: CRIME_ID not found in crimes table\n")
+            self.invalid_crime_id_log.write(f"Chunk: {chunk_range}\n")
+            self.invalid_crime_id_log.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            self.invalid_crime_id_log.write(f"\nJSON Format:\n")
+            self.invalid_crime_id_log.write(json.dumps(failure_info, indent=2, ensure_ascii=False, default=str))
+            self.invalid_crime_id_log.write(f"\n")
+            self.invalid_crime_id_log.flush()
+    
+    def log_duplicates_chunk(self, from_date: str, to_date: str, duplicates: List[Dict]):
+        """Log duplicates found in a chunk"""
+        chunk_info = {
+            'chunk': f"{from_date} to {to_date}",
+            'timestamp': datetime.now().isoformat(),
+            'duplicate_count': len(duplicates),
+            'duplicates': duplicates
+        }
+        
+        self.duplicates_log.write(f"\n{'='*80}\n")
+        self.duplicates_log.write(f"CHUNK: {from_date} to {to_date}\n")
+        self.duplicates_log.write(f"Timestamp: {datetime.now().isoformat()}\n")
+        self.duplicates_log.write(f"{'-'*80}\n")
+        self.duplicates_log.write(f"Duplicate Count: {len(duplicates)}\n")
+        self.duplicates_log.write(f"Note: These duplicates were PROCESSED (not skipped) to allow updates\n")
+        self.duplicates_log.write(f"\nDuplicates:\n")
+        for i, dup in enumerate(duplicates, 1):
+            self.duplicates_log.write(f"  {i}. CRIME_ID: {dup['crime_id']}, CHARGESHEET_NO: {dup.get('chargesheet_no')}, CHARGESHEET_DATE: {dup.get('chargesheet_date')}\n")
+            self.duplicates_log.write(f"     Occurrence: #{dup.get('occurrence', 'N/A')}\n")
+            self.duplicates_log.write(f"     First seen in: {dup['first_seen_in']}\n")
+            self.duplicates_log.write(f"     Duplicate in: {dup['duplicate_in']}\n")
+        
+        # Also write JSON format for easy parsing
+        self.duplicates_log.write(f"\nJSON Format:\n")
+        self.duplicates_log.write(json.dumps(chunk_info, indent=2, ensure_ascii=False))
+        self.duplicates_log.write(f"\n")
+        
+        self.duplicates_log.flush()
+    
+    def insert_chargesheet(self, chargesheet: Dict, chunk_date_range: str = "") -> Tuple[bool, str, Optional[str]]:
+        """
+        Insert or update single chargesheet into database with smart update logic
+        Also handles related tables:
+        uploadChargeSheet file/media reference (file_media_bookkeeping)
+        Dates are always from API (never use CURRENT_TIMESTAMP)
+        
+        Returns:
+            Tuple of (success: bool, operation: str, chargesheet_id: str) where operation is 'inserted', 'updated', 'no_change', or 'skipped'
+            chargesheet_id is returned as string for psycopg2 compatibility
+        """
+        charge_sheet_id = chargesheet.get('charge_sheet_id')
+        crime_id = chargesheet.get('crime_id')
+        chargesheet_no = chargesheet.get('chargesheet_no')
+        chargesheet_date = chargesheet.get('chargesheet_date')
+        original_crime_id = chargesheet.get('_original_crime_id')
+        
+        # Validate crime_id exists in crimes table
+        if not crime_id:
+            reason = 'invalid_crime_id'
+            error_details = f"CRIME_ID {original_crime_id} not found in crimes table"
+            logger.warning(f"⚠️  {error_details}, skipping chargesheet")
+            with self.stats_lock:
+                self.stats['total_chargesheets_failed'] += 1
+                self.stats['total_chargesheets_failed_crime_id'] += 1
+            self.log_failed_record(chargesheet, reason, error_details)
+            self.log_invalid_crime_id(chargesheet, original_crime_id, chunk_date_range)
+            # Park in FK retry queue — recovers when crime record arrives.
+            # record_id must be unique per source record, not just per
+            # crime_id: multiple distinct chargesheets can share the same
+            # still-missing crime_id, and the queue's unique index (kind,
+            # module_name, record_key) would silently drop all but the first
+            # if record_id were the bare crime_id.
+            if push_fk_failure is not None:
+                try:
+                    record_key = f"{original_crime_id or 'UNKNOWN'}|{charge_sheet_id or f'{chargesheet_no}:{chargesheet_date}'}"
+                    # default=str only (not a per-key stringify): chargesheet
+                    # contains real list fields (acts_sections,
+                    # accused_person_ids, etc. -- and _files, a list of
+                    # dicts). A per-key str() flattens each into a Python
+                    # repr string (e.g. "['105', '185']"), which is not valid
+                    # JSON array syntax and breaks reconstruction on retry
+                    # (proved live: retrying such a row raises a PostgreSQL
+                    # "malformed array literal" error when binding that
+                    # string to a TEXT[] column).
+                    push_fk_failure(
+                        self._conn, 'chargesheets',
+                        record_id=record_key,
+                        record_json=json.dumps(chargesheet, default=str),
+                        missing_fk_column='crime_id',
+                        missing_fk_value=original_crime_id or '',
+                    )
+                    self._conn.commit()
+                except Exception as _qe:
+                    logger.warning("FK queue push failed for chargesheet %s: %s",
+                                   original_crime_id, _qe)
+            return False, reason, None
+        
+        try:
+            logger.trace(f"Processing chargesheet: charge_sheet_id={charge_sheet_id}, crime_id={crime_id}, chargesheet_no={chargesheet_no}, chargesheet_date={chargesheet_date}")
+            
+            # Check if chargesheet already exists
+            if self.chargesheet_exists(charge_sheet_id, crime_id, chargesheet_no, chargesheet_date):
+                # Get existing record to compare
+                existing = self.get_existing_chargesheet(charge_sheet_id, crime_id, chargesheet_no, chargesheet_date)
+                if not existing:
+                    logger.warning(f"⚠️  Chargesheet exists check returned True but fetch returned None")
+                    existing = None
+                
+                if existing:
+                    # Convert UUID to string (psycopg2 returns UUID objects from database)
+                    chargesheet_id = str(existing['id']) if existing['id'] else None
+                    if not chargesheet_id:
+                        logger.warning(f"⚠️  Existing chargesheet has no id")
+                        existing = None
+                        chargesheet_id = None
+                    
+                    # Smart update: only update fields that need updating
+                    update_fields = []
+                    update_values = []
+                    changes = []
+                    
+                    # Define all fields to check (excluding primary key: id)
+                    fields_to_check = [
+                        ('chargesheet_no_icjs', 'CHARGESHEET_NO_ICJS'),
+                        ('chargesheet_type', 'CHARGESHEET_TYPE'),
+                        ('court_name', 'COURT_NAME'),
+                        ('is_ccl', 'IS_CCL'),
+                        ('is_esigned', 'IS_ESIGNED'),
+                        ('date_created', 'DATE_CREATED'),  # Always from API
+                        ('date_modified', 'DATE_MODIFIED'),  # Always from API
+                        ('acts_descriptions', 'actsAndSections[].actDescription'),
+                        ('acts_sections', 'actsAndSections[].section'),
+                        ('acts_section_descriptions', 'actsAndSections[].sectionDescription'),
+                        ('acts_grave_particulars', 'actsAndSections[].graveParticulars'),
+                        ('acts_rw_required', 'actsAndSections[].rwRequired'),
+                        ('accused_person_ids', 'accusedParticulars[].accusedPersonId'),
+                        ('accused_charge_statuses', 'accusedParticulars[].chargeStatus'),
+                        ('accused_reasons_for_no_charge', 'accusedParticulars[].reasonForNoCharge'),
+                        ('accused_requested_for_nbw', 'accusedParticulars[].requestedForNBW'),
+                    ]
+
+                    if self.has_table_column(CHARGESHEETS_TABLE, 'charge_sheet_id'):
+                        fields_to_check.insert(0, ('charge_sheet_id', 'charge_sheet_id'))
+                    
+                    for db_field, api_field in fields_to_check:
+                        existing_val = existing.get(db_field)
+                        new_val = chargesheet.get(db_field)
+                        
+                        if db_field == 'charge_sheet_id':
+                            if existing_val != new_val:
+                                update_fields.append(f"{db_field} = %s")
+                                update_values.append(new_val)
+                                changes.append(f"{db_field}: {existing_val} → {new_val}")
+                        # Special handling for date fields - always use API value
+                        elif db_field in ('date_created', 'date_modified'):
+                            if existing_val != new_val:
+                                update_fields.append(f"{db_field} = %s")
+                                update_values.append(new_val)
+                                changes.append(f"{db_field}: {existing_val} → {new_val}")
+                        else:
+                            # Rule 1: Existing is NULL, new is not NULL → update
+                            if existing_val is None and new_val is not None:
+                                update_fields.append(f"{db_field} = %s")
+                                update_values.append(new_val)
+                                changes.append(f"{db_field}: NULL → {new_val}")
+                            
+                            # Rule 2: Existing is not NULL, new is NULL → keep existing (skip)
+                            elif existing_val is not None and new_val is None:
+                                logger.trace(f"  Will keep existing {db_field}: {existing_val} (new value is NULL)")
+                            
+                            # Rule 3 & 4: Both are not NULL
+                            elif existing_val is not None and new_val is not None:
+                                # Rule 3: Different → update
+                                if existing_val != new_val:
+                                    update_fields.append(f"{db_field} = %s")
+                                    update_values.append(new_val)
+                                    changes.append(f"{db_field}: {existing_val} → {new_val}")
+                            
+                            # Both are NULL → no update needed
+                    
+                    # Only update if there are changes
+                    if update_fields:
+                        # Bump provenance alongside any real business-field change —
+                        # a re-verified-unchanged row does not need a new fetched_at.
+                        update_fields.extend(['source_system = %s', 'source_endpoint = %s', 'fetched_at = %s', 'etl_run_id = %s'])
+                        update_values.extend([SOURCE_SYSTEM, SOURCE_ENDPOINT, datetime.now(timezone.utc), ETL_RUN_ID])
+                        update_query = f"""
+                            UPDATE {CHARGESHEETS_TABLE} SET
+                                {', '.join(update_fields)}
+                            WHERE {'charge_sheet_id = %s' if self.has_table_column(CHARGESHEETS_TABLE, 'charge_sheet_id') and charge_sheet_id else 'id = %s'}
+                        """
+                        update_values.append(charge_sheet_id if self.has_table_column(CHARGESHEETS_TABLE, 'charge_sheet_id') and charge_sheet_id else chargesheet_id)
+                        self._cursor.execute(update_query, tuple(update_values))
+                        with self.stats_lock:
+                            self.stats['total_chargesheets_updated'] += 1
+                        logger.debug(f"Updated chargesheet: id={chargesheet_id} ({len(changes)} fields changed)")
+                        self._conn.commit()
+                        operation = 'updated'
+                    else:
+                        with self.stats_lock:
+                            self.stats['total_chargesheets_no_change'] += 1
+                        logger.trace(f"No changes needed for chargesheet")
+                        operation = 'no_change'
+                    
+                    # Process related tables (files, acts, accused)
+                    self.process_related_tables(chargesheet_id, chargesheet)
+                    
+                    return True, operation, chargesheet_id
+                else:
+                    # Exists check returned True but couldn't fetch - treat as new insert
+                    logger.warning(f"⚠️  Chargesheet exists but couldn't fetch, treating as new insert")
+            else:
+                # Insert new chargesheet
+                logger.trace(f"Inserting new chargesheet: crime_id={crime_id}, chargesheet_no={chargesheet_no}")
+                chargesheet_id = str(uuid.uuid4())  # Convert UUID to string for psycopg2
+                
+                has_api_key = self.has_table_column(CHARGESHEETS_TABLE, 'charge_sheet_id')
+                insert_columns = [
+                    'id', 'crime_id', 'chargesheet_no', 'chargesheet_no_icjs', 'chargesheet_date',
+                    'chargesheet_type', 'court_name', 'is_ccl', 'is_esigned',
+                    'date_created', 'date_modified',
+                    'acts_descriptions', 'acts_sections', 'acts_section_descriptions',
+                    'acts_grave_particulars', 'acts_rw_required',
+                    'accused_person_ids', 'accused_charge_statuses',
+                    'accused_reasons_for_no_charge', 'accused_requested_for_nbw',
+                    'source_system', 'source_endpoint', 'fetched_at', 'etl_run_id'
+                ]
+                insert_values = [
+                    chargesheet_id,
+                    crime_id,
+                    chargesheet_no,
+                    chargesheet.get('chargesheet_no_icjs'),
+                    chargesheet_date,
+                    chargesheet.get('chargesheet_type'),
+                    chargesheet.get('court_name'),
+                    chargesheet.get('is_ccl'),
+                    chargesheet.get('is_esigned'),
+                    chargesheet.get('date_created'),
+                    chargesheet.get('date_modified'),
+                    chargesheet.get('acts_descriptions'),
+                    chargesheet.get('acts_sections'),
+                    chargesheet.get('acts_section_descriptions'),
+                    chargesheet.get('acts_grave_particulars'),
+                    chargesheet.get('acts_rw_required'),
+                    chargesheet.get('accused_person_ids'),
+                    chargesheet.get('accused_charge_statuses'),
+                    chargesheet.get('accused_reasons_for_no_charge'),
+                    chargesheet.get('accused_requested_for_nbw'),
+                    SOURCE_SYSTEM,
+                    SOURCE_ENDPOINT,
+                    datetime.now(timezone.utc),
+                    ETL_RUN_ID
+                ]
+                if has_api_key:
+                    insert_columns.insert(1, 'charge_sheet_id')
+                    insert_values.insert(1, charge_sheet_id)
+
+                insert_query = f"""
+                    INSERT INTO {CHARGESHEETS_TABLE} ({', '.join(insert_columns)})
+                    VALUES ({', '.join(['%s'] * len(insert_columns))})
+                """
+                self._cursor.execute(insert_query, tuple(insert_values))
+                with self.stats_lock:
+                    self.stats['total_chargesheets_inserted'] += 1
+                logger.debug(f"Inserted chargesheet: id={chargesheet_id}")
+                self._conn.commit()
+                
+                # Process related tables (files, acts, accused)
+                self.process_related_tables(chargesheet_id, chargesheet)
+                
+                return True, 'inserted', chargesheet_id
+            
+        except psycopg2.IntegrityError as e:
+            self._conn.rollback()
+            reason = 'integrity_error'
+            error_details = str(e)
+            logger.warning(f"⚠️  Integrity error for chargesheet: {e}")
+            with self.stats_lock:
+                self.stats['total_chargesheets_failed'] += 1
+            self.log_failed_record(chargesheet, reason, error_details)
+            self.window_guard.fail_current()
+            return False, reason, None
+        except Exception as e:
+            self._conn.rollback()
+            reason = 'error'
+            error_details = str(e)
+            logger.error(f"❌ Error inserting chargesheet: {e}")
+            with self.stats_lock:
+                self.stats['total_chargesheets_failed'] += 1
+                self.stats['errors'].append(f"Chargesheet crime_id={crime_id}: {str(e)}")
+            self.log_failed_record(chargesheet, reason, error_details)
+            self.window_guard.fail_current()
+            return False, reason, None
+    
+    def process_related_tables(self, chargesheet_id: str, chargesheet: Dict):
+        """Process related file/media references: uploadChargeSheet.fileId.
+
+        actsAndSections[]/accusedParticulars[] are no longer processed here
+        -- they are written as parallel array columns directly on the
+        chargesheets row itself (see build_acts_arrays/build_accused_arrays
+        and the INSERT/UPDATE in insert_chargesheet()), replacing the former
+        dedicated chargesheet_acts/chargesheet_acts_sections/
+        chargesheet_accused child tables.
+        """
+        charge_sheet_api_id = chargesheet.get('charge_sheet_id')
+
+        self.delete_related_tables(chargesheet_id, charge_sheet_api_id)
+
+        files = chargesheet.get('_files', [])
+        for file_data in files:
+            self.insert_chargesheet_file(chargesheet_id, charge_sheet_api_id, file_data)
+
+    def delete_related_tables(self, chargesheet_id: str, charge_sheet_api_id: Optional[str]):
+        """Remove the stale uploadChargeSheet file/media reference before
+        reloading the current API snapshot (acts/accused are plain columns
+        on chargesheets now, so they are simply overwritten by the
+        INSERT/UPDATE -- nothing to delete separately)."""
+        try:
+            self._cursor.execute(
+                "DELETE FROM file_media_bookkeeping WHERE source_type = 'chargesheets' AND source_field = 'uploadChargeSheet' AND parent_id = %s",
+                (charge_sheet_api_id or chargesheet_id,)
+            )
+            self._conn.commit()
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to clear existing chargesheet file reference: {e}")
+            self._conn.rollback()
+
+    def insert_chargesheet_file(self, chargesheet_id: str, charge_sheet_api_id: Optional[str], file_data: Dict):
+        """Insert or update the chargesheet's uploadChargeSheet file/media
+        reference in the consolidated file_media_bookkeeping table
+        (source_type='chargesheets', source_field='uploadChargeSheet').
+
+        Replaces the former dedicated chargesheet_files (keyed by the
+        synthetic chargesheets.id) and chargesheet_media (keyed by the
+        natural charge_sheet_id) tables, which both stored the exact same
+        uploadChargeSheet.fileId event -- now written once, keyed by the
+        natural charge_sheet_id (falling back to the synthetic id only if
+        the natural id isn't available yet).
+        """
+        try:
+            # API uses camelCase: 'fileId'
+            file_id = self.normalize_text_value(file_data.get('fileId') or file_data.get('FILE_ID'))
+            created_at = self.normalize_date_value(file_data.get('createdAt') or file_data.get('CREATED_AT'))
+            media_payload = json.dumps(file_data, ensure_ascii=False, default=str)
+            parent_id = charge_sheet_api_id or chargesheet_id
+
+            self._cursor.execute("""
+                INSERT INTO file_media_bookkeeping (
+                    source_type, source_field, parent_id,
+                    file_index, file_id, media_payload,
+                    created_at, updated_at,
+                    source_system, source_endpoint, fetched_at, etl_run_id
+                ) VALUES ('chargesheets', 'uploadChargeSheet', %s, 0, %s::uuid, %s::jsonb, %s, %s, %s, %s, %s, %s)
+            """, (
+                parent_id,
+                file_id,
+                media_payload,
+                created_at,
+                created_at,
+                SOURCE_SYSTEM,
+                SOURCE_ENDPOINT,
+                datetime.now(timezone.utc),
+                ETL_RUN_ID,
+            ))
+            with self.stats_lock:
+                self.stats['total_files_inserted'] += 1
+
+            self._conn.commit()
+        except Exception as e:
+            logger.error(f"❌ Error processing chargesheet file: {e}")
+            self.window_guard.fail_current()
+            self._conn.rollback()
+    
+    def process_record_worker(self, idx: int, total_records: int, chargesheet_record: Dict,
+                              chunk_range: str, chunk_state: Dict, chunk_lock: threading.Lock):
+        """Worker method to process a single chargesheet record in a thread"""
+        try:
+            chargesheet = self.transform_chargesheet(chargesheet_record)
+            charge_sheet_id = chargesheet.get('charge_sheet_id')
+            crime_id = chargesheet.get('crime_id')
+            chargesheet_no = chargesheet.get('chargesheet_no')
+            chargesheet_date = chargesheet.get('chargesheet_date')
+            original_crime_id = chargesheet.get('_original_crime_id')
+
+            if not crime_id:
+                with chunk_lock:
+                    logger.warning(f"⚠️  Chargesheet with CRIME_ID {original_crime_id} not found in crimes table, skipping")
+                    with self.stats_lock:
+                        self.stats['total_chargesheets_failed'] += 1
+                        self.stats['total_chargesheets_failed_crime_id'] += 1
+                    chunk_state['failed_keys'].append(f"{original_crime_id}:{chargesheet_no}:{chargesheet_date}")
+                    reason = 'invalid_crime_id'
+                    if reason not in chunk_state['failed_reasons']:
+                        chunk_state['failed_reasons'][reason] = []
+                    chunk_state['failed_reasons'][reason].append(original_crime_id)
+                    chunk_state['invalid_crime_ids_in_chunk'].append({
+                        'crime_id': original_crime_id,
+                        'chargesheet_no': chargesheet_no,
+                        'chargesheet_date': chargesheet_date
+                    })
+                self.log_invalid_crime_id(chargesheet, original_crime_id, chunk_range)
+
+                # Park in FK retry queue — recovers when crime record arrives.
+                # This worker returns before insert_chargesheet() is ever called
+                # for an invalid crime_id, so insert_chargesheet()'s own
+                # push_fk_failure call never runs for this case; without this,
+                # the record was silently and permanently dropped. record_key
+                # matches insert_chargesheet()'s construction (crime_id alone
+                # is not unique per record — see comment there).
+                if push_fk_failure is not None:
+                    try:
+                        record_key = f"{original_crime_id or 'UNKNOWN'}|{charge_sheet_id or f'{chargesheet_no}:{chargesheet_date}'}"
+                        # default=str only -- see comment on the other
+                        # push_fk_failure call site in insert_chargesheet().
+                        push_fk_failure(
+                            self._conn, 'chargesheets',
+                            record_id=record_key,
+                            record_json=json.dumps(chargesheet, default=str),
+                            missing_fk_column='crime_id',
+                            missing_fk_value=original_crime_id or '',
+                        )
+                        self._conn.commit()
+                    except Exception as _qe:
+                        logger.warning("FK queue push failed for chargesheet %s: %s",
+                                       original_crime_id, _qe)
+                return
+
+            unique_key = charge_sheet_id or f"{crime_id}:{chargesheet_no}:{chargesheet_date}"
+
+            with chunk_lock:
+                if unique_key in chunk_state['seen_keys']:
+                    occurrence_count = chunk_state['key_occurrences'].get(unique_key, 1) + 1
+                    chunk_state['key_occurrences'][unique_key] = occurrence_count
+                    chunk_state['duplicates'].append({
+                        'crime_id': crime_id,
+                        'chargesheet_no': chargesheet_no,
+                        'chargesheet_date': chargesheet_date,
+                        'occurrence': occurrence_count,
+                        'first_seen_in': chunk_state['seen_keys'][unique_key],
+                        'duplicate_in': chunk_range
+                    })
+                    with self.stats_lock:
+                        self.stats['total_duplicates'] += 1
+                    logger.info(f"⚠️  Duplicate chargesheet found in chunk {chunk_range} (occurrence #{occurrence_count})")
+                else:
+                    chunk_state['seen_keys'][unique_key] = chunk_range
+                    chunk_state['key_occurrences'][unique_key] = 1
+
+            success, operation, chargesheet_id = self.insert_chargesheet(chargesheet, chunk_range)
+            with chunk_lock:
+                if success:
+                    if operation == 'inserted':
+                        if unique_key not in chunk_state['inserted_keys']:
+                            chunk_state['inserted_keys'].append(unique_key)
+                    elif operation == 'updated':
+                        chunk_state['updated_keys'].append(unique_key)
+                    elif operation == 'no_change':
+                        if unique_key not in chunk_state['no_change_keys']:
+                            chunk_state['no_change_keys'].append(unique_key)
+                else:
+                    chunk_state['failed_keys'].append(unique_key)
+                    if operation not in chunk_state['failed_reasons']:
+                        chunk_state['failed_reasons'][operation] = []
+                    chunk_state['failed_reasons'][operation].append(unique_key)
+
+        except Exception as e:
+            logger.error(f"❌ Error in worker processing record {idx}: {e}")
+            self.window_guard.fail_current()
+            with self.stats_lock:
+                self.stats['total_chargesheets_failed'] += 1
+                # Feed the same counter the final "Errors:" summary line reads,
+                # so record-level failures caught at the outer worker level
+                # are no longer invisible in the bottom-line result.
+                self.stats['errors'].append(f"Chargesheet record {idx}/{total_records}: {e}")
+
+    def process_date_range(self, from_date: str, to_date: str, table_columns: Set[str] = None):
+        """Process chargesheet records for a specific date range"""
+        chunk_range = f"{from_date} to {to_date}"
+        logger.info(f"📅 Processing: {chunk_range}")
+        
+        # Fetch chargesheets from API
+        chargesheets_raw = self.fetch_chargesheets_api(from_date, to_date)
+        
+        if chargesheets_raw is None:
+            logger.error(f"❌ Failed to fetch chargesheets for {chunk_range}")
+            self.log_db_chunk(from_date, to_date, 0, [], [], [], [], {}, error="API fetch failed")
+            return
+        
+        if not chargesheets_raw:
+            logger.info(f"ℹ️  No chargesheet records found for {chunk_range}")
+            self.log_db_chunk(from_date, to_date, 0, [], [], [], [], {}, error="No chargesheet records in API response")
+            return
+        
+        # Check for schema evolution if we got data
+        if table_columns is not None and len(chargesheets_raw) > 0:
+            # Check for new fields in first record
+            new_fields = self.detect_new_fields(chargesheets_raw[0], table_columns)
+            if new_fields:
+                logger.info(f"🔍 New fields detected in API response: {list(new_fields.keys())}")
+                # Add new columns to table
+                for api_field, db_column in new_fields.items():
+                    if self.add_column_to_table(db_column):
+                        # Update table_columns set
+                        table_columns.add(db_column)
+                # Update existing records from start_date to current chunk end_date
+                self.update_existing_records_with_new_fields(new_fields, to_date)
+        
+        with self.stats_lock:
+            self.stats['total_chargesheets_fetched'] += len(chargesheets_raw)
+        logger.trace(f"Processing {len(chargesheets_raw)} chargesheet records for chunk {chunk_range}")
+
+        chunk_lock = threading.Lock()
+        chunk_state = {
+            'inserted_keys': [],
+            'updated_keys': [],
+            'no_change_keys': [],
+            'failed_keys': [],
+            'failed_reasons': {},
+            'duplicates': [],
+            'invalid_crime_ids_in_chunk': [],
+            'seen_keys': {},
+            'key_occurrences': {}
+        }
+
+        logger.trace(f"Starting parallel processing for chunk: {chunk_range}")
+        max_workers = min(self.max_workers, len(chargesheets_raw))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            total_records = len(chargesheets_raw)
+            futures = [
+                executor.submit(self.process_record_worker, idx + 1, total_records, record, chunk_range, chunk_state, chunk_lock)
+                for idx, record in enumerate(chargesheets_raw)
+            ]
+            for future in as_completed(futures):
+                future.result()
+
+        inserted_keys = chunk_state['inserted_keys']
+        updated_keys = chunk_state['updated_keys']
+        no_change_keys = chunk_state['no_change_keys']
+        failed_keys = chunk_state['failed_keys']
+        failed_reasons = chunk_state['failed_reasons']
+        duplicates_in_chunk = chunk_state['duplicates']
+        invalid_crime_ids_in_chunk = chunk_state['invalid_crime_ids_in_chunk']
+        
+        # Log duplicates for this chunk (for reporting, but they were all processed)
+        if duplicates_in_chunk:
+            logger.info(f"📊 Found {len(duplicates_in_chunk)} duplicate occurrences in chunk {chunk_range} - All were processed for potential updates")
+            logger.trace(f"Duplicate details: {duplicates_in_chunk}")
+            self.log_duplicates_chunk(from_date, to_date, duplicates_in_chunk)
+        
+        # Log invalid crime_ids for this chunk
+        if invalid_crime_ids_in_chunk:
+            logger.warning(f"⚠️  Found {len(invalid_crime_ids_in_chunk)} chargesheet records with invalid CRIME_IDs in chunk {chunk_range}")
+            # Extract unique CRIME_IDs
+            unique_crime_ids = list(set([f['crime_id'] for f in invalid_crime_ids_in_chunk if f.get('crime_id')]))
+            logger.warning(f"   Invalid CRIME_IDs: {unique_crime_ids}")
+        
+        # Log database operations for this chunk
+        logger.trace(f"Chunk summary - Inserted: {len(inserted_keys)}, Updated: {len(updated_keys)}, No Change: {len(no_change_keys)}, Failed: {len(failed_keys)}, Duplicates: {len(duplicates_in_chunk)}, Invalid CRIME_IDs: {len(invalid_crime_ids_in_chunk)}")
+        self.log_db_chunk(from_date, to_date, len(chargesheets_raw), inserted_keys, updated_keys, 
+                         no_change_keys, failed_keys, failed_reasons)
+        
+        logger.info(f"✅ Completed: {chunk_range} - Inserted: {len(inserted_keys)}, Updated: {len(updated_keys)}, No Change: {len(no_change_keys)}, Failed: {len(failed_keys)}, Duplicates: {len(duplicates_in_chunk)}, Invalid CRIME_IDs: {len(invalid_crime_ids_in_chunk)}")
+        logger.trace(f"Chunk processing complete for {chunk_range}")
+    
+    def log_db_chunk(self, from_date: str, to_date: str, total_fetched: int,
+                    inserted_keys: List[str], updated_keys: List[str], no_change_keys: List[str],
+                    failed_keys: List[str], failed_reasons: Dict, error: Optional[str] = None):
+        """Log database operations for a chunk"""
+        chunk_info = {
+            'chunk': f"{from_date} to {to_date}",
+            'timestamp': datetime.now().isoformat(),
+            'total_fetched': total_fetched,
+            'inserted_count': len(inserted_keys),
+            'inserted_keys': inserted_keys,
+            'updated_count': len(updated_keys),
+            'updated_keys': updated_keys,
+            'no_change_count': len(no_change_keys),
+            'no_change_keys': no_change_keys,
+            'failed_count': len(failed_keys),
+            'failed_keys': failed_keys,
+            'failed_reasons': failed_reasons,
+            'error': error
+        }
+        
+        with self.log_lock:
+            self.db_log.write(f"\n{'='*80}\n")
+            self.db_log.write(f"CHUNK: {from_date} to {to_date}\n")
+            self.db_log.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            self.db_log.write(f"{'-'*80}\n")
+            
+            if error:
+                self.db_log.write(f"ERROR: {error}\n")
+            else:
+                self.db_log.write(f"Total Fetched from API: {total_fetched}\n")
+                self.db_log.write(f"\nINSERTED: {len(inserted_keys)}\n")
+                for i, key in enumerate(inserted_keys, 1):
+                    self.db_log.write(f"  {i}. {key}\n")
+                
+                self.db_log.write(f"\nUPDATED: {len(updated_keys)}\n")
+                for i, key in enumerate(updated_keys, 1):
+                    self.db_log.write(f"  {i}. {key}\n")
+                
+                self.db_log.write(f"\nNO CHANGE: {len(no_change_keys)}\n")
+                for i, key in enumerate(no_change_keys, 1):
+                    self.db_log.write(f"  {i}. {key}\n")
+                
+                self.db_log.write(f"\nFAILED: {len(failed_keys)}\n")
+                if failed_reasons:
+                    for reason, keys in failed_reasons.items():
+                        self.db_log.write(f"  Reason: {reason} ({len(keys)})\n")
+                        for i, key in enumerate(keys[:20], 1):  # Show first 20
+                            self.db_log.write(f"    {i}. {key}\n")
+                        if len(keys) > 20:
+                            self.db_log.write(f"    ... and {len(keys) - 20} more\n")
+                
+                # Also write JSON format for easy parsing
+                self.db_log.write(f"\nJSON Format:\n")
+                self.db_log.write(json.dumps(chunk_info, indent=2, ensure_ascii=False))
+                self.db_log.write(f"\n")
+            
+            self.db_log.flush()
+    
+    def write_log_summaries(self):
+        """Write summary sections to all log files"""
+        # API log summary
+        self.api_log.write(f"\n\n{'='*80}\n")
+        self.api_log.write(f"SUMMARY\n")
+        self.api_log.write(f"{'='*80}\n")
+        self.api_log.write(f"Total API Calls: {self.stats['total_api_calls']}\n")
+        self.api_log.write(f"Total Chargesheets Fetched: {self.stats['total_chargesheets_fetched']}\n")
+        self.api_log.write(f"Failed API Calls: {self.stats['failed_api_calls']}\n")
+        self.api_log.write(f"Total Chunks Processed: {self.stats['total_api_calls'] + self.stats['failed_api_calls']}\n")
+        
+        # DB log summary
+        self.db_log.write(f"\n\n{'='*80}\n")
+        self.db_log.write(f"SUMMARY\n")
+        self.db_log.write(f"{'='*80}\n")
+        self.db_log.write(f"Total Chargesheets Fetched from API: {self.stats['total_chargesheets_fetched']}\n")
+        self.db_log.write(f"Total Chargesheets Inserted (New): {self.stats['total_chargesheets_inserted']}\n")
+        self.db_log.write(f"Total Chargesheets Updated (Existing): {self.stats['total_chargesheets_updated']}\n")
+        self.db_log.write(f"Total Chargesheets No Change: {self.stats['total_chargesheets_no_change']}\n")
+        self.db_log.write(f"Total Chargesheets Failed: {self.stats['total_chargesheets_failed']}\n")
+        self.db_log.write(f"  - Failed due to Invalid CRIME_ID: {self.stats['total_chargesheets_failed_crime_id']}\n")
+        self.db_log.write(f"Total Chargesheets Duplicates (Processed): {self.stats['total_duplicates']}\n")
+        self.db_log.write(f"Total Files Inserted: {self.stats['total_files_inserted']}\n")
+        self.db_log.write(f"Total Files Updated: {self.stats['total_files_updated']}\n")
+        self.db_log.write(f"Total Acts Inserted: {self.stats['total_acts_inserted']}\n")
+        self.db_log.write(f"Total Acts Updated: {self.stats['total_acts_updated']}\n")
+        self.db_log.write(f"Total Accused Inserted: {self.stats['total_accused_inserted']}\n")
+        self.db_log.write(f"Total Accused Updated: {self.stats['total_accused_updated']}\n")
+        self.db_log.write(f"Total Operations (Inserted + Updated + No Change): {self.stats['total_chargesheets_inserted'] + self.stats['total_chargesheets_updated'] + self.stats['total_chargesheets_no_change']}\n")
+        db_total = self.stats.get('db_total_count', self.stats['total_chargesheets_inserted'])
+        self.db_log.write(f"Total Unique Chargesheets in Database: {db_total}\n")
+        self.db_log.write(f"Note: Updated count includes multiple updates (same key in multiple chunks or same chunk)\n")
+        self.db_log.write(f"Note: Duplicates are records that appear multiple times within the same chunk - ALL are processed for updates\n")
+        if self.stats['total_chargesheets_fetched'] > 0:
+            coverage = ((self.stats['total_chargesheets_inserted'] + self.stats['total_chargesheets_updated'] + self.stats['total_chargesheets_no_change']) / self.stats['total_chargesheets_fetched']) * 100
+            self.db_log.write(f"Coverage: {coverage:.2f}%\n")
+        self.db_log.write(f"Errors: {len(self.stats['errors'])}\n")
+        
+        # Failed records log summary
+        self.failed_log.write(f"\n\n{'='*80}\n")
+        self.failed_log.write(f"SUMMARY\n")
+        self.failed_log.write(f"{'='*80}\n")
+        self.failed_log.write(f"Total Failed Records: {self.stats['total_chargesheets_failed']}\n")
+        self.failed_log.write(f"Note: Failed records are those that could not be inserted or updated\n")
+        self.failed_log.write(f"Check individual entries above for specific reasons\n")
+        
+        # Invalid CRIME_ID log summary
+        self.invalid_crime_id_log.write(f"\n\n{'='*80}\n")
+        self.invalid_crime_id_log.write(f"SUMMARY\n")
+        self.invalid_crime_id_log.write(f"{'='*80}\n")
+        self.invalid_crime_id_log.write(f"Total Chargesheets SKIPPED Due to Invalid CRIME_ID: {self.stats['total_chargesheets_failed_crime_id']}\n")
+        self.invalid_crime_id_log.write(f"\n")
+        self.invalid_crime_id_log.write(f"Note: These chargesheet records were SKIPPED because CRIME_ID was not found in crimes table.\n")
+        self.invalid_crime_id_log.write(f"      CRIME_ID is a required foreign key, so these records cannot be processed.\n")
+        self.invalid_crime_id_log.write(f"      Please ensure these CRIME_IDs are loaded in the crimes table first.\n")
+        
+        # Duplicates log summary
+        self.duplicates_log.write(f"\n\n{'='*80}\n")
+        self.duplicates_log.write(f"SUMMARY\n")
+        self.duplicates_log.write(f"{'='*80}\n")
+        self.duplicates_log.write(f"Total Duplicate Occurrences Found: {self.stats['total_duplicates']}\n")
+        self.duplicates_log.write(f"Note: Duplicates are records that appear multiple times within the same chunk\n")
+        self.duplicates_log.write(f"IMPORTANT: All duplicates are PROCESSED (not skipped) to allow updates\n")
+        self.duplicates_log.write(f"If the same key appears multiple times, each occurrence is processed\n")
+        self.duplicates_log.write(f"The smart update logic will determine if actual updates are needed\n")
+    
+    def _retry_chargesheet_record(self, conn, record):
+        """Retry insertion of a queued chargesheet record once its crime_id is present.
+
+        Called by drain_fk_queue. Returns True on success, False if still unresolvable.
+        """
+        original_crime_id = record.get('_original_crime_id') or record.get('crime_id')
+        if not original_crime_id:
+            return False
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT crime_id FROM {CRIMES_TABLE} WHERE crime_id = %s",
+                (original_crime_id,)
+            )
+            if not cur.fetchone():
+                return False  # Still missing
+            record['crime_id'] = original_crime_id
+            record['_original_crime_id'] = original_crime_id
+            success, _, _ = self.insert_chargesheet(record, 'FK_RETRY')
+            return success
+
+    def run(self):
+        """Main ETL execution"""
+        logger.info("=" * 80)
+        logger.info("🚀 DOPAMAS ETL Pipeline - Chargesheets API")
+        logger.info("=" * 80)
+        
+        # Calculate date range
+        # Start date: Always 2022-01-01T00:00:00+05:30
+        # End date: Yesterday at 23:59:59+05:30 (IST)
+        fixed_start_date = '2022-01-01T00:00:00+05:30'
+        # Prefer the master-injected ETL_TO_DATE (via ETL_CONFIG['end_date'])
+        # so every module in one sync cycle shares the same end boundary,
+        # instead of each independently computing "yesterday" and never
+        # reaching today's records. Falls back to the local yesterday
+        # calculation only if ETL_CONFIG somehow lacks end_date.
+        calculated_end_date = ETL_CONFIG.get('end_date') or get_yesterday_end_ist()
+        
+        logger.info(f"Fixed Start Date: {fixed_start_date}")
+        logger.info(f"Calculated End Date: {calculated_end_date}")
+        
+        # Connect to database
+        if not self.connect_db():
+            logger.error("Failed to connect to database. Exiting.")
+            return False
+
+        # Retry any chargesheet records queued from previous runs due to FK misses.
+        if _drain_fk_queue is not None:
+            try:
+                _drain_fk_queue(self._conn, 'chargesheets',
+                                self._retry_chargesheet_record)
+                self._conn.commit()
+            except Exception as _de:
+                logger.warning("FK queue drain failed at startup: %s (non-fatal)", _de)
+        
+        try:
+            # Get effective start date (check if all 4 tables have data)
+            # This will rollback any failed transactions first
+            effective_start_date = self.get_effective_start_date()
+            logger.info(f"Effective Start Date: {effective_start_date}")
+            
+            # Get table columns for schema evolution
+            # This will also rollback any failed transactions first
+            table_columns = self.get_table_columns(CHARGESHEETS_TABLE)
+            if table_columns:
+                logger.debug(f"Existing table columns: {sorted(table_columns)}")
+            else:
+                logger.info("📊 No existing columns found (table may be empty or new), will detect schema from API")
+            
+            # Generate date ranges with overlap to ensure no data is missed
+            effective_start_date = apply_replay_floor(self, 'chargesheets', effective_start_date)
+            date_ranges = self.generate_date_ranges(
+                effective_start_date,
+                calculated_end_date,
+                ETL_CONFIG['chunk_days'],
+                ETL_CONFIG.get('chunk_overlap_days', 1)  # Default to 1 day overlap for safety
+            )
+            
+            logger.info(f"Date Range: {effective_start_date} to {calculated_end_date}")
+            overlap_days = ETL_CONFIG.get('chunk_overlap_days', 1)
+            logger.info(f"Chunk Size: {ETL_CONFIG['chunk_days']} days (overlap: {overlap_days} day(s) to ensure no data loss)")
+            logger.info("=" * 80)
+            
+            logger.info(f"📊 Total date ranges to process: {len(date_ranges)}")
+            logger.trace(f"Generated date ranges: {date_ranges[:5]}{'...' if len(date_ranges) > 5 else ''} (showing first 5)")
+            logger.info("")
+            start_dt = parse_iso_date(effective_start_date)
+            end_dt = parse_iso_date(calculated_end_date)
+            logger.info(f"ℹ️  API Server Timezone: IST (UTC+05:30)")
+            logger.info(f"ℹ️  Date Range: {format_iso_date(start_dt)} to {format_iso_date(end_dt)}")
+            logger.info(f"ℹ️  ETL Server Timezone: UTC")
+            logger.info("")
+            
+            # Process each date range with progress bar
+            def _process_window(from_date, to_date, table_columns=table_columns):
+                self.process_date_range(from_date, to_date, table_columns)
+                time.sleep(1)
+            begin_run(self, 'chargesheets', effective_start_date)
+            run_ordered_windows(date_ranges, _process_window, self.window_guard)
+            
+            # Get database counts
+            self._cursor.execute(f"SELECT COUNT(*) FROM {CHARGESHEETS_TABLE}")
+            db_chargesheets_count = self._cursor.fetchone()[0]
+            
+            # Store for summary
+            self.stats['db_total_count'] = db_chargesheets_count
+            
+            # Print final statistics
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("📊 FINAL STATISTICS")
+            logger.info("=" * 80)
+            logger.info(f"📡 API CALLS:")
+            logger.info(f"  Total API Calls:      {self.stats['total_api_calls']}")
+            logger.info(f"  Failed API Calls:     {self.stats['failed_api_calls']}")
+            logger.info(f"")
+            logger.info(f"📥 FROM API:")
+            logger.info(f"  Total Chargesheets Fetched: {self.stats['total_chargesheets_fetched']}")
+            logger.info(f"")
+            logger.info(f"💾 TO DATABASE:")
+            logger.info(f"  Total Inserted (New): {self.stats['total_chargesheets_inserted']}")
+            logger.info(f"  Total Updated:        {self.stats['total_chargesheets_updated']}")
+            logger.info(f"  Total No Change:      {self.stats['total_chargesheets_no_change']}")
+            logger.info(f"  Total Failed:         {self.stats['total_chargesheets_failed']}")
+            logger.info(f"    - Invalid CRIME_ID:   {self.stats['total_chargesheets_failed_crime_id']}")
+            logger.info(f"  Total in DB:          {db_chargesheets_count}")
+            logger.info(f"")
+            logger.info(f"📎 RELATED TABLES:")
+            logger.info(f"  Files - Inserted: {self.stats['total_files_inserted']}, Updated: {self.stats['total_files_updated']}")
+            logger.info(f"  Acts - Inserted: {self.stats['total_acts_inserted']}, Updated: {self.stats['total_acts_updated']}")
+            logger.info(f"  Accused - Inserted: {self.stats['total_accused_inserted']}, Updated: {self.stats['total_accused_updated']}")
+            logger.info(f"")
+            logger.info(f"🔄 DUPLICATES:")
+            logger.info(f"  Total Duplicate Occurrences (Processed): {self.stats['total_duplicates']}")
+            logger.info(f"  Note: All duplicates are processed to allow updates")
+            logger.info(f"")
+            logger.info(f"⚠️  INVALID CRIME_ID:")
+            logger.info(f"  Chargesheets SKIPPED Due to Invalid CRIME_ID: {self.stats['total_chargesheets_failed_crime_id']}")
+            logger.info(f"    Check logs/chargesheets_invalid_crime_id_*.log for details")
+            logger.info(f"")
+            logger.info(f"📊 COVERAGE:")
+            if self.stats['total_chargesheets_fetched'] > 0:
+                coverage = ((self.stats['total_chargesheets_inserted'] + self.stats['total_chargesheets_updated'] + self.stats['total_chargesheets_no_change']) / self.stats['total_chargesheets_fetched']) * 100
+                logger.info(f"  API → DB Coverage:   {coverage:.2f}%")
+            logger.info(f"")
+            logger.info(f"📈 SUMMARY:")
+            logger.info(f"  Total from API:       {self.stats['total_chargesheets_fetched']}")
+            logger.info(f"  Inserted + Updated:   {self.stats['total_chargesheets_inserted'] + self.stats['total_chargesheets_updated']}")
+            logger.info(f"  Duplicate Occurrences: {self.stats['total_duplicates']} (all processed)")
+            logger.info(f"  Failed:               {self.stats['total_chargesheets_failed']}")
+            logger.info(f"")
+            logger.info(f"💡 NOTE:")
+            logger.info(f"  - Same chargesheet key can appear multiple times in API response")
+            logger.info(f"  - Each occurrence is processed to capture any data updates")
+            logger.info(f"  - Smart update logic ensures only changed fields are updated")
+            logger.info(f"  - Related tables (files, acts, accused) are processed automatically")
+            logger.info(f"  - CRIME_ID must exist in crimes table (foreign key validation)")
+            logger.info(f"  - Invalid CRIME_IDs are logged separately for review")
+            logger.info(f"")
+            logger.info(f"Errors:               {len(self.stats['errors'])}")
+            logger.info("=" * 80)
+            
+            if self.stats['errors']:
+                logger.warning("⚠️  Errors encountered:")
+                for error in self.stats['errors'][:10]:  # Show first 10 errors
+                    logger.warning(f"  - {error}")
+                if len(self.stats['errors']) > 10:
+                    logger.warning(f"  ... and {len(self.stats['errors']) - 10} more")
+            
+            # Write summary to log files
+            self.write_log_summaries()
+
+            # Invalid-CRIME_ID failures are expected, self-healing behavior --
+            # they're queued to the FK retry system and resolved automatically
+            # on a later run, so they don't represent permanent data loss. Any
+            # OTHER failure has no retry path and means a real record was
+            # permanently dropped; such a run must not be reported as a clean
+            # success.
+            fk_retry_queued = self.stats['total_chargesheets_failed_crime_id']
+            unhandled_failures = self.stats['total_chargesheets_failed'] - fk_retry_queued
+
+            logger.info(f"📊 Total Failed:       {self.stats['total_chargesheets_failed']}")
+            logger.info(f"📊 Errors:             {len(self.stats['errors'])}")
+            logger.info(f"📊 FK Retry Queued:    {fk_retry_queued}")
+            logger.info(f"📊 Unhandled Failures: {unhandled_failures}")
+            logger.info(f"📝 API chunk log saved to: {self.api_log_file}")
+            logger.info(f"📝 DB chunk log saved to: {self.db_log_file}")
+            logger.info(f"📝 Failed records log saved to: {self.failed_log_file}")
+            logger.info(f"📝 Invalid CRIME_ID log saved to: {self.invalid_crime_id_log_file}")
+            logger.info(f"📝 Duplicates log saved to: {self.duplicates_log_file}")
+
+            if unhandled_failures > 0:
+                if not self.window_guard.failed:
+                    self.window_guard.fail(str(effective_start_date)[:10], str(calculated_end_date)[:10])
+                release_checkpoint(self, 'chargesheets')
+                logger.error(
+                    f"❌ ETL Pipeline completed with {unhandled_failures} unhandled record failure(s) "
+                    f"(total failed={self.stats['total_chargesheets_failed']}, "
+                    f"fk_retry_queued={fk_retry_queued}). These records were NOT inserted and are "
+                    f"NOT queued for automatic retry -- see the errors above and the failed records log."
+                )
+                return False
+
+            if not release_checkpoint(self, 'chargesheets'):
+                return False
+            logger.info("✅ ETL Pipeline completed successfully!")
+            return True
+
+        except KeyboardInterrupt:
+            logger.warning("\n⚠️  ETL interrupted by user")
+            return False
+        except Exception as e:
+            logger.error(f"❌ ETL failed with error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            self.close_chunk_loggers()
+            self.close_db()
+
+
+def main():
+    """Main entry point"""
+    etl = ChargesheetsETL()
+    success = etl.run()
+    sys.exit(0 if success else 1)
+
+
+if __name__ == '__main__':
+    main()
+
+
