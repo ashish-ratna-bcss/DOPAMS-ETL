@@ -40,9 +40,6 @@ try:
 except ValueError:
     CCTNS_ORPHAN_FIR_MAX = 0
 
-# Airflow UI TLS (self-signed under deploy/tls/ by default). Set 0 to allow plain HTTP.
-AIRFLOW_TLS_ENABLE = os.environ.get("AIRFLOW_TLS_ENABLE", "1").strip()
-
 # Same Postgres database (PG_DATABASE); ETL tables in PG_ETL_SCHEMA, Airflow in PG_AIRFLOW_SCHEMA.
 
 # --- Pull behavior ---

@@ -153,39 +153,7 @@ if [[ "$1" == "scheduler" || "$1" == "webserver" ]]; then
   fi
 fi
 
-# Web UI: port 9001 only. Prefer AIRFLOW_WEBSERVER_HOST=private IP (not 0.0.0.0).
-# TLS (HTTPS) is on by default via self-signed cert under deploy/tls/.
-_ensure_webserver_tls() {
-  if [[ "${AIRFLOW_TLS_ENABLE:-1}" != "1" ]]; then
-    echo "AIRFLOW_TLS_ENABLE!=1 — Airflow UI will use plain HTTP (not recommended)." >&2
-    return 0
-  fi
-  local cert_dir="${ETL_DIR}/deploy/tls"
-  local cert="${AIRFLOW_TLS_CERT:-${cert_dir}/airflow.crt}"
-  local key="${AIRFLOW_TLS_KEY:-${cert_dir}/airflow.key}"
-  mkdir -p "${cert_dir}"
-  if [[ ! -f "${cert}" || ! -f "${key}" ]]; then
-    echo "Generating self-signed TLS cert for Airflow UI → ${cert}" >&2
-    local host="${AIRFLOW_WEBSERVER_HOST:-localhost}"
-    if openssl req -x509 -newkey rsa:2048 -sha256 -days 825 -nodes \
-      -keyout "${key}" -out "${cert}" \
-      -subj "/CN=${host}" \
-      -addext "subjectAltName=IP:${host},DNS:${host},DNS:localhost" 2>/dev/null; then
-      :
-    else
-      openssl req -x509 -newkey rsa:2048 -sha256 -days 825 -nodes \
-        -keyout "${key}" -out "${cert}" \
-        -subj "/CN=${host}"
-    fi
-    chmod 600 "${key}"
-    chmod 644 "${cert}"
-  fi
-  export AIRFLOW__WEBSERVER__WEB_SERVER_SSL_CERT="${cert}"
-  export AIRFLOW__WEBSERVER__WEB_SERVER_SSL_KEY="${key}"
-  export AIRFLOW__WEBSERVER__COOKIE_SECURE=True
-  echo "Airflow UI TLS enabled (cert=${cert})" >&2
-}
-
+# Web UI: port 9001 only over HTTP. Prefer AIRFLOW_WEBSERVER_HOST=private IP (not 0.0.0.0).
 if [[ "$1" == "webserver" ]]; then
   AF_PORT="${AIRFLOW_WEBSERVER_PORT:-9001}"
   if [[ "${AF_PORT}" != "9001" ]]; then
@@ -193,7 +161,9 @@ if [[ "$1" == "webserver" ]]; then
     exit 1
   fi
   AF_HOST="${AIRFLOW_WEBSERVER_HOST:-0.0.0.0}"
-  _ensure_webserver_tls
+  # Ensure leftover SSL env from older deploys does not force HTTPS.
+  unset AIRFLOW__WEBSERVER__WEB_SERVER_SSL_CERT AIRFLOW__WEBSERVER__WEB_SERVER_SSL_KEY
+  unset AIRFLOW__WEBSERVER__COOKIE_SECURE
   shift
   exec "${AF}" webserver --port "${AF_PORT}" --hostname "${AF_HOST}" "$@"
 fi

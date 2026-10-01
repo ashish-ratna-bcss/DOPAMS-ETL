@@ -1,8 +1,5 @@
 .env
 deploy/airflow-credentials.txt
-deploy/tls/*.key
-deploy/tls/*.crt
-deploy/tls/*.pem
 __pycache__/
 *.pyc
 logs/

@@ -34,8 +34,7 @@ Production-style settings (Postgres + LocalExecutor, no separate Airflow DB):
   - `cctns` (or `PG_ETL_SCHEMA`) — `cctns_*`, audit/run log
   - `airflow` (or `PG_AIRFLOW_SCHEMA`) — `dag`, `dag_run`, `ab_*`, …
 - **Auto-create:** PM2 `airflow_with_env.sh` creates the DB if missing, runs `airflow db migrate`, and creates/resets the Airflow Admin user from **`AIRFLOW_ADMIN_PASSWORD`** in `.env` (required, min 12 chars, not `admin`). DAG task `bootstrap_database` runs ETL DDL + migrate too.
-- **UI bind:** `AIRFLOW_WEBSERVER_HOST` / `AIRFLOW_WEBSERVER_PORT` (**9001 only**). Prefer a private IP for `AIRFLOW_WEBSERVER_HOST`.
-- **HTTPS:** `AIRFLOW_TLS_ENABLE=1` (default) — self-signed cert under `deploy/tls/`; open `https://<host>:9001` (browser warning expected until you install a real cert).
+- **UI bind:** `AIRFLOW_WEBSERVER_HOST` / `AIRFLOW_WEBSERVER_PORT` (**9001 only**, HTTP). Prefer a private IP for `AIRFLOW_WEBSERVER_HOST`.
 - **Postgres TLS:** set `PG_SSLMODE=prefer` (default) or `require` once the server has SSL.
 - **Failure alerts:** every failed Airflow task appends JSON to `logs/etl_failures.log`. Optionally set `CCTNS_ALERT_WEBHOOK_URL` in `.env` for Slack/Teams/webhook POST.
 
@@ -49,7 +48,7 @@ Optional manual migrate only: `./deploy/setup_airflow_metadata_db.sh`
 
 `config/settings.py` loads `.env` from the project root so Airflow tasks always see `PG_*` and API URLs.
 
-Airflow UI: `https://<dopams-new-ip>:9001` — username/password from `.env` (`AIRFLOW_ADMIN_*`). Never use the old default `admin`/`admin`.
+Airflow UI: `http://<dopams-new-ip>:9001` — username/password from `.env` (`AIRFLOW_ADMIN_*`). Never use the old default `admin`/`admin`.
 
 **UI shows "Ooops!" when triggering a DAG:** With metadata in schema `airflow`, the Postgres URL must set `search_path` (handled in `deploy/airflow_with_env.sh`). After `git pull`, run `./deploy/reload_pm2.sh`. If trigger still fails, check webserver logs (`pm2 logs cctnsv1-airflow-webserver --lines 50`) for `log_template` / `TypeError`, and verify `SELECT COUNT(*) FROM airflow.log_template;` is greater than 0.
 
