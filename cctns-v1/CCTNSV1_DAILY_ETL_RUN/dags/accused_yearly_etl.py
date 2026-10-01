@@ -53,7 +53,7 @@ def cctnsv1_accused_yearly_etl():
     @task(
         task_id="bootstrap_database",
         doc_md=(
-            "Create `PG_DATABASE` if missing; ETL DDL; Airflow metadata in the same DB."
+            "Create `PG_DATABASE` if missing; ETL DDL; Airflow metadata in PG_AIRFLOW_DATABASE."
         ),
     )
     def bootstrap_database() -> dict:

@@ -7,7 +7,7 @@ SQL files (in order):
 
 Upsert keys (natural_key) remain in db/sql/001_schema_fix.sql until reviewed.
 
-Airflow internal tables (separate naming) also live in PG_DATABASE — see db/airflow_metadata.py.
+Airflow metadata uses a separate database (PG_AIRFLOW_DATABASE) — see db/airflow_metadata.py.
 """
 import logging
 from pathlib import Path
@@ -23,7 +23,6 @@ logger = logging.getLogger("cctns_v1_etl.db")
 SQL_DIR = Path(__file__).resolve().parent / "sql"
 INIT_SQL_FILES = (
     "002_migrate_etl_to_cctns_schema.sql",
-    "003_migrate_airflow_to_airflow_schema.sql",
     "init_schema.sql",
     "init_etl_support.sql",
     "004_natural_keys_court_accused_details.sql",

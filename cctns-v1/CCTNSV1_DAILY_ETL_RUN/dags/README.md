@@ -21,9 +21,9 @@ flowchart LR
         WRAP --> WEB
     end
 
-    subgraph PG["Postgres database cctns_v1"]
-        AF["schema airflow\ndag_run, task_instance, …"]
-        ET["schema cctns\ncctns_fir, …"]
+    subgraph PG["Postgres"]
+        AF["DB cctns_v1_airflow\nAirflow metadata"]
+        ET["DB cctns_v1 / schema cctns\ncctns_fir, …"]
     end
 
     SCH -->|"LocalExecutor:\nrun task in subprocess"| TASK["Python @task callable"]
