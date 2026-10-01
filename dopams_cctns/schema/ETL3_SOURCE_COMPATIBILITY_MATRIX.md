@@ -48,6 +48,37 @@ Every one of the 14 live business tables was checked directly against `informati
 
 ---
 
+## Phase 2 live-adapter verification (supersedes assumptions above where they differ)
+
+Built and ran real V1/V2 source adapters (`etl3/sources/v1/adapter.py`, `etl3/sources/v2/adapter.py`) against the live databases. Two real discrepancies were caught by this testing that the design docs above did not anticipate — both are now fixed in the adapter code and documented here rather than silently papered over.
+
+**V1: `cctns_v1_etl_run_log` has two different run identifiers, not one.** `id` (bigint, the PK used throughout this project's prior audits for "run 54"/"run 56" etc.) and a separate `run_id` (UUID) column. `cctns_v1_etl_row_action.run_id` joins on the **UUID**, not the bigint `id` — a first draft of the adapter used `id` and failed immediately (`invalid input syntax for type uuid: "28"`) the first time it ran against live data. Fixed; the adapter now selects and exposes `run_id` as `source_run_id`.
+
+**V1: `cctns_v1_etl_row_action.record_key` is the literal primary key only for `fir`.** Confirmed by direct inspection and an anti-join (0 mismatches): `fir`'s `record_key` is exactly `fir_reg_num`. For `court`, `accused`, and `accused_details`, `record_key` is a pipe-delimited composite of that module's natural-key fields (e.g. `court`: `fir_reg_num|from_date|to_date|court_case_num|court_name|disposal_type|remarks`) — **not** the table's actual PK (`court_id`/`accused_id`). `get_source_record()` now raises `NotImplementedError` for these three modules rather than guessing at a resolution; correctly correlating a composite natural-key observation back to a current row is deferred to the source-observation-layer phase, where it belongs (and connects directly to V1's already-documented natural-key churn, §10 of the implementation plan).
+
+**V2: one data-quality gap found, fully characterized, not just noted.** 24 of 32,790 `persons` rows have `etl_run_id IS NULL` — and, on inspection, also have NULL `full_name`/`date_created`/`fetched_at`: essentially placeholder rows with only a `person_id`. These are invisible to etl_run_id-based discovery by construction. Confirmed this is the exact and only source of the 24-row gap between "rows discovered across all runs" (32,766) and the table's real count (32,790) for every one of the 12 supported modules — every other module's discovered-row total matches its table count exactly.
+
+**V2 `etl_run_id` is a strict `uuid` column, not text**, on every table checked — a naive `etl_run_id <> ''` filter fails with a Postgres type error rather than matching nothing; the adapter filters on `IS NOT NULL` only.
+
+| V2 module | Incremental signal | Run ID available | fetched_at | source ID | Status |
+|---|---|---|---|---|---|
+| `crimes` | `etl_run_id` | Yes (uuid) | Yes | `crime_id` | **Live verified** — 9,535/9,535 rows accounted for |
+| `accused` | `etl_run_id` | Yes | Yes | `accused_id` | **Live verified** — 32,867/32,867 |
+| `persons` | `etl_run_id` | Yes, except 24 rows | Yes, except same 24 | `person_id` | **Live verified, gap characterized** — 32,766/32,790, remainder are empty placeholder rows |
+| `arrests` | `etl_run_id` | Yes | Yes | `id` | **Live verified** — 32,862/32,862 |
+| `chargesheets` | `etl_run_id` | Yes | Yes | `id` | **Live verified** — 7,061/7,061 |
+| `charge_sheet_updates` | `etl_run_id` | Yes | Yes | `id` | **Live verified** — 6,163/6,163 |
+| `disposal` | `etl_run_id` | Yes | Yes | `id` | **Live verified** — 470/470 |
+| `mo_seizures` | `etl_run_id` | Yes | Yes | `mo_seizure_id` | **Live verified** — 3,534/3,534 |
+| `properties` | `etl_run_id` | Yes | Yes | `property_id` | **Live verified** — 7,646/7,646 |
+| `fsl_case_property` | `etl_run_id` | Yes | Yes | `case_property_id` | **Live verified** — 2,003/2,003 |
+| `interrogation_reports` | `etl_run_id` | Yes | Yes | `interrogation_report_id` | **Live verified** — 19,497/19,497 |
+| `hierarchy` | `etl_run_id` | Yes | Yes | `ps_code` | **Live verified** — 816/816 |
+
+All twelve `[LIVE VERIFIED]` this phase via `etl3/tests/test_v2_adapter.py`, not assumed from the earlier column-existence check alone.
+
+---
+
 ## Cross-cutting notes
 
 - Both databases live on the same Postgres cluster (identical `pg_roles` listing returned from both connections this session, host `192.168.103.106`) `[DATABASE VERIFIED]` — different `dbname`s, same server. This matters for §13 (security boundary) in the implementation plan: role separation must be enforced with per-database `GRANT`, not assumed from network segregation.
