@@ -86,13 +86,32 @@ def test_fir_record_resolves():
     print(f"       resolved fir_reg_num={sample} -> {len(row)} columns")
 
 
-def test_non_fir_record_resolution_explicitly_unsupported():
+def test_court_and_accused_details_resolution_explicitly_unsupported():
+    """Phase 3 resolved 'accused' (via natural_key match, with explicit
+    unresolved-as-None semantics -- see test_v1_adapter.py's other checks and
+    PHASE3_SOURCE_OBSERVATION_STATUS.md). 'court'/'accused_details' still
+    correctly refuse get_source_record() -- they require get_records_for_fir()
+    instead, by design (see V1Adapter.get_source_record's docstring)."""
     a = V1Adapter()
-    try:
-        a.get_source_record("accused", "anything")
-        raise AssertionError("expected NotImplementedError for module='accused'")
-    except NotImplementedError:
-        print("       correctly raises NotImplementedError (record_key is a composite key, not a PK, for this module)")
+    for module in ("court", "accused_details"):
+        try:
+            a.get_source_record(module, "anything")
+            raise AssertionError(f"expected NotImplementedError for module={module!r}")
+        except NotImplementedError:
+            pass
+    print("       court/accused_details correctly refuse get_source_record (use get_records_for_fir instead)")
+
+
+def test_accused_natural_key_resolution():
+    """Phase 3: 'accused' now resolves via exact natural_key match when
+    possible, and returns None (not an exception) when the record_key
+    predates/diverges from the current natural_key -- confirmed against a
+    known case: run bbe9006c resolves exactly 7 of its 82 touched records."""
+    a = V1Adapter()
+    recs = a.get_changed_records("accused", "bbe9006c-be7b-4c49-8c93-b231037ff4fa")
+    resolved = sum(1 for r in recs if a.get_source_record("accused", r.source_record_id) is not None)
+    assert resolved == 7, resolved
+    print(f"       {resolved}/{len(recs)} resolved via exact natural_key match (matches the known baseline exactly)")
 
 
 def test_gap_state_matches_known_ledger():
@@ -117,7 +136,8 @@ if __name__ == "__main__":
     latest = check("Discover latest successful accused run + read metadata", test_discover_latest_run_and_metadata)
     check("Changed-records count matches direct row_action query", lambda: test_changed_records_match_row_action(latest))
     check("FIR record resolves via get_source_record", test_fir_record_resolves)
-    check("Non-FIR module resolution correctly unsupported, not silently wrong", test_non_fir_record_resolution_explicitly_unsupported)
+    check("court/accused_details resolution correctly unsupported, not silently wrong", test_court_and_accused_details_resolution_explicitly_unsupported)
+    check("accused resolves via natural_key where possible, None otherwise (not an exception)", test_accused_natural_key_resolution)
     check("Gap state matches the known 180-row ledger exactly", test_gap_state_matches_known_ledger)
     check("No source-side mutation occurred", test_no_source_mutation)
     print("\nAll Phase 2G V1 live verification checks passed.")

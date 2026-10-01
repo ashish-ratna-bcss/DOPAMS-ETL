@@ -129,50 +129,203 @@ class V1Adapter(SourceAdapter):
         Fetch one record by the identifier get_changed_records() handed back
         as source_record_id.
 
-        IMPORTANT, found while testing this live: cctns_v1_etl_row_action's
-        record_key is NOT the literal primary key for every module. Confirmed
-        by direct inspection:
-          - 'fir':  record_key IS fir_reg_num exactly (0 mismatches against
-            every row currently in cctns_fir -- verified by anti-join).
-          - 'court', 'accused', 'accused_details': record_key is a
-            pipe-delimited composite of that module's natural-key fields
-            (fir_reg_num first, then other fields that vary per module),
-            NOT the module's actual PK (court_id / accused_id). Example
-            actually observed: 'court' record_key =
-            '2044001210144|2022-01-29T...|...|CC-509/2022|...'.
+        Phase 2 found record_key is the literal PK only for 'fir'. Phase 3
+        investigated the other three modules to the root cause (not just the
+        symptom), by reading the actual V1 ETL source code
+        (db/natural_key.py, db/upsert.py) alongside the live DB triggers
+        (pg_get_functiondef on trg_cctns_court_natural_key /
+        trg_cctns_accused_details_natural_key):
 
-        This means a record_key from get_changed_records() can be resolved
-        straight back to a row ONLY for 'fir'. For the other three modules,
-        this method deliberately raises rather than guessing at a resolution
-        -- V1's own natural-key churn (the same issue documented throughout
-        ETL3_MERGER_IMPLEMENTATION_PLAN.md section 10) means a composite
-        natural-key string does not map 1:1 to a single current accused_id/
-        court_id anyway. Resolving this correctly is Phase 3's job (the
-        source-observation layer), which will correlate via the fir_reg_num
-        prefix and read that FIR's full current row set rather than trying
-        to pinpoint one historical record_key -- not invented here.
+          - For 'court' and 'accused_details', the DB trigger computes
+            natural_key as the SAME pipe-delimited field list, in the SAME
+            order, as Python's record_key() -- so in principle record_key
+            should equal natural_key exactly. Empirically it does NOT, most
+            of the time (confirmed: only 250/7,536 court entries and
+            2,245/20,227 accused_details entries resolve via exact
+            natural_key match, across this table's full row_action history).
+            Root cause: Python's record_key() runs on the RAW API response
+            dict (date fields as ISO8601 strings like
+            '2022-01-29T18:30:00.000+00:00'), while the DB trigger runs on
+            the ALREADY-TYPED, ALREADY-INSERTED row and casts timestamptz
+            columns with `::text` (Postgres's own default rendering, e.g.
+            '2022-01-29 18:30:00+00') -- two different text representations
+            of the same instant, so the strings (and therefore an exact
+            match) diverge. This is a pre-existing property of V1's own ETL
+            code, not something ETL-3 introduced or can fix (V1 must not be
+            modified).
+          - For 'accused', record_key IS already an MD5 hash (computed in
+            Python), and the DB trigger ALSO computes an MD5 hash -- but
+            over data that went through the same raw-API-vs-cast-column
+            divergence above, so the two hashes usually differ too.
+            Confirmed even on the most recent run that actually inserted
+            accused rows: only 7 of 82 record_keys match their row's current
+            natural_key exactly.
+
+        Resolution strategy, chosen because it is exact and provably
+        correct, not because it is convenient:
+          - 'fir': record_key IS the PK. Direct lookup (as before).
+          - 'accused': try an exact natural_key match first (precise when it
+            works). If it doesn't match, this observation genuinely CANNOT
+            be resolved to a specific current row via record_key alone --
+            returns None. Callers (the observation writer) must treat None
+            as "unresolved," log it explicitly, and NOT guess -- not treat
+            it as "record no longer exists."
+          - 'court' / 'accused_details': use get_records_for_fir() instead
+            of this method -- see its docstring for why single-record
+            resolution isn't the right granularity for these two modules.
         """
         if module not in MODULE_TABLE:
             raise ValueError(f"Unsupported V1 module: {module!r}")
-        if module != "fir":
+        if module in ("court", "accused_details"):
             raise NotImplementedError(
-                f"get_source_record('{module}', ...) is not supported: "
-                "cctns_v1_etl_row_action.record_key for this module is a "
-                "composite natural-key string, not the table's primary key "
-                "(confirmed live; see this method's docstring). Resolving a "
-                "specific record_key to a current row for this module is "
-                "deferred to Phase 3's source-observation design."
+                f"get_source_record('{module}', ...) is not the right method -- "
+                "use get_records_for_fir() instead; see this method's docstring "
+                "for why single-record_key resolution isn't reliable for this module."
             )
         table_name, pk_col = MODULE_TABLE[module]
         conn = connections.get_v1_source_connection()
         try:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT * FROM cctns.{table_name} WHERE {pk_col} = %s", (record_id,))
+                if module == "accused":
+                    cur.execute(
+                        f"SELECT * FROM cctns.{table_name} WHERE natural_key = %s",
+                        (record_id,),
+                    )
+                else:  # fir
+                    cur.execute(f"SELECT * FROM cctns.{table_name} WHERE {pk_col} = %s", (record_id,))
                 row = cur.fetchone()
                 if row is None:
                     return None
                 cols = [d[0] for d in cur.description]
                 return dict(zip(cols, row))
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def extract_fir_reg_num(self, module: str, record_key: str) -> Optional[str]:
+        """
+        Every record_key -- for every module, in every historical format
+        found this phase -- starts with fir_reg_num (verified empirically
+        this phase: splitting on '|' and checking the first segment against
+        live cctns_fir resolved 100% of 7,536 court, 20,227 accused_details,
+        and 17,116 historical-format accused row_action entries -- an
+        anti-join found zero exceptions). The one case this does NOT work
+        for is 'accused' entries already in the current MD5-hash record_key
+        format (no '|' present at all) -- those have no extractable
+        fir_reg_num and must go through get_source_record()'s natural_key
+        match instead.
+        """
+        if module not in MODULE_TABLE:
+            raise ValueError(f"Unsupported V1 module: {module!r}")
+        if "|" not in record_key:
+            return record_key if module == "fir" else None
+        return record_key.split("|", 1)[0] or None
+
+    def get_records_by_ids(self, module: str, ids: list) -> dict:
+        """Batch version of get_source_record for 'fir'/'accused' -- one
+        query instead of one connection+query per id. Returns {id: row}."""
+        if module not in ("fir", "accused"):
+            raise ValueError(f"get_records_by_ids is only for fir/accused, got {module!r}")
+        if not ids:
+            return {}
+        table_name, pk_col = MODULE_TABLE[module]
+        key_col = "natural_key" if module == "accused" else pk_col
+        conn = connections.get_v1_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM cctns.{table_name} WHERE {key_col} = ANY(%s)", (list(set(ids)),))
+                rows = cur.fetchall()
+                if not rows:
+                    return {}
+                cols = [d[0] for d in cur.description]
+                key_idx = cols.index(key_col)
+                return {row[key_idx]: dict(zip(cols, row)) for row in rows}
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def get_records_for_firs(self, module: str, fir_reg_nums: list) -> dict:
+        """Batch version of get_records_for_fir -- one query instead of one
+        connection+query per FIR. Returns {fir_reg_num: [row, row, ...]}."""
+        if module not in ("court", "accused_details"):
+            raise ValueError(f"get_records_for_firs is only for court/accused_details, got {module!r}")
+        if not fir_reg_nums:
+            return {}
+        table_name, _ = MODULE_TABLE[module]
+        conn = connections.get_v1_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM cctns.{table_name} WHERE fir_reg_num = ANY(%s)",
+                    (list(set(fir_reg_nums)),),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    return {}
+                cols = [d[0] for d in cur.description]
+                fir_idx = cols.index("fir_reg_num")
+                out = {}
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    out.setdefault(row[fir_idx], []).append(d)
+                return out
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def get_records_for_fir(self, module: str, fir_reg_num: str) -> list:
+        """
+        For 'court' and 'accused_details': return every CURRENT row for this
+        FIR, rather than trying to pinpoint the single row a historical
+        record_key referred to (see get_source_record()'s docstring for why
+        that single-record resolution is not reliable for these modules).
+        This is a deliberate observation-granularity decision -- "something
+        about this FIR's court/accused_details rows changed in this run" --
+        not an attempt to disguise an unresolved lookup as a resolved one.
+        """
+        if module not in ("court", "accused_details"):
+            raise ValueError(f"get_records_for_fir is only for court/accused_details, got {module!r}")
+        table_name, _ = MODULE_TABLE[module]
+        conn = connections.get_v1_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM cctns.{table_name} WHERE fir_reg_num = %s", (fir_reg_num,))
+                rows = cur.fetchall()
+                if not rows:
+                    return []
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in rows]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def get_all_current_records(self, module: str, batch_size: int = 1000):
+        """
+        Yields every row currently in this module's business table, as
+        dicts, batched (not loaded entirely into memory). This is the
+        baseline/initial-observation path -- it reads the table directly and
+        does NOT go through cctns_v1_etl_run_log/cctns_v1_etl_row_action at
+        all, so none of get_source_record()'s record_key-resolution
+        limitations apply here: every row's own current natural_key/PK is
+        used directly, exactly as stored.
+        """
+        if module not in MODULE_TABLE:
+            raise ValueError(f"Unsupported V1 module: {module!r}")
+        table_name, _ = MODULE_TABLE[module]
+        conn = connections.get_v1_source_connection()
+        try:
+            with conn.cursor(name=f"etl3_v1_scan_{module}") as cur:
+                cur.itersize = batch_size
+                cur.execute(f"SELECT * FROM cctns.{table_name}")
+                cols = None
+                while True:
+                    batch = cur.fetchmany(batch_size)
+                    if not batch:
+                        break
+                    if cols is None:
+                        cols = [d[0] for d in cur.description]
+                    for row in batch:
+                        yield dict(zip(cols, row))
         finally:
             conn.rollback()
             conn.close()

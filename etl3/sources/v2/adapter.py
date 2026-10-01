@@ -4,8 +4,8 @@ V2 source adapter.
 Unlike V1, every V2 business table carries its own per-row provenance
 columns directly (etl_run_id, fetched_at, source_system, source_endpoint) --
 confirmed live across all 12 business tables used here (see
-ETL3_SOURCE_COMPATIBILITY_MATRIX.md, re-verified this phase in
-discover_supported_modules_live() below). There is no separate run-log
+ETL3_SOURCE_COMPATIBILITY_MATRIX.md and etl3/tests/test_v2_adapter.py,
+which re-verifies this against the live database). There is no separate run-log
 table the way V1 has cctns_v1_etl_run_log; a "run" is discovered directly
 from the business table itself by grouping on etl_run_id.
 
@@ -124,6 +124,35 @@ class V2Adapter(SourceAdapter):
                     return None
                 cols = [d[0] for d in cur.description]
                 return dict(zip(cols, row))
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def get_all_current_records(self, module: str, batch_size: int = 1000):
+        """
+        Yields every row currently in this module's table, as dicts, batched
+        (not loaded entirely into memory). The baseline/initial-observation
+        path -- reads the table directly, not through etl_run_id grouping,
+        so it also captures rows with a NULL etl_run_id (e.g. the 24
+        placeholder persons rows) that discover_new_runs()/
+        get_changed_records() cannot see by construction.
+        """
+        if module not in MODULE_PK:
+            raise ValueError(f"Unsupported V2 module: {module!r}")
+        conn = connections.get_v2_source_connection()
+        try:
+            with conn.cursor(name=f"etl3_v2_scan_{module}") as cur:
+                cur.itersize = batch_size
+                cur.execute(f"SELECT * FROM {module}")
+                cols = None
+                while True:
+                    batch = cur.fetchmany(batch_size)
+                    if not batch:
+                        break
+                    if cols is None:
+                        cols = [d[0] for d in cur.description]
+                    for row in batch:
+                        yield dict(zip(cols, row))
         finally:
             conn.rollback()
             conn.close()
