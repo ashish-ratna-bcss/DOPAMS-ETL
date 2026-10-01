@@ -1,7 +1,11 @@
 """Shared Airflow defaults for CCTNS V1 DAGs."""
 from datetime import datetime, timedelta
 
-from dags.alerts import notify_task_failure
+# Prefer package import (PYTHONPATH=ETL root). Fall back for direct loads.
+try:
+    from dags.alerts import notify_task_failure
+except ImportError:  # pragma: no cover - Airflow may load siblings under dags/
+    from alerts import notify_task_failure
 
 # Airflow cron is UTC. India (IST = UTC+5:30):
 #   00:30 IST → 19:00 UTC (previous calendar day in UTC) — simple APIs
