@@ -1,4 +1,0 @@
-"""Redis caching management"""
-
-
-
