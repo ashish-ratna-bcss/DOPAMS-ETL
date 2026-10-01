@@ -22,10 +22,11 @@ PG_HOST = os.environ.get("PG_HOST", "192.168.103.106")
 PG_PORT = os.environ.get("PG_PORT", "5432")
 PG_DATABASE = os.environ.get("PG_DATABASE", "cctns_v1")
 PG_ETL_SCHEMA = os.environ.get("PG_ETL_SCHEMA", "cctns")
-# Airflow metadata uses a separate database (not mixed into PG_DATABASE).
-PG_AIRFLOW_DATABASE = os.environ.get("PG_AIRFLOW_DATABASE", "cctns_v1_airflow")
+PG_AIRFLOW_SCHEMA = os.environ.get("PG_AIRFLOW_SCHEMA", "airflow")
 PG_USER = os.environ.get("PG_USER")
 PG_PASSWORD = os.environ.get("PG_PASSWORD")
+
+# Same Postgres database (PG_DATABASE); ETL tables in PG_ETL_SCHEMA, Airflow in PG_AIRFLOW_SCHEMA.
 
 # --- Pull behavior ---
 # How far back the Accused date-range endpoint pulls, every night, in full.

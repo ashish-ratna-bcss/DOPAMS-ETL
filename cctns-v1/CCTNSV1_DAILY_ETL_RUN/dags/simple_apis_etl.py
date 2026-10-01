@@ -54,7 +54,7 @@ def cctnsv1_simple_apis_etl():
         task_id="bootstrap_database",
         doc_md=(
             "Create `PG_DATABASE` if missing; ETL DDL (`init_schema.sql`); "
-            "Airflow metadata tables in dedicated `PG_AIRFLOW_DATABASE` (`airflow db migrate`)."
+            "Airflow metadata tables in the **same** database (`airflow db migrate`)."
         ),
     )
     def bootstrap_database() -> dict:

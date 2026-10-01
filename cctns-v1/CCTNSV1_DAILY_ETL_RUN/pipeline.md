@@ -82,11 +82,12 @@ flowchart TB
         DBL["db/connection.py, upsert.py, init_schema.py"]
     end
 
-    subgraph Postgres["PostgreSQL"]
-        DB[("PG_DATABASE\ndefault: cctns_v1\nschema cctns only")]
-        AFDB[("PG_AIRFLOW_DATABASE\ndefault: cctns_v1_airflow")]
+    subgraph Postgres["PostgreSQL — one database"]
+        DB[("PG_DATABASE\ndefault: cctns_v1")]
         S1["schema cctns\nETL tables"]
+        S2["schema airflow\nAirflow metadata"]
         DB --> S1
+        DB --> S2
     end
 
     A1 & A2 & A3 --> D1
@@ -140,19 +141,19 @@ CCTNSV1_DAILY_ETL_RUN/
 | `FIR_API_URL`, `COURT_API_URL`, `ACCUSED_DETAILS_API_URL`, `ACCUSED_API_URL` | Source endpoints |
 | `PG_HOST`, `PG_PORT`, `PG_DATABASE`, `PG_USER`, `PG_PASSWORD` | Destination Postgres |
 | `PG_ETL_SCHEMA` | ETL tables (default `cctns`) |
-| `PG_AIRFLOW_DATABASE` | Separate Airflow metadata DB (default `cctns_v1_airflow`) |
+| `PG_AIRFLOW_SCHEMA` | Airflow metadata tables (default `airflow`) |
 | `ACCUSED_FULL_PULL_START_DATE` | Start of accused dossier pull (`DD-MM-YYYY`, default `01-01-2002`) |
 
 Airflow tasks always load `.env` from the project root via `config/settings.py`, regardless of Airflow’s working directory.
 
 ---
 
-## Postgres: ETL DB vs Airflow DB
+## Postgres: one database, two schemas
 
 ```mermaid
 erDiagram
     DATABASE_cctns_v1 {
-        string note "Business + ETL only"
+        string note "Single PG_DATABASE"
     }
     SCHEMA_cctns {
         table cctns_fir
@@ -162,26 +163,31 @@ erDiagram
         table cctns_v1_audit_log
         table cctns_v1_etl_run_log
     }
-    DATABASE_cctns_v1_airflow {
-        string note "Airflow metadata only"
+    SCHEMA_airflow {
+        table dag
+        table dag_run
+        table task_instance
+        table log_template
     }
     DATABASE_cctns_v1 ||--o| SCHEMA_cctns : contains
+    DATABASE_cctns_v1 ||--o| SCHEMA_airflow : contains
 ```
 
-| Database | Contents |
-|----------|----------|
-| **`cctns_v1`** | All `cctns_*` business tables, sequences, FKs, ETL support objects |
-| **`cctns_v1_airflow`** | Scheduler/webserver state (not mixed into the ETL DB) |
+| Schema | Contents |
+|--------|----------|
+| **`cctns`** | All `cctns_*` business tables, sequences, FKs, ETL support objects |
+| **`airflow`** | Scheduler/webserver state (not mixed into `public`) |
 
-ETL connections use `options=-c search_path=cctns,public`. Airflow connects to `PG_AIRFLOW_DATABASE` (see `deploy/airflow_with_env.sh`).
+ETL connections use `options=-c search_path=cctns,public`. Airflow’s SQLAlchemy URL also sets `search_path` to the airflow schema (see `deploy/airflow_with_env.sh`).
 
 **Bootstrap order** (`db/init_schema.py`):
 
 1. Create `PG_DATABASE` if missing (needs `CREATEDB` or pre-created DB).
-2. `002` — legacy ETL moves from `public` if needed.
+2. `002` / `003` — legacy moves from `public` if needed.
 3. `init_schema.sql` — tables in `cctns`.
-4. `init_etl_support.sql` + natural-key / failed-window SQL.
-5. Airflow `db migrate` runs against `PG_AIRFLOW_DATABASE` (via `airflow_with_env.sh`).
+4. `init_etl_support.sql` — audit trigger, run log table, etc.
+
+Each DAG run’s **`bootstrap_database`** task repeats this idempotently before sync tasks.
 
 ---
 
