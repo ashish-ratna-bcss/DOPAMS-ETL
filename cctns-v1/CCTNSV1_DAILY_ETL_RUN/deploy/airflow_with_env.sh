@@ -36,7 +36,9 @@ SSL_QUERY="sslmode=${PG_SSLMODE}"
 export AIRFLOW_HOME="${ETL_DIR}/airflow_home"
 export AIRFLOW__CORE__DAGS_FOLDER="${ETL_DIR}/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
-export AIRFLOW__CORE__DEFAULT_UI_TIMEZONE=Asia/Kolkata
+# Scheduler stays UTC; UI timestamps (Next Run, etc.) show India time.
+export AIRFLOW__CORE__DEFAULT_TIMEZONE=utc
+export AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE=Asia/Kolkata
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 export AIRFLOW__CORE__PARALLELISM=4
 export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://${PG_USER}:${ENC_PASS}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}?${SSL_QUERY}&${SEARCH_PATH_QUERY}"
