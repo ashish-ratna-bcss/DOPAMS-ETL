@@ -45,6 +45,7 @@ Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (see `.env`).
     schedule=SCHEDULE_ACCUSED_DOSSIER_IST,
     start_date=START_DATE,
     catchup=False,
+    max_active_runs=1,
     default_args=DEFAULT_ARGS,
     tags=[*TAGS_BASE, "accused-dossier", "date-range", "yearly-chunked"],
     doc_md=DAG_DOC,
