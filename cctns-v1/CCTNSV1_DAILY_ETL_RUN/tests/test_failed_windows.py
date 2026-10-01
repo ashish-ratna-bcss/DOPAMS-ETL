@@ -12,10 +12,13 @@ sys.path.insert(0, ROOT)
 
 from db.failed_windows import (  # noqa: E402
     failed_windows_for_run_log,
+    is_known_ora_gap,
     normalize_failed_windows,
+    partition_failed_windows,
 )
 from dags.pipeline_run import (  # noqa: E402
     STATUS_EXTRACT_PARTIAL_FAILED,
+    STATUS_LOADED_WITH_KNOWN_GAPS,
     STATUS_VALIDATE_ORPHAN_FIR,
     raise_if_task_failed,
 )
@@ -24,6 +27,12 @@ from dags.pipeline_run import (  # noqa: E402
 class RaiseIfTaskFailedTests(unittest.TestCase):
     def test_loaded_ok(self):
         raise_if_task_failed("accused", {"status": "loaded", "failed_windows": 0})
+
+    def test_loaded_with_known_gaps_ok(self):
+        raise_if_task_failed(
+            "accused",
+            {"status": STATUS_LOADED_WITH_KNOWN_GAPS, "known_ora_gaps": 180},
+        )
 
     def test_not_loaded_pending_ok(self):
         raise_if_task_failed("court", {"status": "not_loaded_pending_key"})
@@ -103,6 +112,52 @@ class NormalizeFailedWindowsTests(unittest.TestCase):
                     "garbage",
                 ]
             )
+
+
+class PartitionKnownOraGapsTests(unittest.TestCase):
+    def test_single_day_ora_is_known(self):
+        w = {
+            "window_start": date(2002, 5, 5),
+            "window_end": date(2002, 5, 5),
+            "error": "ORA-06502: PL/SQL: numeric or value error (max split depth reached)",
+        }
+        self.assertTrue(is_known_ora_gap(w))
+        known, blocking = partition_failed_windows([w])
+        self.assertEqual(len(known), 1)
+        self.assertEqual(blocking, [])
+
+    def test_timeout_is_blocking(self):
+        w = {
+            "window_start": date(2022, 1, 1),
+            "window_end": date(2022, 1, 7),
+            "error": "timeout",
+        }
+        self.assertFalse(is_known_ora_gap(w))
+        known, blocking = partition_failed_windows([w])
+        self.assertEqual(known, [])
+        self.assertEqual(len(blocking), 1)
+
+    def test_multi_day_ora_is_blocking(self):
+        w = {
+            "window_start": date(2002, 5, 5),
+            "window_end": date(2002, 5, 6),
+            "error": "ORA-06502",
+        }
+        known, blocking = partition_failed_windows([w])
+        self.assertEqual(known, [])
+        self.assertEqual(len(blocking), 1)
+
+    def test_mixed_partition(self):
+        windows = normalize_failed_windows(
+            [
+                "05-05-2002 to 05-05-2002: ORA-06502 buffer",
+                "01-01-2022 to 07-01-2022: connection reset",
+            ]
+        )
+        known, blocking = partition_failed_windows(windows)
+        self.assertEqual(len(known), 1)
+        self.assertEqual(len(blocking), 1)
+
 
 class LedgerSqlSmokeTests(unittest.TestCase):
     """Cursor SQL shape for OPEN upsert / RESOLVE (no live DB)."""

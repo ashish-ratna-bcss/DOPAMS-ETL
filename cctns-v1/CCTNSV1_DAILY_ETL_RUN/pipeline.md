@@ -230,7 +230,7 @@ Registry and flags: **`dags/pipeline_run.py`** (`SIMPLE_ENTITIES`, `ACCUSED_YEAR
 - For each chunk: POST with `from_date` / `to_date` (and alias keys).
 - If response message contains **`ORA-06502`**, split the date range in half recursively (up to **`MAX_SPLIT_DEPTH`**).
 - Returns `(records, failed_windows)` — any window that still fails is listed.
-- **Fail-closed:** if `failed_windows` is non-empty, pipeline sets `extract_partial_failed`, **skips upsert**, writes OPEN rows to `cctns.cctns_v1_failed_fetch_window`, and Airflow fails the task. Prior OPEN windows no longer failing are marked `RESOLVED`.
+- **Fail-closed:** unexpected failed windows → `extract_partial_failed`, **skips upsert**, writes OPEN rows to `cctns.cctns_v1_failed_fetch_window`, Airflow fails. Known permanent **single-day `ORA-06502`** gaps are kept OPEN in the ledger but **do not block** loading the rest (`loaded_with_known_gaps`). Prior OPEN windows no longer failing are marked `RESOLVED`.
 
 ```mermaid
 flowchart TD

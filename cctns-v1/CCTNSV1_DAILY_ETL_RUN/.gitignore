@@ -5,3 +5,4 @@ __pycache__/
 logs/
 airflow_home/
 venv/
+deploy/postgres-cctns-readonly-credentials.txt

@@ -19,6 +19,40 @@ class FailedWindowParseError(ValueError):
     """Raised when raw failed_windows cannot all be normalized (fail-closed)."""
 
 
+ORA_BUFFER_ERROR = "ORA-06502"
+
+
+def is_known_ora_gap(window: dict[str, Any]) -> bool:
+    """Permanent Oracle single-day buffer failures we already document and accept.
+
+    Adaptive halving stops at one calendar day; those ORA-06502 days never succeed
+    at the source. They stay in the ledger as OPEN but must not block loading the
+    successfully fetched rows.
+    """
+    start = window.get("window_start")
+    end = window.get("window_end")
+    error = str(window.get("error") or "")
+    if not isinstance(start, date) or not isinstance(end, date):
+        return False
+    if start != end:
+        return False
+    return ORA_BUFFER_ERROR in error
+
+
+def partition_failed_windows(
+    windows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split into (known_ora_gaps, blocking_failures)."""
+    known: list[dict[str, Any]] = []
+    blocking: list[dict[str, Any]] = []
+    for w in windows:
+        if is_known_ora_gap(w):
+            known.append(w)
+        else:
+            blocking.append(w)
+    return known, blocking
+
+
 def _parse_ddmmyyyy(value: str) -> date:
     return datetime.strptime(value.strip(), "%d-%m-%Y").date()
 

@@ -39,7 +39,8 @@ adaptive split on ORA-06502).
 | `sync_accused_dossier` | POST date-range → validate → upsert `cctns_accused` |
 
 Pull window: `ACCUSED_FULL_PULL_START_DATE` → today (`.env`).
-Any failed date window → task fails (fail-closed); no partial upsert.
+Known permanent single-day ORA-06502 gaps are accepted (`loaded_with_known_gaps`);
+unexpected failed windows still fail-closed (no upsert).
 """
 
 
@@ -93,7 +94,9 @@ def cctns_v1_daily_sync_accused_dossier():
         execution_timeout=timedelta(hours=8),
         doc_md=(
             "Accused date-range POST from ACCUSED_FULL_PULL_START_DATE → today, "
-            "7 days at a time with halving on ORA-06502. Fail-closed on any window."
+            "7 days at a time with halving on ORA-06502. "
+            "Known permanent single-day ORA-06502 gaps are recorded in the ledger "
+            "but do not block loading the rest; unexpected window failures still fail-closed."
         ),
     )
     def sync_accused_dossier() -> dict:
