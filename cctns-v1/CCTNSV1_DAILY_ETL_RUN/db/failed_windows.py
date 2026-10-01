@@ -15,25 +15,39 @@ _WINDOW_RE = re.compile(
 )
 
 
+class FailedWindowParseError(ValueError):
+    """Raised when raw failed_windows cannot all be normalized (fail-closed)."""
+
+
 def _parse_ddmmyyyy(value: str) -> date:
     return datetime.strptime(value.strip(), "%d-%m-%Y").date()
 
 
 def normalize_failed_windows(raw: list | None) -> list[dict[str, Any]]:
-    """Turn client strings or dicts into structured window records."""
+    """Turn client strings or dicts into structured window records.
+
+    Fail-closed: any unparseable entry raises FailedWindowParseError so the
+    pipeline never treats a partial/garbled failure list as a clean extract.
+    """
     if not raw:
         return []
     out: list[dict[str, Any]] = []
+    unparsed: list[str] = []
     for item in raw:
         if isinstance(item, dict):
             start = item.get("window_start")
             end = item.get("window_end")
-            if isinstance(start, str):
-                start = _parse_ddmmyyyy(start)
-            if isinstance(end, str):
-                end = _parse_ddmmyyyy(end)
+            try:
+                if isinstance(start, str):
+                    start = _parse_ddmmyyyy(start)
+                if isinstance(end, str):
+                    end = _parse_ddmmyyyy(end)
+            except (TypeError, ValueError):
+                unparsed.append(repr(item)[:240])
+                continue
             error = str(item.get("error") or item.get("error_message") or "")
-            if start is None or end is None:
+            if start is None or end is None or not isinstance(start, date) or not isinstance(end, date):
+                unparsed.append(repr(item)[:240])
                 continue
             out.append(
                 {
@@ -46,13 +60,22 @@ def normalize_failed_windows(raw: list | None) -> list[dict[str, Any]]:
         text = str(item)
         match = _WINDOW_RE.match(text)
         if not match:
+            unparsed.append(text[:240])
             continue
-        out.append(
-            {
-                "window_start": _parse_ddmmyyyy(match.group(1)),
-                "window_end": _parse_ddmmyyyy(match.group(2)),
-                "error": match.group(3).strip() or text,
-            }
+        try:
+            out.append(
+                {
+                    "window_start": _parse_ddmmyyyy(match.group(1)),
+                    "window_end": _parse_ddmmyyyy(match.group(2)),
+                    "error": match.group(3).strip() or text,
+                }
+            )
+        except ValueError:
+            unparsed.append(text[:240])
+    if unparsed:
+        preview = "; ".join(unparsed[:5])
+        raise FailedWindowParseError(
+            f"{len(unparsed)} of {len(raw)} failed_window entr(y/ies) unparseable: {preview}"
         )
     return out
 

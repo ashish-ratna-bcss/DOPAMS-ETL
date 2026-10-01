@@ -44,3 +44,10 @@ build/
 # Misc
 .temp
 *.log
+
+# Airflow local state / secrets (never commit)
+**/airflow_home/
+**/deploy/tls/*.key
+**/deploy/tls/*.crt
+**/deploy/tls/*.pem
+**/deploy/airflow-credentials.txt

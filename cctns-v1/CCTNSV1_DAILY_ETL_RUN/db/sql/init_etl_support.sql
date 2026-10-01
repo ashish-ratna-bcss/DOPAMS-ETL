@@ -24,6 +24,26 @@ CREATE TABLE IF NOT EXISTS cctns.cctns_v1_audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_table_record ON cctns.cctns_v1_audit_log (table_name, record_key);
 CREATE INDEX IF NOT EXISTS idx_audit_changed_at   ON cctns.cctns_v1_audit_log (changed_at);
 
+CREATE OR REPLACE FUNCTION cctns.cctns_v1_is_sensitive_audit_field(field_name text)
+RETURNS boolean AS $$
+BEGIN
+    RETURN field_name ~* '(aadhaar|aadhar|uidai|mobile|phone|email|passport|pan_card|pan$|voter|ration|bank|account|ifsc|dob|birth|card_no|card_num)';
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION cctns.cctns_v1_redact_audit_value(field_name text, val text)
+RETURNS text AS $$
+BEGIN
+    IF val IS NULL OR val = '' THEN
+        RETURN val;
+    END IF;
+    IF cctns.cctns_v1_is_sensitive_audit_field(field_name) THEN
+        RETURN '[REDACTED]';
+    END IF;
+    RETURN val;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
 CREATE OR REPLACE FUNCTION cctns.cctns_v1_log_row_changes() RETURNS trigger AS $$
 DECLARE
     old_j jsonb := to_jsonb(OLD);
@@ -38,7 +58,13 @@ BEGIN
         END IF;
         IF old_j -> k IS DISTINCT FROM new_j -> k THEN
             INSERT INTO cctns.cctns_v1_audit_log (table_name, record_key, field_name, old_value, new_value)
-            VALUES (TG_TABLE_NAME, rec_key, k, old_j ->> k, new_j ->> k);
+            VALUES (
+                TG_TABLE_NAME,
+                rec_key,
+                k,
+                cctns.cctns_v1_redact_audit_value(k, old_j ->> k),
+                cctns.cctns_v1_redact_audit_value(k, new_j ->> k)
+            );
         END IF;
     END LOOP;
     RETURN NEW;

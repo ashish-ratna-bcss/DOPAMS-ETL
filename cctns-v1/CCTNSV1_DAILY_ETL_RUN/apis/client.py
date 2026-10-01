@@ -60,14 +60,38 @@ def request_with_retry(method: str, url: str, params: dict = None, json_body: di
     raise ApiError(str(last_err))
 
 
+_MISSING = object()
+
+
+def _records_from_payload(result, *, context: str):
+    """Extract a list of records or raise ApiError (fail-closed on weird shapes)."""
+    if isinstance(result, list):
+        return result
+    if not isinstance(result, dict):
+        raise ApiError(f"{context}: unexpected response type {type(result).__name__}")
+    message = str(result.get("message") or result.get("error") or "").strip()
+    data = result.get("data", _MISSING)
+    if data is _MISSING:
+        if message:
+            raise ApiError(f"{context}: {message}")
+        raise ApiError(f"{context}: response has no 'data' key")
+    if not isinstance(data, list):
+        raise ApiError(f"{context}: 'data' must be a list, got {type(data).__name__}")
+    # Explicit API error with empty payload must not look like a clean 0-row pull.
+    if message and not data and (
+        ORA_BUFFER_ERROR in message
+        or "error" in message.lower()
+        or message.lower().startswith("fail")
+    ):
+        raise ApiError(f"{context}: {message}")
+    return data
+
+
 def fetch_unfiltered(method: str, url: str, extra_params: dict = None):
     """Plain single call, no date range. Used by FIR / Court / Accused Details."""
     result = request_with_retry(method, url, params=extra_params or {})
-    if isinstance(result, dict):
-        return result.get("data", []), []
-    if isinstance(result, list):
-        return result, []
-    return [], []
+    records = _records_from_payload(result, context=f"{method} {url}")
+    return records, []
 
 
 def date_chunk_ranges(start: date, end: date, chunk_days: int = DATE_CHUNK_DAYS):
@@ -103,7 +127,7 @@ def fetch_date_chunk_safe(method: str, url: str, base_params: dict, start: date,
     except ApiError as err:
         return [], [f"{to_ddmmyyyy(start)} to {to_ddmmyyyy(end)}: {err}"]
 
-    message = str(result.get("message", "")) if isinstance(result, dict) else ""
+    message = str(result.get("message", "") or result.get("error", "") or "") if isinstance(result, dict) else ""
 
     if ORA_BUFFER_ERROR in message:
         days = (end - start).days
@@ -114,7 +138,21 @@ def fetch_date_chunk_safe(method: str, url: str, base_params: dict, start: date,
             return recs1 + recs2, fail1 + fail2
         return [], [f"{to_ddmmyyyy(start)} to {to_ddmmyyyy(end)}: {message} (max split depth reached)"]
 
-    records = result.get("data", []) if isinstance(result, dict) else (result if isinstance(result, list) else [])
+    # Non-ORA error messages on a window → failed window (fail-closed), not silent empty success.
+    if isinstance(result, dict) and message and (
+        "error" in message.lower() or message.lower().startswith("fail")
+    ):
+        data = result.get("data")
+        if not isinstance(data, list) or not data:
+            return [], [f"{to_ddmmyyyy(start)} to {to_ddmmyyyy(end)}: {message}"]
+
+    try:
+        records = _records_from_payload(
+            result,
+            context=f"{to_ddmmyyyy(start)} to {to_ddmmyyyy(end)}",
+        )
+    except ApiError as err:
+        return [], [f"{to_ddmmyyyy(start)} to {to_ddmmyyyy(end)}: {err}"]
     return records, []
 
 

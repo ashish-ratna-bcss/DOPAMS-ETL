@@ -16,6 +16,7 @@ from db.failed_windows import (  # noqa: E402
 )
 from dags.pipeline_run import (  # noqa: E402
     STATUS_EXTRACT_PARTIAL_FAILED,
+    STATUS_VALIDATE_ORPHAN_FIR,
     raise_if_task_failed,
 )
 
@@ -40,6 +41,13 @@ class RaiseIfTaskFailedTests(unittest.TestCase):
             raise_if_task_failed(
                 "accused",
                 {"status": STATUS_EXTRACT_PARTIAL_FAILED, "failed_windows": 180},
+            )
+
+    def test_orphan_fir_failed(self):
+        with self.assertRaises(RuntimeError):
+            raise_if_task_failed(
+                "court",
+                {"status": STATUS_VALIDATE_ORPHAN_FIR, "orphan_fir_skipped": 12},
             )
 
 
@@ -73,6 +81,28 @@ class NormalizeFailedWindowsTests(unittest.TestCase):
         self.assertEqual(normalize_failed_windows(None), [])
         self.assertEqual(normalize_failed_windows([]), [])
 
+    def test_unparseable_string_raises(self):
+        from db.failed_windows import FailedWindowParseError
+
+        with self.assertRaises(FailedWindowParseError):
+            normalize_failed_windows(["not a window at all"])
+
+    def test_unparseable_dict_raises(self):
+        from db.failed_windows import FailedWindowParseError
+
+        with self.assertRaises(FailedWindowParseError):
+            normalize_failed_windows([{"error": "missing dates"}])
+
+    def test_mixed_valid_and_junk_raises(self):
+        from db.failed_windows import FailedWindowParseError
+
+        with self.assertRaises(FailedWindowParseError):
+            normalize_failed_windows(
+                [
+                    "05-05-2002 to 05-05-2002: ORA-06502",
+                    "garbage",
+                ]
+            )
 
 class LedgerSqlSmokeTests(unittest.TestCase):
     """Cursor SQL shape for OPEN upsert / RESOLVE (no live DB)."""

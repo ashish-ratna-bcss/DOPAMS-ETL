@@ -40,7 +40,9 @@ from apis.court import fetch_court  # noqa: E402
 from apis.accused_details import fetch_accused_details  # noqa: E402
 from apis.accused import fetch_accused  # noqa: E402
 from db.connection import get_connection  # noqa: E402
+from config.settings import CCTNS_ORPHAN_FIR_MAX  # noqa: E402
 from db.failed_windows import (  # noqa: E402
+    FailedWindowParseError,
     failed_windows_for_run_log,
     normalize_failed_windows,
     record_open_failed_windows,
@@ -56,6 +58,8 @@ logger = logging.getLogger("cctns_v1_etl.pipeline")
 
 # Incomplete extract: windows failed → no upsert, Airflow must fail.
 STATUS_EXTRACT_PARTIAL_FAILED = "extract_partial_failed"
+# Child rows missing parent FIR → no upsert, Airflow must fail.
+STATUS_VALIDATE_ORPHAN_FIR = "validate_orphan_fir_failed"
 
 SIMPLE_ENTITIES = {
     "fir":             {"fetch": fetch_fir,             "table": "cctns_fir",            "conflict_col": "fir_reg_num", "upsert_ready": True},
@@ -69,11 +73,12 @@ ACCUSED_YEARLY_ENTITY = {
 
 
 def raise_if_task_failed(entity: str, result: dict) -> None:
-    """Airflow fails on extract/load errors and on any incomplete date-window extract."""
+    """Airflow fails on extract/load/validate errors and incomplete extracts."""
     if result.get("status") in (
         "extract_failed",
         "load_failed",
         STATUS_EXTRACT_PARTIAL_FAILED,
+        STATUS_VALIDATE_ORPHAN_FIR,
     ):
         raise RuntimeError(f"{entity} failed: {result}")
 
@@ -150,9 +155,30 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
         conn.commit()
         return {"status": "extract_failed"}
 
-    failed_windows = normalize_failed_windows(failed_windows_raw)
-    fw_log = failed_windows_for_run_log(failed_windows) if failed_windows else None
     fetched = len(records)
+    try:
+        failed_windows = normalize_failed_windows(failed_windows_raw)
+    except FailedWindowParseError as err:
+        # Raw failures existed but could not be parsed → still fail-closed (no upsert).
+        logger.error("%s: failed_windows parse error (fail-closed): %s", entity, err)
+        cur = conn.cursor()
+        finish_entity_run(
+            cur,
+            log_id,
+            status=STATUS_EXTRACT_PARTIAL_FAILED,
+            rows_fetched=fetched,
+            failed_windows=[{"error": str(err)}],
+            error_message=f"unparseable failed_windows: {err}",
+        )
+        conn.commit()
+        return {
+            "status": STATUS_EXTRACT_PARTIAL_FAILED,
+            "fetched": fetched,
+            "failed_windows": len(failed_windows_raw or []),
+            "parse_error": str(err),
+        }
+
+    fw_log = failed_windows_for_run_log(failed_windows) if failed_windows else None
     logger.info("%s: fetched=%d failed_windows=%d", entity, fetched, len(failed_windows))
 
     # Fail-closed: any failed date window means incomplete source → no upsert,
@@ -216,6 +242,32 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
         dupes_removed,
         orphan_skipped,
     )
+
+    # Fail-closed: orphan child rows mean referential gaps — do not load a partial green set.
+    if orphan_skipped > CCTNS_ORPHAN_FIR_MAX:
+        msg = (
+            f"{orphan_skipped} row(s) skipped (FIR missing in cctns_fir); "
+            f"max allowed={CCTNS_ORPHAN_FIR_MAX}; upsert skipped"
+        )
+        logger.error("%s: %s", entity, msg)
+        cur = conn.cursor()
+        finish_entity_run(
+            cur,
+            log_id,
+            status=STATUS_VALIDATE_ORPHAN_FIR,
+            rows_fetched=fetched,
+            rows_batch_dupes_removed=dupes_removed,
+            rows_orphan_fir_skipped=orphan_skipped,
+            failed_windows=None,
+            error_message=msg,
+        )
+        conn.commit()
+        return {
+            "status": STATUS_VALIDATE_ORPHAN_FIR,
+            "fetched": fetched,
+            "batch_dupes_removed": dupes_removed,
+            "orphan_fir_skipped": orphan_skipped,
+        }
 
     logger.info("--- %s [3/4] load — insert / update / ignore unchanged ---", entity)
     cur = conn.cursor()

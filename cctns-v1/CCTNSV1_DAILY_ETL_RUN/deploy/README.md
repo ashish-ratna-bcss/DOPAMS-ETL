@@ -34,7 +34,10 @@ Production-style settings (Postgres + LocalExecutor, no separate Airflow DB):
   - `cctns` (or `PG_ETL_SCHEMA`) — `cctns_*`, audit/run log
   - `airflow` (or `PG_AIRFLOW_SCHEMA`) — `dag`, `dag_run`, `ab_*`, …
 - **Auto-create:** PM2 `airflow_with_env.sh` creates the DB if missing, runs `airflow db migrate`, and creates/resets the Airflow Admin user from **`AIRFLOW_ADMIN_PASSWORD`** in `.env` (required, min 12 chars, not `admin`). DAG task `bootstrap_database` runs ETL DDL + migrate too.
-- **UI bind:** `AIRFLOW_WEBSERVER_HOST` / `AIRFLOW_WEBSERVER_PORT` (default `0.0.0.0:9001`). Prefer a private IP for `AIRFLOW_WEBSERVER_HOST` when possible.
+- **UI bind:** `AIRFLOW_WEBSERVER_HOST` / `AIRFLOW_WEBSERVER_PORT` (**9001 only**). Prefer a private IP for `AIRFLOW_WEBSERVER_HOST`.
+- **HTTPS:** `AIRFLOW_TLS_ENABLE=1` (default) — self-signed cert under `deploy/tls/`; open `https://<host>:9001` (browser warning expected until you install a real cert).
+- **Postgres TLS:** set `PG_SSLMODE=prefer` (default) or `require` once the server has SSL.
+- **Failure alerts:** every failed Airflow task appends JSON to `logs/etl_failures.log`. Optionally set `CCTNS_ALERT_WEBHOOK_URL` in `.env` for Slack/Teams/webhook POST.
 
 **After every code pull:**
 ```bash
@@ -46,40 +49,37 @@ Optional manual migrate only: `./deploy/setup_airflow_metadata_db.sh`
 
 `config/settings.py` loads `.env` from the project root so Airflow tasks always see `PG_*` and API URLs.
 
-Airflow UI: `http://<dopams-new-ip>:9001` — username/password from `.env` (`AIRFLOW_ADMIN_*`). Never use the old default `admin`/`admin`.
+Airflow UI: `https://<dopams-new-ip>:9001` — username/password from `.env` (`AIRFLOW_ADMIN_*`). Never use the old default `admin`/`admin`.
 
 **UI shows "Ooops!" when triggering a DAG:** With metadata in schema `airflow`, the Postgres URL must set `search_path` (handled in `deploy/airflow_with_env.sh`). After `git pull`, run `./deploy/reload_pm2.sh`. If trigger still fails, check webserver logs (`pm2 logs cctnsv1-airflow-webserver --lines 50`) for `log_template` / `TypeError`, and verify `SELECT COUNT(*) FROM airflow.log_template;` is greater than 0.
 
-## Deploy (rsync + venv, optional)
+## Deploy / reload (port **9001** only)
 
-```
-./deploy/deploy.sh
-```
-
-Syncs the code to `dopams-new`, installs Airflow + dependencies into a venv there, initializes Airflow (self-contained under `airflow_home/`, pointed at `dags/`), and starts the scheduler + webserver in the background. Safe to re-run — it kills and restarts both processes each time. On dopams-new prefer **`./deploy/reload_pm2.sh`** after `git pull` instead.
-
-## Reboot survival (one-time, needs your `sudo`)
-
-`deploy.sh` starts Airflow with `nohup`, not a system service, because installing a `systemd` unit needs `sudo`, which this deploy script deliberately doesn't attempt on its own. If `dopams-new` reboots, Airflow won't come back up on its own unless you do this once:
+On dopams-new after `git pull`:
 
 ```bash
-scp deploy/airflow-scheduler.service deploy/airflow-webserver.service dopams-new:/tmp/
-ssh dopams-new
-sudo mv /tmp/airflow-scheduler.service /tmp/airflow-webserver.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now airflow-scheduler airflow-webserver
+cd ~/dopams/DOPAMS-ETL/cctns-v1/CCTNSV1_DAILY_ETL_RUN
+./deploy/deploy.sh          # alias for reload_pm2.sh; refuses any port except 9001
+# or: ./deploy/reload_pm2.sh
 ```
 
-After that, both survive reboots automatically, and you can go back to plain `./deploy/deploy.sh` for code updates — just skip step 4's manual process restart by using `sudo systemctl restart airflow-scheduler airflow-webserver` instead if you prefer the systemd units to be authoritative.
+Do **not** run a second Airflow on `:8793`. If something is still listening there, stop it:
+
+```bash
+pkill -f 'airflow webserver --port 8793' || true
+```
+
+## Reboot survival
+
+Prefer **PM2** (`pm2 save` + `pm2 startup`). Optional systemd units under `deploy/` also call `airflow_with_env.sh` and listen on **9001** only — install only if you are not using PM2 (do not run both).
 
 ## Checking it's actually running
 
 ```bash
-ssh dopams-new "pgrep -fa 'airflow scheduler'; pgrep -fa 'airflow webserver'"
+ssh dopams-new "ss -ltnp | grep 9001; pgrep -fa 'airflow webserver'"
 ```
 
-Airflow UI (legacy systemd path): `http://<dopams-new-ip>:8793` — use `AIRFLOW_ADMIN_PASSWORD` from `.env`; prefer the PM2 path on port **9001**.
-
+Airflow UI: `http://192.168.103.106:9001` — credentials from `.env` (`AIRFLOW_ADMIN_*`). Port must be **9001**.
 ## Checking whether a run actually worked
 
 1. **Airflow task logs**: DAG → task → Logs — shows `fetched=`, `inserted=`, `updated=`, `unchanged=`, and any date windows that failed to fetch (relevant to `accused` only).

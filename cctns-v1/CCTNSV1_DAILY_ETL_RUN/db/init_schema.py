@@ -16,7 +16,15 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-from config.settings import PG_DATABASE, PG_HOST, PG_PASSWORD, PG_PORT, PG_USER, require
+from config.settings import (
+    PG_DATABASE,
+    PG_HOST,
+    PG_PASSWORD,
+    PG_PORT,
+    PG_SSLMODE,
+    PG_USER,
+    require,
+)
 
 logger = logging.getLogger("cctns_v1_etl.db")
 
@@ -30,19 +38,21 @@ INIT_SQL_FILES = (
     "005_etl_row_action_log.sql",
     "006_natural_key_cctns_accused.sql",
     "007_failed_fetch_window.sql",
+    "008_audit_pii_redact.sql",
 )
 
 _schema_applied = False
 
 
 def _connect(dbname: str):
-    require("PG_USER", "PG_PASSWORD")
+    require("PG_HOST", "PG_USER", "PG_PASSWORD")
     return psycopg2.connect(
         host=PG_HOST,
         port=PG_PORT,
         dbname=dbname,
         user=PG_USER,
         password=PG_PASSWORD,
+        sslmode=PG_SSLMODE,
     )
 
 
