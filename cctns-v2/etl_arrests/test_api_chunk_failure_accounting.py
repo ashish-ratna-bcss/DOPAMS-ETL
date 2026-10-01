@@ -13,12 +13,52 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from etl_window_guard import WindowGuard, release_checkpoint
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 ARRESTS_DIR = Path(__file__).resolve().parent
 if str(ARRESTS_DIR) not in sys.path:
     sys.path.insert(0, str(ARRESTS_DIR))
+
+
+class _FakeCursor:
+    def __init__(self, store):
+        self.store = store
+        self._row = None
+
+    def execute(self, sql, params=None):
+        sql_upper = " ".join(sql.split()).upper()
+        if sql_upper.startswith("SELECT"):
+            name = params[0]
+            self._row = (self.store[name],) if name in self.store else None
+        elif sql_upper.startswith("DELETE"):
+            self.store.pop(params[0], None)
+        elif "INSERT" in sql_upper:
+            self.store[params[0]] = params[1]
+        else:
+            raise AssertionError(sql)
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, store):
+        self.store = store
+
+    def cursor(self):
+        return _FakeCursor(self.store)
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
+
+    def close(self):
+        return None
 
 
 def _bare_etl():
@@ -46,6 +86,9 @@ def _bare_etl():
     etl.detect_new_fields = MagicMock(return_value={})
     etl.add_column_to_table = MagicMock(return_value=False)
     etl.update_existing_records_with_new_fields = MagicMock()
+    # object.__new__ skips ArrestsETL.__init__, which is where production
+    # creates this guard. Exhausted fetches call it before returning.
+    etl.window_guard = WindowGuard()
     return etl, mod
 
 
@@ -140,9 +183,16 @@ class TestArrestsApiChunkFailureAccounting(unittest.TestCase):
             self.assertIsNone(etl.fetch_arrests_api('2026-09-21', '2026-09-24'))
         self.assertEqual(etl.stats['failed_api_calls'], 1)
         self.assertTrue(any('Failed after max retries' in e for e in etl.stats['errors']))
+        self.assertEqual(etl.window_guard.failed_window, ('2026-09-21', '2026-09-24'))
+        self.assertFalse(etl.window_guard.may_advance())
 
         with patch.object(etl, 'fetch_arrests_api', return_value=None):
             self.assertFalse(etl.process_date_range('2026-09-21', '2026-09-24'))
+
+        store = {}
+        etl._replay_connect = lambda: _FakeConn(store)
+        self.assertFalse(release_checkpoint(etl, 'arrests'))
+        self.assertEqual(store['arrests__replay_from'][:10], '2026-09-21')
 
         # Multi-chunk: one failure cannot be hidden — run() fails closed
         etl.stats['failed_api_calls'] = 1

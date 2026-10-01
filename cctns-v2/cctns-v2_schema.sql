@@ -1022,6 +1022,11 @@ CREATE INDEX idx_accused_crime_id ON public.accused USING btree (crime_id);
 CREATE INDEX idx_accused_person_id ON public.accused USING btree (person_id);
 CREATE INDEX idx_arrests_crime_id ON public.arrests USING btree (crime_id);
 CREATE INDEX idx_arrests_person_id ON public.arrests USING btree (person_id);
+-- One arrest row per accused sequence inside a crime. PostgreSQL rejects the
+-- second concurrent insert. Do not create this index while a duplicate pair
+-- is still stored: the build fails and leaves the table unchanged.
+CREATE UNIQUE INDEX uq_arrests_crime_id_accused_seq_no
+    ON public.arrests (crime_id, accused_seq_no);
 CREATE INDEX idx_disposal_crime_id ON public.disposal USING btree (crime_id);
 CREATE INDEX idx_properties_crime_id ON public.properties USING btree (crime_id);
 CREATE INDEX idx_properties_case_property_id ON public.properties USING btree (case_property_id);

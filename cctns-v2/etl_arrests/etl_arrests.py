@@ -43,6 +43,7 @@ except ImportError:  # pragma: no cover
 from env_utils import get_etl_run_id
 from etl_window_guard import WindowGuard, apply_replay_floor, begin_run, release_checkpoint, run_ordered_windows
 from etl_run_config import half_open_api_to_date
+from arrest_insert import execute_arrest_insert
 
 # Add TRACE level support (lower than DEBUG)
 TRACE_LEVEL = 5
@@ -1051,16 +1052,50 @@ class ArrestsETL:
         try:
             logger.trace(f"Processing arrests: crime_id={crime_id}, accused_seq_no={accused_seq_no}")
             
-            # Check if arrests already exists (based on unique constraint)
+            # The exists check alone loses to a concurrent insert. The INSERT
+            # below is the atomic claim: ON CONFLICT DO NOTHING returns no id
+            # when another worker stored this (crime_id, accused_seq_no) first.
+            existing = None
             if self.arrests_exists(crime_id, accused_seq_no, cursor):
-                # Get existing record to compare
                 existing = self.get_existing_arrests(crime_id, accused_seq_no, cursor)
                 if not existing:
-                    logger.warning(f"⚠️  Arrests exists check returned True but fetch returned None")
-                    # Fall back to insert
-                    existing = None
-                
-                if existing:
+                    logger.warning(
+                        "⚠️  Arrests exists check returned True but fetch returned None"
+                    )
+            else:
+                claimed = execute_arrest_insert(cursor, ARRESTS_TABLE, (
+                    crime_id,
+                    person_id,
+                    accused_seq_no,
+                    arrests.get('accused_code'),
+                    arrests.get('accused_type'),
+                    arrests.get('is_arrested'),
+                    arrests.get('arrested_date'),
+                    arrests.get('is_41a_crpc'),
+                    arrests.get('is_41a_explain_submitted'),
+                    arrests.get('date_of_issue_41a'),
+                    arrests.get('is_ccl'),
+                    arrests.get('is_apprehended'),
+                    arrests.get('is_absconding'),
+                    arrests.get('is_died'),
+                    arrests.get('date_created'),
+                    arrests.get('date_modified'),
+                    SOURCE_SYSTEM,
+                    SOURCE_ENDPOINT,
+                    datetime.now(timezone.utc),
+                    ETL_RUN_ID,
+                ))
+                if claimed:
+                    with self.stats_lock:
+                        self.stats['total_arrests_inserted'] += 1
+                    logger.debug(
+                        f"Inserted arrests: crime_id={crime_id}, accused_seq_no={accused_seq_no}"
+                    )
+                    conn.commit()
+                    return True, 'inserted'
+                existing = self.get_existing_arrests(crime_id, accused_seq_no, cursor)
+
+            if existing:
                     # Smart update: only update fields that need updating
                     # Rules:
                     # 1. If existing is NULL and new is not NULL → update
@@ -1158,54 +1193,17 @@ class ArrestsETL:
                             self.stats['total_arrests_no_change'] += 1
                         logger.trace(f"No changes needed for arrests (all fields match or preserved)")
                         return True, 'no_change'
-                else:
-                    # Exists check returned True but couldn't fetch - treat as new insert
-                    logger.warning(f"⚠️  Arrests exists but couldn't fetch, treating as new insert")
-                    # Fall through to insert logic
             else:
-                # Insert new arrests
-                insert_query = f"""
-                    INSERT INTO {ARRESTS_TABLE} (
-                        crime_id, person_id, accused_seq_no, accused_code, accused_type,
-                        is_arrested, arrested_date, is_41a_crpc, is_41a_explain_submitted,
-                        date_of_issue_41a, is_ccl, is_apprehended, is_absconding, is_died,
-                        date_created, date_modified,
-                        source_system, source_endpoint, fetched_at, etl_run_id
-                    ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s
-                    )
-                """
-                cursor.execute(insert_query, (
+                logger.error(
+                    "Arrest claim for %s/%s did not insert and the row was not readable",
                     crime_id,
-                    person_id,  # Can be NULL
                     accused_seq_no,
-                    arrests.get('accused_code'),
-                    arrests.get('accused_type'),
-                    arrests.get('is_arrested'),
-                    arrests.get('arrested_date'),
-                    arrests.get('is_41a_crpc'),
-                    arrests.get('is_41a_explain_submitted'),
-                    arrests.get('date_of_issue_41a'),
-                    arrests.get('is_ccl'),
-                    arrests.get('is_apprehended'),
-                    arrests.get('is_absconding'),
-                    arrests.get('is_died'),
-                    arrests.get('date_created'),  # From API (or NULL)
-                    arrests.get('date_modified'),  # From API (or NULL)
-                    SOURCE_SYSTEM,
-                    SOURCE_ENDPOINT,
-                    datetime.now(timezone.utc),
-                    ETL_RUN_ID
-                ))
+                )
                 with self.stats_lock:
-                    self.stats['total_arrests_inserted'] += 1
-                logger.debug(f"Inserted arrests: crime_id={crime_id}, accused_seq_no={accused_seq_no}")
-                logger.trace(f"Insert query executed for arrests")
-                conn.commit()
-                logger.trace(f"Transaction committed for inserted arrests")
-                return True, 'inserted'
-            
+                    self.stats['total_arrests_failed'] += 1
+                self.window_guard.fail_current()
+                return False, 'error'
+
         except psycopg2.IntegrityError as e:
             conn.rollback()
             reason = 'integrity_error'
