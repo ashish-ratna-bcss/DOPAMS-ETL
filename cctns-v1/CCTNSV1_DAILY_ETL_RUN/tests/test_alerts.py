@@ -23,7 +23,7 @@ class NotifyTaskFailureTests(unittest.TestCase):
                 alerts, "_webhook_url", return_value=""
             ):
                 ti = MagicMock()
-                ti.dag_id = "cctnsv1_simple_apis_etl"
+                ti.dag_id = "cctns_v1_daily_sync_fir_court_accused_details"
                 ti.task_id = "sync_fir"
                 ti.run_id = "manual__test"
                 ti.try_number = 1
@@ -32,7 +32,7 @@ class NotifyTaskFailureTests(unittest.TestCase):
                     {
                         "task_instance": ti,
                         "exception": RuntimeError("boom"),
-                        "dag": MagicMock(dag_id="cctnsv1_simple_apis_etl"),
+                        "dag": MagicMock(dag_id="cctns_v1_daily_sync_fir_court_accused_details"),
                         "dag_run": MagicMock(run_id="manual__test"),
                     }
                 )

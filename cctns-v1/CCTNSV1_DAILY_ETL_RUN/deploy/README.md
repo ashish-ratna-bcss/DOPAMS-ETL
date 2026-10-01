@@ -87,4 +87,4 @@ Airflow UI: `http://192.168.103.106:9001` — credentials from `.env` (`AIRFLOW_
 
 ## Changing the schedule or DAG logic
 
-Edit `dags/simple_apis_etl.py` / `dags/accused_yearly_etl.py` / `dags/pipeline_run.py` locally, then re-run `./deploy/deploy.sh` — Airflow picks up DAG file changes automatically (scans `dags/` every ~5 min by default), but re-deploying also refreshes `requirements.txt` and restarts both processes cleanly.
+Edit `dags/daily_sync_fir_court_accused_details.py` / `dags/daily_sync_accused_dossier.py` / `dags/pipeline_run.py` locally, then re-run `./deploy/deploy.sh` — Airflow picks up DAG file changes automatically (scans `dags/` every ~5 min by default), but re-deploying also refreshes `requirements.txt` and restarts both processes cleanly.

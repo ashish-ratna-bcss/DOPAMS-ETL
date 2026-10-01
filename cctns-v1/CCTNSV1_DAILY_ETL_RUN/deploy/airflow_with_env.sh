@@ -44,6 +44,35 @@ export AIRFLOW__CORE__PARALLELISM=4
 export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://${PG_USER}:${ENC_PASS}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}?${SSL_QUERY}&${SEARCH_PATH_QUERY}"
 export AIRFLOW__DATABASE__SQL_ALCHEMY_SCHEMA="${PG_AIRFLOW_SCHEMA}"
 
+_ensure_airflow_crypto_keys() {
+  # Persist Fernet + webserver secret in .env so wiping airflow_home does not
+  # rotate session/encryption keys unexpectedly.
+  local changed=0
+  if [[ -z "${AIRFLOW__CORE__FERNET_KEY:-}" ]]; then
+    local fernet
+    fernet="$("${ETL_DIR}/venv/bin/python3" -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")"
+    echo "AIRFLOW__CORE__FERNET_KEY=${fernet}" >> "${ENV_FILE}"
+    export AIRFLOW__CORE__FERNET_KEY="${fernet}"
+    changed=1
+    echo "Generated AIRFLOW__CORE__FERNET_KEY into .env" >&2
+  fi
+  if [[ -z "${AIRFLOW__WEBSERVER__SECRET_KEY:-}" ]]; then
+    local secret
+    secret="$("${ETL_DIR}/venv/bin/python3" -c "import secrets; print(secrets.token_hex(32))")"
+    echo "AIRFLOW__WEBSERVER__SECRET_KEY=${secret}" >> "${ENV_FILE}"
+    export AIRFLOW__WEBSERVER__SECRET_KEY="${secret}"
+    changed=1
+    echo "Generated AIRFLOW__WEBSERVER__SECRET_KEY into .env" >&2
+  fi
+  export AIRFLOW__CORE__FERNET_KEY
+  export AIRFLOW__WEBSERVER__SECRET_KEY
+  if [[ "${changed}" -eq 1 ]]; then
+    chmod 600 "${ENV_FILE}" 2>/dev/null || true
+  fi
+}
+
+_ensure_airflow_crypto_keys
+
 _ensure_postgres_schemas() {
   export PGPASSWORD="${PG_PASSWORD}"
   psql -h "${PG_HOST}" -p "${PG_PORT}" -U "${PG_USER}" -d "${PG_DATABASE}" -v ON_ERROR_STOP=1 <<SQL
