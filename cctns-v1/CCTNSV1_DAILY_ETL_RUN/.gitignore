@@ -2,3 +2,6 @@
 deploy/airflow-credentials.txt
 __pycache__/
 *.pyc
+logs/
+airflow_home/
+venv/

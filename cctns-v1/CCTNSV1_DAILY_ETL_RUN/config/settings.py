@@ -18,13 +18,27 @@ ACCUSED_DETAILS_API_URL = os.environ.get("ACCUSED_DETAILS_API_URL")
 ACCUSED_API_URL = os.environ.get("ACCUSED_API_URL")
 
 # --- Postgres (destination: cctns_v1 database on dopams-new) ---
-PG_HOST = os.environ.get("PG_HOST", "192.168.103.106")
+# PG_HOST has no default — missing .env must fail, not silently hit a LAN IP.
+PG_HOST = os.environ.get("PG_HOST")
 PG_PORT = os.environ.get("PG_PORT", "5432")
 PG_DATABASE = os.environ.get("PG_DATABASE", "cctns_v1")
 PG_ETL_SCHEMA = os.environ.get("PG_ETL_SCHEMA", "cctns")
 PG_AIRFLOW_SCHEMA = os.environ.get("PG_AIRFLOW_SCHEMA", "airflow")
 PG_USER = os.environ.get("PG_USER")
 PG_PASSWORD = os.environ.get("PG_PASSWORD")
+# Explicit TLS mode for Postgres clients (prefer|require|verify-full|disable|…).
+# Default prefer: use SSL when the server offers it, else fall back (LAN-safe).
+# Set PG_SSLMODE=require once the Postgres server has TLS certificates.
+PG_SSLMODE = os.environ.get("PG_SSLMODE", "prefer")
+
+# Optional: POST JSON failure alerts (Slack/Teams/webhook). Empty = file+log only.
+CCTNS_ALERT_WEBHOOK_URL = os.environ.get("CCTNS_ALERT_WEBHOOK_URL", "").strip()
+
+# Fail-closed: max orphan FIR rows allowed before validate fails (default 0 = any orphan fails).
+try:
+    CCTNS_ORPHAN_FIR_MAX = int(os.environ.get("CCTNS_ORPHAN_FIR_MAX", "0"))
+except ValueError:
+    CCTNS_ORPHAN_FIR_MAX = 0
 
 # Same Postgres database (PG_DATABASE); ETL tables in PG_ETL_SCHEMA, Airflow in PG_AIRFLOW_SCHEMA.
 

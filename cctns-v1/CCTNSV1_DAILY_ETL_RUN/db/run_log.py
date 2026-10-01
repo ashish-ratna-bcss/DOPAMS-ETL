@@ -5,6 +5,30 @@ from typing import Any
 from config.settings import PG_ETL_SCHEMA
 
 
+def abandon_stale_running(cur, entity: str) -> int:
+    """Close leftover status=running rows after we hold the entity run lock.
+
+    Those rows are from killed/restarted workers; leaving them open falsely
+    suggests concurrent extracts are still in flight.
+    """
+    cur.execute(
+        f"""
+        UPDATE {PG_ETL_SCHEMA}.cctns_v1_etl_run_log
+        SET status = 'extract_failed',
+            finished_at = now(),
+            error_message = COALESCE(
+                error_message,
+                'abandoned: process lost or superseded (run lock acquired)'
+            )
+        WHERE entity = %s
+          AND status = 'running'
+          AND finished_at IS NULL
+        """,
+        (entity,),
+    )
+    return cur.rowcount or 0
+
+
 def start_entity_run(cur, run_id: str, entity: str) -> int:
     cur.execute(
         f"""

@@ -45,6 +45,7 @@ See `db/sql/001_schema_fix.sql` for the pending upsert keys.
     schedule=SCHEDULE_SIMPLE_APIS_IST,
     start_date=START_DATE,
     catchup=False,
+    max_active_runs=1,
     default_args=DEFAULT_ARGS,
     tags=[*TAGS_BASE, "fir", "court", "accused-details", "simple-apis"],
     doc_md=DAG_DOC,

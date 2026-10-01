@@ -1,6 +1,12 @@
 """Shared Airflow defaults for CCTNS V1 DAGs."""
 from datetime import datetime, timedelta
 
+# Prefer package import (PYTHONPATH=ETL root). Fall back for direct loads.
+try:
+    from dags.alerts import notify_task_failure
+except ImportError:  # pragma: no cover - Airflow may load siblings under dags/
+    from alerts import notify_task_failure
+
 # Airflow cron is UTC. India (IST = UTC+5:30):
 #   00:30 IST → 19:00 UTC (previous calendar day in UTC) — simple APIs
 SCHEDULE_SIMPLE_APIS_IST = "0 19 * * *"
@@ -11,6 +17,7 @@ START_DATE = datetime(2026, 9, 28)
 DEFAULT_ARGS = {
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": notify_task_failure,
 }
 
 TAGS_BASE = ["cctns", "v1", "etl", "postgres", "nightly"]

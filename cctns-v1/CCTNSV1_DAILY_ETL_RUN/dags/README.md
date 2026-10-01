@@ -39,6 +39,8 @@ flowchart LR
 | **DAG folder** | `CCTNSV1_DAILY_ETL_RUN/dags/` |
 | **Config** | Project root `.env` (loaded by `config/settings.py` and `deploy/airflow_with_env.sh`) |
 | **Catchup** | `False` — no backfill of past schedule slots |
+| **max_active_runs** | `1` per DAG — no overlapping scheduled+manual runs of the same DAG |
+| **Entity run lock** | `db/run_lock.py` flock per entity (`/tmp/cctns_v1_etl_<entity>.lock`) — blocks concurrent accused (or fir) extracts even across DAGs/CLI |
 
 After every `git pull` on the server, run **`./deploy/reload_pm2.sh`** so scheduler and webserver pick up DAG file changes.
 
