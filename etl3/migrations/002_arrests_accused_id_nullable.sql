@@ -1,0 +1,23 @@
+-- ============================================================================
+-- Migration 002: arrests_unified.accused_id -> nullable
+--
+-- Found during Phase 4 current-state computation, not assumed in advance:
+-- V1's accused_details and cctns_accused (dossier) are two INDEPENDENTLY
+-- fetched source feeds (ACCUSED_DETAILS_API_URL vs ACCUSED_API_URL, per
+-- cctns-v1's own .env) for the same FIR. There is no guaranteed exact join
+-- key between an accused_details row and the specific accused_unified row
+-- (itself grouped by a logical key over the DOSSIER's own fields -- see
+-- etl3/merger/v1_accused_grouping.py) it logically belongs to, beyond
+-- fir_reg_num + name + father_name matching -- which is not always unique
+-- within one FIR (multiple accused can share a name).
+--
+-- Per the explicit instruction not to invent a mapping when one cannot be
+-- deterministically established: arrests_unified.accused_id is resolved via
+-- an exact (crime_id, normalized name, normalized father_name) match
+-- requiring EXACTLY one candidate; when that doesn't hold (zero or multiple
+-- matches), the row is still captured (crime_id is reliable, derived
+-- directly from fir_reg_num) with accused_id left NULL and a
+-- source_gap_ledger entry recorded -- not silently guessed, not dropped.
+-- ============================================================================
+
+ALTER TABLE arrests_unified ALTER COLUMN accused_id DROP NOT NULL;

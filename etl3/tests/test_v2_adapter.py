@@ -47,8 +47,13 @@ def test_all_modules_sum_to_table_count():
             discrepancies[module] = (discovered, actual)
         print(f"       {module:25s} discovered={discovered:6d}  table_count={actual:6d}"
               + ("  <-- gap" if discovered != actual else ""))
-    # the one known, explained exception
-    assert discrepancies == {"persons": (32766, 32790)}, discrepancies
+    # The one known, explained exception is 'persons' (NULL etl_run_id rows
+    # -- see Phase 2/3 docs). Not pinned to a historical absolute count:
+    # V2's production ETL keeps running independently of this project (as
+    # it must -- confirmed across this whole session), so table counts grow
+    # over time. What must hold is the SHAPE of the discrepancy, re-derived
+    # live each run, not a frozen snapshot value.
+    assert set(discrepancies.keys()) == {"persons"}, discrepancies
     conn = connections.get_v2_source_connection()
     try:
         with conn.cursor() as cur:
@@ -57,8 +62,9 @@ def test_all_modules_sum_to_table_count():
     finally:
         conn.rollback()
         conn.close()
-    assert null_run_id == 32790 - 32766 == 24, null_run_id
-    print(f"       persons gap of 24 fully explained: {null_run_id} rows have etl_run_id IS NULL "
+    discovered, actual = discrepancies["persons"]
+    assert null_run_id == actual - discovered, (null_run_id, actual, discovered)
+    print(f"       persons gap of {null_run_id} fully explained: {null_run_id} rows have etl_run_id IS NULL "
           "(these rows also have no full_name/date_created/fetched_at -- a distinct, pre-existing "
           "data-quality gap, not an adapter bug)")
 
