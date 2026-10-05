@@ -12,6 +12,7 @@ Usage: python etl3/run_phase4_consolidation.py
 """
 import sys
 import time
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,16 +40,54 @@ def _accused_extra_v2(payload):
     }
 
 
-def main():
-    conn = connections.get_unified_connection()
+def run_with_run_log(conn, work):
+    """
+    Open a consolidation_run_log row, run work, then mark it success.
+
+    work(conn, run_id, progress) -> (sources_processed, rows_observed).
+    progress is filled by the work function as steps complete. If work
+    raises, the same row is marked failed (after rolling back the aborted
+    transaction) and the exception is re-raised. A clean return is never
+    marked failed.
+    """
     run_id = common.start_consolidation_run(conn)
     conn.commit()
+    progress = {}
+    try:
+        sources_processed, rows_observed = work(conn, run_id, progress)
+        common.finish_consolidation_run(
+            conn, run_id, status="success",
+            sources_processed=sources_processed,
+            rows_observed=rows_observed,
+        )
+        conn.commit()
+        return run_id
+    except Exception as exc:
+        try:
+            conn.rollback()
+            common.finish_consolidation_run(
+                conn, run_id, status="failed",
+                sources_processed={k: "phase4" for k in progress},
+                rows_observed=0,
+                error_message=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+
+
+def _consolidate(conn, run_id, progress):
     print(f"consolidation_run_id = {run_id}\n")
 
     results = {}
 
     def report(name, counts):
         results[name] = counts
+        progress[name] = counts
         print(f"{name:28s} {counts}")
 
     t0 = time.time()
@@ -106,6 +145,11 @@ def main():
            unified_pk_col="arrest_id", source_table="arrests_source", source_system="V2",
            field_map_entry=field_maps.ARRESTS["V2"], consolidation_run_id=run_id,
            extra_fields_fn=_arrests_extra_v2))
+    conn.commit()
+
+    # Visibility only. Does not change accused_id, person_id, or change_log.
+    from etl3.merger.v2_arrest_gaps import record_v2_unresolved_arrest_accused_gaps
+    report("gaps[V2 arrest->accused]", record_v2_unresolved_arrest_accused_gaps(conn))
     conn.commit()
 
     # --- chargesheets (depends on crimes only) ---
@@ -235,15 +279,17 @@ def main():
 
     dt = time.time() - t0
     total_changed = sum(c.get("inserted", 0) + c.get("updated", 0) for c in results.values())
-    common.finish_consolidation_run(
-        conn, run_id, status="success",
-        sources_processed={k: "phase4" for k in results},
-        rows_observed=total_changed,
-    )
-    conn.commit()
-    conn.close()
     print(f"\nTotal inserted+updated unified rows: {total_changed}  ({dt:.1f}s)")
-    print(f"consolidation_run_id {run_id} marked success.")
+    return {k: "phase4" for k in results}, total_changed
+
+
+def main():
+    conn = connections.get_unified_connection()
+    try:
+        run_id = run_with_run_log(conn, _consolidate)
+        print(f"consolidation_run_id {run_id} marked success.")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

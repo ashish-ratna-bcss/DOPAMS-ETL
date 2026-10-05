@@ -79,18 +79,195 @@ def test_ambiguous_matches_flagged_not_resolved():
         conn.close()
 
 
-def test_no_field_required_null_breaks_matching():
-    """A person with no phone and no father_name must simply not generate any
-    candidate (neither tier applies) -- not raise, not crash, not match on
-    missing data."""
-    conn = connections.get_unified_connection(readonly=True)
+def _pair_present(candidates, left, right):
+    for a, b, _basis, _conf in candidates:
+        if {a, b} == {left, right}:
+            return True
+    return False
+
+
+def _pair_details(candidates, left, right):
+    found = [c for c in candidates if {c[0], c[1]} == {left, right}]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def test_null_identity_fields_do_not_match():
+    """Calls generate_candidates() against rows inserted in this transaction.
+
+    NULL phone, NULL name, NULL father name, and a shared DOB must not
+    produce a candidate. A unique phone plus the same normalized name still
+    matches at the existing 0.95 tier, so the test is exercising the real
+    matcher rather than an empty stub. The transaction is rolled back.
+    """
+    conn = connections.get_unified_connection()
     try:
-        v1 = pm.load_persons(conn, "V1")
-        # synthesize a row with everything empty except person_id and confirm
-        # it would never produce a candidate via either tier
-        fake = ("__test_empty__", None, set(), None, None)
-        assert fake[1] is None and fake[3] is None and fake[4] is None
+        cur = conn.cursor()
+
+        def unused_phone(candidate):
+            cur.execute(
+                "SELECT count(*) FROM persons_unified WHERE right(regexp_replace(phone_number, '\\D', '', 'g'), 10) = %s",
+                (candidate,),
+            )
+            assert cur.fetchone()[0] == 0, candidate
+            return candidate
+
+        phone_bare = unused_phone("1000000001")
+        phone_real = unused_phone("1000000002")
+
+        def insert_person(person_id, source_system, full_name, relative_name, phone, dob=None):
+            cur.execute(
+                """
+                INSERT INTO persons_unified
+                    (person_id, source_system, source_record_id, full_name, relative_name,
+                     phone_number, date_of_birth, current_source_run_id, current_as_of)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, '__d4_test__', now())
+                """,
+                (person_id, source_system, person_id, full_name, relative_name, phone, dob),
+            )
+
+        insert_person("__d4_v1_allnull__", "V1", None, None, None)
+        insert_person("__d4_v2_allnull__", "V2", None, None, None)
+        insert_person("__d4_v1_nameonly__", "V1", "zzzd4probealpha zzzd4probebeta", None, None)
+        insert_person("__d4_v2_nameonly__", "V2", "zzzd4probealpha zzzd4probebeta", None, None)
+        insert_person("__d4_v1_father_only_side__", "V1", "zzzd4probegamma", "zzzd4probefather", None)
+        insert_person("__d4_v2_null_father__", "V2", "zzzd4probegamma", None, None)
+        insert_person("__d4_v1_phone_noname__", "V1", None, None, phone_bare)
+        insert_person("__d4_v2_phone_named__", "V2", "zzzd4probedelta", None, phone_bare)
+        insert_person("__d4_v1_dob__", "V1", None, None, None, "1991-02-03")
+        insert_person("__d4_v2_dob__", "V2", None, None, None, "1991-02-03")
+        insert_person("__d4_v1_real__", "V1", "zzzd4probrealname", "zzzd4probrealfather", phone_real)
+        insert_person("__d4_v2_real__", "V2", "zzzd4probrealname", "zzzd4probrealfather", phone_real)
+
+        candidates = pm.generate_candidates(conn)
+        assert not _pair_present(candidates, "__d4_v1_allnull__", "__d4_v2_allnull__")
+        assert not _pair_present(candidates, "__d4_v1_nameonly__", "__d4_v2_nameonly__")
+        assert not _pair_present(candidates, "__d4_v1_father_only_side__", "__d4_v2_null_father__")
+        assert not _pair_present(candidates, "__d4_v1_phone_noname__", "__d4_v2_phone_named__")
+        assert not _pair_present(candidates, "__d4_v1_dob__", "__d4_v2_dob__")
+        basis_pair = _pair_details(candidates, "__d4_v1_real__", "__d4_v2_real__")
+        assert basis_pair[2] == "phone_exact+name_exact", basis_pair
+        assert basis_pair[3] == 0.95, basis_pair
     finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_v2_unresolved_arrest_gaps_are_visible_and_idempotent():
+    from etl3.merger.v2_arrest_gaps import GAP_TYPE, record_v2_unresolved_arrest_accused_gaps
+
+    conn = connections.get_unified_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT count(*) FROM arrests_unified WHERE source_system='V2' AND accused_id IS NULL"
+        )
+        unresolved = cur.fetchone()[0]
+        assert unresolved > 0
+        cur.execute("SELECT count(*) FROM change_log")
+        change_log_before = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM identity_links")
+        links_before = cur.fetchone()[0]
+
+        first = record_v2_unresolved_arrest_accused_gaps(conn)
+        conn.commit()
+        second = record_v2_unresolved_arrest_accused_gaps(conn)
+        conn.commit()
+
+        assert first["unresolved_arrests"] == unresolved, first
+        assert second["unresolved_arrests"] == unresolved, second
+        assert second["newly_inserted"] == 0, second
+        cur.execute(
+            """
+            SELECT count(*), count(DISTINCT gap_key)
+            FROM source_gap_ledger
+            WHERE source_system='V2' AND gap_type=%s
+            """,
+            (GAP_TYPE,),
+        )
+        gap_rows, distinct_keys = cur.fetchone()
+        assert gap_rows == unresolved, (gap_rows, unresolved)
+        assert distinct_keys == unresolved
+        cur.execute(
+            """
+            SELECT count(*) FROM arrests_unified
+            WHERE source_system='V2' AND accused_id IS NULL
+            """
+        )
+        assert cur.fetchone()[0] == unresolved
+        cur.execute("SELECT count(*) FROM change_log")
+        assert cur.fetchone()[0] == change_log_before
+        cur.execute("SELECT count(*) FROM identity_links")
+        assert cur.fetchone()[0] == links_before
+        cur.execute("SELECT count(*) FROM identity_links WHERE status <> 'candidate'")
+        assert cur.fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_consolidation_run_log_failure_transition():
+    """Success stays success. A raised error marks that run failed and is
+    re-raised. A later run can succeed without flipping the failed row."""
+    from etl3.run_phase4_consolidation import run_with_run_log
+
+    conn = connections.get_unified_connection()
+    created = []
+    try:
+        def succeed(conn, run_id, progress):
+            progress["probe"] = {"ok": True}
+            return {"probe": "phase4"}, 0
+
+        def fail(conn, run_id, progress):
+            progress["before_fail"] = {"ok": True}
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM etl3_d2_relation_that_does_not_exist")
+
+        ok_id = run_with_run_log(conn, succeed)
+        created.append(ok_id)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, error_message FROM consolidation_run_log WHERE run_id=%s",
+                (ok_id,),
+            )
+            status, err = cur.fetchone()
+        assert status == "success", status
+        assert err is None
+
+        try:
+            run_with_run_log(conn, fail)
+            raise AssertionError("controlled failure was swallowed")
+        except Exception as exc:
+            assert "etl3_d2_relation_that_does_not_exist" in str(exc)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT run_id, status, error_message, sources_processed
+                FROM consolidation_run_log
+                WHERE status='failed'
+                  AND error_message LIKE '%%etl3_d2_relation_that_does_not_exist%%'
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
+            fail_id, status, err, processed = cur.fetchone()
+        created.append(fail_id)
+        assert status == "failed"
+        assert "UndefinedTable" in err or "does not exist" in err
+        assert "before_fail" in processed
+
+        ok_id_2 = run_with_run_log(conn, succeed)
+        created.append(ok_id_2)
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM consolidation_run_log WHERE run_id=%s", (ok_id_2,))
+            assert cur.fetchone()[0] == "success"
+            cur.execute("SELECT status FROM consolidation_run_log WHERE run_id=%s", (fail_id,))
+            assert cur.fetchone()[0] == "failed"
+    finally:
+        with conn.cursor() as cur:
+            for run_id in created:
+                cur.execute("DELETE FROM consolidation_run_log WHERE run_id = %s", (run_id,))
+        conn.commit()
         conn.close()
 
 
@@ -215,7 +392,9 @@ if __name__ == "__main__":
     check("DOB is never used as a match input (source-code check)", test_dob_never_used_as_match_input)
     check("Candidate matching is deterministic", test_matching_is_deterministic)
     check("Ambiguous matches are flagged, not silently resolved", test_ambiguous_matches_flagged_not_resolved)
-    check("Missing-field inputs don't break matching", test_no_field_required_null_breaks_matching)
+    check("NULL identity fields do not produce a match", test_null_identity_fields_do_not_match)
+    check("V2 unresolved arrest links are gap-ledgered and idempotent", test_v2_unresolved_arrest_gaps_are_visible_and_idempotent)
+    check("Run log moves running to failed and a later run can succeed", test_consolidation_run_log_failure_transition)
     check("Unified rows have traceable source provenance", test_unified_state_provenance_traceable)
     check("Rerun is fully idempotent (0 changes, change_log stable)", test_rerun_is_fully_idempotent)
     check("Crash/restart recovery on a unified write is safe", test_crash_restart_recovery_on_unified_write)

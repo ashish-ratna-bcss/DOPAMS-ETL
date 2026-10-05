@@ -104,8 +104,19 @@ def test_gap_state_matches_known_bookkeeping():
     }
     assert set(gaps.keys()) == expected_keys, gaps.keys()
     assert gaps["fk_retry:arrests"].status == "RESOLVED"  # fully resolved, confirmed earlier this session
-    assert gaps["accused.person_id IS NULL"].detail["count"] == 78
-    print(f"       all {len(gaps)} known gap categories visible, counts match live bookkeeping exactly")
+    conn = connections.get_v2_source_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM accused WHERE person_id IS NULL")
+            live_unlinked = cur.fetchone()[0]
+    finally:
+        conn.rollback()
+        conn.close()
+    assert gaps["accused.person_id IS NULL"].detail["count"] == live_unlinked, (
+        gaps["accused.person_id IS NULL"].detail["count"],
+        live_unlinked,
+    )
+    print(f"       all {len(gaps)} known gap categories visible, unlinked accused={live_unlinked} matches live accused")
 
 
 def test_no_source_mutation():

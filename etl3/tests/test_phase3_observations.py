@@ -73,6 +73,7 @@ def test_idempotent_rerun_v2():
     a row never changes the total, and the second of those two runs always
     reports 0 new inserts against whatever the first left behind."""
     conn = connections.get_unified_connection()
+    run_id = None
     try:
         run_id = common.start_consolidation_run(conn)
         conn.commit()
@@ -84,11 +85,16 @@ def test_idempotent_rerun_v2():
         assert r2["inserted"] == 0, r2
         assert r2["already_present"] == 816, r2
     finally:
+        if run_id is not None:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM consolidation_run_log WHERE run_id = %s AND status = 'running'", (run_id,))
+            conn.commit()
         conn.close()
 
 
 def test_idempotent_rerun_v1():
     conn = connections.get_unified_connection()
+    run_id = None
     try:
         run_id = common.start_consolidation_run(conn)
         conn.commit()
@@ -104,6 +110,10 @@ def test_idempotent_rerun_v1():
             total = cur.fetchone()[0]
         assert total == 7305, total
     finally:
+        if run_id is not None:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM consolidation_run_log WHERE run_id = %s AND status = 'running'", (run_id,))
+            conn.commit()
         conn.close()
 
 

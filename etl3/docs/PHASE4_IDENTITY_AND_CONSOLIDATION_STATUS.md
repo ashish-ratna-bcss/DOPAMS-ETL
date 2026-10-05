@@ -52,7 +52,7 @@ Everything reads from and writes to `dopams_cctns` only. No code path in `etl3/m
 | `persons_unified` | 52,941 | 20,127 (keyed on `accused_details.person_code`) | 32,814 |
 | `accused_unified` | 50,223 | 17,356 logical groups (see below) | 32,867 |
 | `arrests_unified` | 53,060 | 20,198 | 32,862 |
-| `chargesheets_unified` | 14,592 | 7,531 | 13,224 (7,061 `chargesheets` + 6,163 `charge_sheet_updates`, merged by shared `id`) |
+| `chargesheets_unified` | 14,592 | 7,531 | 7,061 from `chargesheets`. `charge_sheet_updates` (6,163 source rows) is a separate feed; its `id` values do not overlap `chargesheets.id` |
 | `seizures_unified` | 37,918 | 34,384 (derived from the accused dossier's embedded drug fields) | 3,534 |
 | `properties_unified` | 7,646 | — | 7,646 |
 | `fsl_unified` | 2,003 | — | 2,003 |
@@ -67,13 +67,14 @@ Every unified row's `source_record_id` was spot-checked (20 random samples per t
 
 ## Ambiguity / unresolved counts
 
-`source_gap_ledger`: **36,402** entries total, every one explicitly classified, none silently dropped:
+`source_gap_ledger`: **36,531** entries after the D1 cleanup (36,402 before it, plus 129 V2 arrest→accused gaps). Every entry is explicitly classified. None are silently dropped.
 
 | gap_type | Count | Meaning |
 |---|---|---|
 | `unresolved_record_key` | 33,524 | V1 `accused` observations whose `record_key` (Python-computed MD5) doesn't exact-match the DB trigger's `natural_key` for the same row — root-caused in Phase 3 (two independent hash implementations over differently-formatted timestamp inputs). Carried forward, not re-derived. |
 | `unresolved_arrest_accused_link` | 2,312 | V1 `arrests_unified` rows (from `accused_details`) where the `(fir_reg_num, name, father_name)` correlation key matched zero or multiple `accused_unified` candidates — `accused_id` left `NULL` (nullable since migration 002) |
 | `unresolved_accused_person_link` | 554 | V1 `accused_unified` rows where the same correlation key matched zero or multiple `accused_details.person_code` candidates — `person_id` left `NULL`, `unlinked_person_flag=TRUE` |
+| `unresolved_arrest_accused_link` | 129 | V2 `arrests_unified` rows with `accused_id` NULL. 128 have `person_id` NULL on the latest `arrests_source` payload, so there is no lookup key. 1 (`arrest_id=942f4719-00bc-420c-a37a-c414a7b398ac`) points at placeholder person `69a529c4aa39e48f19074b21`, which has no `accused_unified` row for that crime. Neither case is guessed. `[DATABASE VERIFIED]` during the D1 cleanup. |
 | `unresolved_interrogation_person_link` | 11 | V2 `interrogation_reports.person_id` values with no matching `persons_unified` row — left `NULL` rather than inserted as a dangling FK |
 | `unlinked_persons_placeholder` | 1 | Summary marker for V2's placeholder-persons population (investigated fully in Phase 3) |
 
@@ -182,6 +183,26 @@ All other Phase 4 code only ever writes to `dopams_cctns`'s existing tables.
 ## Commit
 
 See the companion commit on `dopams-cctns` immediately following this document (message begins `phase-4:`); exact hash recorded in the commit message and reported in the completion summary.
+
+## Review cleanup (D1–D4)
+
+A read-only review of commit `3c0f45c` found four cleanup items. Matching rules, confidence thresholds, ambiguity handling, DOB exclusion, auto-confirm behavior, current-state computation, and `change_log` semantics were not changed.
+
+### D1 — V2 unresolved arrest → accused links `[DATABASE VERIFIED]`
+
+Before this cleanup, `source_gap_ledger` had no row for the 129 `arrests_unified` rows (`source_system='V2'`, `accused_id` NULL). `etl3/merger/v2_arrest_gaps.py` inserts one `unresolved_arrest_accused_link` row per arrest. The key is `arrest_id=<source arrest id>|reason=<reason>`. `ON CONFLICT DO NOTHING` makes a second pass insert 0 rows. `accused_id` is left NULL. The split verified live before the insert was 128 `source_person_id_null` and 1 `no_accused_for_crime_person`.
+
+### D2 — failed consolidation runs `[CODE VERIFIED]` `[TEST VERIFIED]`
+
+`run_with_run_log()` marks the open `consolidation_run_log` row `failed`, stores the exception type, message, and traceback, and re-raises. A normal return is still `success`. The two stale `running` rows from development crashes (`448c9570-2679-418a-b5e7-e6bae80d682a`, `d88a0626-5322-477c-a909-8295f505c32b`) were closed as `failed` with an explicit cleanup note. Completed `success` rows were not modified. The Phase 3 idempotency tests also opened a `consolidation_run_log` row and never finished it; the mandated regression recreated two `running` rows that way (`ba16d391-fae9-4db9-a180-59a7bc532c1d`, `66d97134-8a96-4b00-a347-247ef02893ee`). Those rows were removed, and both tests now delete the `running` row they open. After that cleanup, `running = 0`.
+
+### D3 — chargesheet documentation `[DOCUMENTATION CORRECTED]`
+
+An earlier draft of this file said the 38 `chargesheets[V2:charge_sheet_updates]` "updated" rows were cross-feed enrichment on a shared id. That is wrong. A live `INTERSECT` of `chargesheets_source.source_record_id` for `source_table='chargesheets'` and `source_table='charge_sheet_updates'` returns 0. Those 38 updates were an idempotent rerun of the same `charge_sheet_updates` feed during development. The loader was not changed.
+
+### D4 — matching test `[TEST VERIFIED]`
+
+`test_null_identity_fields_do_not_match` calls `generate_candidates()` on rows created inside a transaction that is rolled back. NULL name, NULL father name, NULL phone, and a shared date of birth do not produce a candidate. A unique phone plus the same normalized name still matches as `phone_exact+name_exact` at 0.95, which is the existing rule.
 
 ## What remains for Phase 5+ (not started, not implied complete)
 
