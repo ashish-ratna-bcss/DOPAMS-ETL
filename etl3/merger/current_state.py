@@ -254,6 +254,14 @@ class UnifiedBatchWriter:
             dtype, maxlen = self._column_types.get(k, ("", None))
             coerced_fields[k] = _coerce_value(v, dtype, maxlen)
         all_fields = coerced_fields
+        if self.entity == "crime" and existing is not None and "additional_json_data" in all_fields:
+            # Derived hierarchy provenance is not a source field. A replay
+            # of the V1 residual must not strip it or log it as a change.
+            from etl3.merger.ps_enrichment import preserve_derived_crime_json
+            all_fields["additional_json_data"] = preserve_derived_crime_json(
+                existing.get("additional_json_data"),
+                all_fields.get("additional_json_data"),
+            )
 
         incoming_ts = as_aware(current_as_of)
         incoming_order = ordering_ts(current_as_of)

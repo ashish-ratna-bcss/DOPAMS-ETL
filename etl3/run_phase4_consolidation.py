@@ -31,13 +31,30 @@ def _crime_id_v2(payload):
     return {"crime_id": payload.get("crime_id")}
 
 
-def _accused_extra_v2(payload):
+def accused_relation_v2(payload, known_person_ids):
+    """Link an accused row only when its person_id exists.
+
+    A null person_id stays null. A person_id that is not in persons_unified
+    is not guessed and is not written: the caller records it as unresolved.
+    """
     person_id = payload.get("person_id") or None
+    missing = bool(person_id) and person_id not in known_person_ids
+    if missing:
+        person_id = None
     return {
         "crime_id": payload.get("crime_id"),
         "person_id": person_id,
         "unlinked_person_flag": person_id is None,
+        "missing_person": missing,
     }
+
+
+# V2 entities merged into unified tables. fsl_case_property is not in this
+# list: it stays in fsl_source and is not consolidated.
+UNIFIED_V2_ONLY = (
+    ("property", "properties_unified", "property_id", "properties_source", "PROPERTIES"),
+    ("disposal", "disposal_unified", "disposal_id", "disposal_source", "DISPOSAL"),
+)
 
 
 def run_with_run_log(conn, work):
@@ -127,9 +144,34 @@ def _consolidate(conn, run_id, progress):
     report("persons[V1]", cs.run_entity(conn, entity="person", unified_table="persons_unified",
            unified_pk_col="person_id", source_table="arrests_source", source_system="V1",
            field_map_entry=field_maps.PERSONS["V1"], consolidation_run_id=run_id))
+    from etl3.merger.v1_person_keys import record_v1_missing_person_keys
+    report("gaps[V1 person key]", record_v1_missing_person_keys(conn))
     conn.commit()
 
     # --- accused (depends on crimes; V1 grouped + cross-linked to persons) ---
+    with conn.cursor() as cur:
+        cur.execute("SELECT person_id FROM persons_unified")
+        known_person_ids = {row[0] for row in cur.fetchall()}
+
+    def _accused_extra_v2(payload):
+        relation = accused_relation_v2(payload, known_person_ids)
+        if relation["missing_person"]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO source_gap_ledger
+                        (source_system, gap_type, gap_key, first_seen_at, status, source_evidence_table)
+                    VALUES ('V2', 'unresolved_accused_person_link', %s, now(), 'OPEN', 'accused')
+                    ON CONFLICT (source_system, gap_type, gap_key) DO NOTHING
+                    """,
+                    (f"accused_id={payload.get('accused_id')}|person_id={payload.get('person_id')}",),
+                )
+        return {
+            "crime_id": relation["crime_id"],
+            "person_id": relation["person_id"],
+            "unlinked_person_flag": relation["unlinked_person_flag"],
+        }
+
     v2_accused_counts = cs.run_entity(conn, entity="accused", unified_table="accused_unified",
            unified_pk_col="accused_id", source_table="accused_source", source_system="V2",
            field_map_entry=field_maps.ACCUSED["V2"], consolidation_run_id=run_id,
@@ -201,23 +243,18 @@ def _consolidate(conn, run_id, progress):
     conn.commit()
 
     # --- V2-only entities (depend on crimes only) ---
-    for entity, table, pk, source_table, fmap in [
-        ("property", "properties_unified", "property_id", "properties_source", field_maps.PROPERTIES["V2"]),
-        ("fsl", "fsl_unified", "case_property_id", "fsl_source", field_maps.FSL["V2"]),
-        ("disposal", "disposal_unified", "disposal_id", "disposal_source", field_maps.DISPOSAL["V2"]),
-    ]:
+    # fsl_case_property is intentionally not merged into fsl_unified.
+    for entity, table, pk, source_table, fmap_name in UNIFIED_V2_ONLY:
         report(f"{entity}[V2]", cs.run_entity(conn, entity=entity, unified_table=table,
                unified_pk_col=pk, source_table=source_table, source_system="V2",
-               field_map_entry=fmap, consolidation_run_id=run_id, extra_fields_fn=_crime_id_v2))
+               field_map_entry=getattr(field_maps, fmap_name)["V2"], consolidation_run_id=run_id,
+               extra_fields_fn=_crime_id_v2))
         conn.commit()
 
     # interrogation: person_id must be validated against persons_unified
     # before being set (V2 has 11 known IR rows pointing at a missing
     # person -- confirmed earlier this project) -- never a blind FK write.
-    with conn.cursor() as cur:
-        cur.execute("SELECT person_id FROM persons_unified")
-        known_person_ids = {r[0] for r in cur.fetchall()}
-
+    # known_person_ids was loaded before accused consolidation.
     def _interrogation_extra_v2(payload):
         crime_id = payload.get("crime_id")
         person_id = payload.get("person_id")
@@ -245,6 +282,10 @@ def _consolidate(conn, run_id, progress):
     report("hierarchy[V2]", cs.run_entity(conn, entity="hierarchy", unified_table="hierarchy_unified",
            unified_pk_col="ps_code", source_table="hierarchy_source", source_system="V2",
            field_map_entry=field_maps.HIERARCHY["V2"], consolidation_run_id=run_id))
+    conn.commit()
+
+    from etl3.merger.ps_enrichment import enrich_v1_ps_codes
+    report("ps_code[V1]", enrich_v1_ps_codes(conn))
     conn.commit()
 
     # --- identity linking (persons only; never auto-confirmed) ---

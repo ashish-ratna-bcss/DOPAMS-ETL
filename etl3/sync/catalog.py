@@ -36,8 +36,11 @@ MODULES = [
      "unified_table": "seizures_unified", "has_source_system": True, "collapse": False},
     {"source_system": "V2", "module": "properties", "obs_table": "properties_source", "source_table": "properties",
      "unified_table": "properties_unified", "has_source_system": False, "collapse": False},
+    # Observed for evidence, not merged. fsl_unified is not a business table
+    # this consolidation maintains; a shortfall there is not missing data.
     {"source_system": "V2", "module": "fsl_case_property", "obs_table": "fsl_source", "source_table": "fsl_case_property",
-     "unified_table": "fsl_unified", "has_source_system": False, "collapse": False},
+     "unified_table": "fsl_unified", "has_source_system": False, "collapse": False,
+     "excluded_from_unified": True},
     {"source_system": "V2", "module": "disposal", "obs_table": "disposal_source", "source_table": "disposal",
      "unified_table": "disposal_unified", "has_source_system": False, "collapse": False},
     {"source_system": "V2", "module": "interrogation_reports", "obs_table": "interrogation_source",

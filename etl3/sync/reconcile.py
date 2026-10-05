@@ -11,8 +11,15 @@ from psycopg2.extras import execute_values
 from etl3.sync.catalog import MODULES
 
 
-def classify_module(*, source_count: int, observed_count: int, collapse: bool, defect: bool = False) -> str:
-    if defect:
+def classify_module(*, source_count: int, observed_count: int, collapse: bool, defect: bool = False,
+                    excluded: bool = False) -> str:
+    """excluded: the module is intentionally not merged into a unified table.
+
+    A unified count below the source count is EXPECTED in that case. An
+    observation shortfall is still UNRESOLVED, because the source row was
+    not captured at all.
+    """
+    if defect and not excluded:
         return "DEFECT"
     if observed_count < source_count:
         return "UNRESOLVED"
@@ -87,6 +94,7 @@ def reconcile(conn, source_counts: dict) -> list:
             source_count=source_count,
             observed_count=observed,
             collapse=spec["collapse"],
+            excluded=spec.get("excluded_from_unified", False),
         )
         rows.append((spec["source_system"], spec["source_table"], source_count, observed, unified,
                      source_count - observed, status))
