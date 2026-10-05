@@ -118,11 +118,12 @@ def download_media_file(
                 temp_file.unlink(missing_ok=True)
             return {
                 "ok": False,
-                "status": "FAILED",
+                "status": "NOT_FOUND",
                 "local_path": target_str,
                 "file_size": 0,
-                "error_message": "Downloaded file is 0 bytes (empty)",
+                "error_message": "Document not available on Alfresco DMS (0 bytes)",
             }
+
 
         # Atomic rename from .tmp to final target file
         temp_file.replace(target_file)
