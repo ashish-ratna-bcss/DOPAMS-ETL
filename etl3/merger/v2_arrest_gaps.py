@@ -77,3 +77,38 @@ def record_v2_unresolved_arrest_accused_gaps(conn) -> dict:
         "person_without_accused_row": person_without_accused,
         "newly_inserted": inserted,
     }
+
+
+def resolve_arrest_gaps_now_linked(conn) -> int:
+    """Close gap rows whose arrest now has an accused_id.
+
+    The link itself is only the existing exact (crime_id, person_id)
+    lookup. This does not invent a person or an accused. A later copy of
+    the same gap key does not reopen it (ON CONFLICT DO NOTHING).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE source_gap_ledger g
+            SET status = 'RESOLVED'
+            WHERE g.status = 'OPEN'
+              AND g.gap_type = 'unresolved_arrest_accused_link'
+              AND (
+                (g.source_system = 'V2' AND EXISTS (
+                    SELECT 1 FROM arrests_unified a
+                    WHERE a.source_system = 'V2'
+                      AND a.accused_id IS NOT NULL
+                      AND g.gap_key LIKE 'arrest_id=' || a.source_record_id || '|reason=%'
+                ))
+                OR
+                (g.source_system = 'V1' AND EXISTS (
+                    SELECT 1 FROM arrests_unified a
+                    WHERE a.source_system = 'V1'
+                      AND a.accused_id IS NOT NULL
+                      AND right(g.gap_key, char_length('accused_details_id=' || a.source_record_id))
+                          = 'accused_details_id=' || a.source_record_id
+                ))
+              )
+            """
+        )
+        return cur.rowcount

@@ -40,7 +40,7 @@ def build_accused_details_lookup(conn):
 
     rows = fetch_latest_by_record_id(conn, "arrests_source", "V1")
     lookup = {}
-    for source_record_id, source_run_id, created_at, modified_at, payload in rows:
+    for source_record_id, source_run_id, created_at, modified_at, payload, _observation_id in rows:
         key = correlation_key(payload.get("fir_reg_num"), payload.get("accused_name"), payload.get("father_name"))
         person_code = payload.get("person_code")
         if person_code:

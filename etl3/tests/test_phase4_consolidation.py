@@ -154,7 +154,11 @@ def test_null_identity_fields_do_not_match():
 
 
 def test_v2_unresolved_arrest_gaps_are_visible_and_idempotent():
-    from etl3.merger.v2_arrest_gaps import GAP_TYPE, record_v2_unresolved_arrest_accused_gaps
+    from etl3.merger.v2_arrest_gaps import (
+        GAP_TYPE,
+        record_v2_unresolved_arrest_accused_gaps,
+        resolve_arrest_gaps_now_linked,
+    )
 
     conn = connections.get_unified_connection()
     try:
@@ -172,6 +176,7 @@ def test_v2_unresolved_arrest_gaps_are_visible_and_idempotent():
         first = record_v2_unresolved_arrest_accused_gaps(conn)
         conn.commit()
         second = record_v2_unresolved_arrest_accused_gaps(conn)
+        resolve_arrest_gaps_now_linked(conn)
         conn.commit()
 
         assert first["unresolved_arrests"] == unresolved, first
@@ -179,15 +184,19 @@ def test_v2_unresolved_arrest_gaps_are_visible_and_idempotent():
         assert second["newly_inserted"] == 0, second
         cur.execute(
             """
-            SELECT count(*), count(DISTINCT gap_key)
+            SELECT count(*), count(DISTINCT gap_key),
+                   count(*) FILTER (WHERE status = 'OPEN')
             FROM source_gap_ledger
             WHERE source_system='V2' AND gap_type=%s
             """,
             (GAP_TYPE,),
         )
-        gap_rows, distinct_keys = cur.fetchone()
-        assert gap_rows == unresolved, (gap_rows, unresolved)
-        assert distinct_keys == unresolved
+        gap_rows, distinct_keys, open_rows = cur.fetchone()
+        # Resolved keys stay in the ledger, so the open count is the live
+        # unresolved set. Total keys never shrink and never collide.
+        assert open_rows == unresolved, (open_rows, unresolved, gap_rows)
+        assert gap_rows >= unresolved
+        assert distinct_keys == gap_rows
         cur.execute(
             """
             SELECT count(*) FROM arrests_unified
@@ -329,7 +338,7 @@ def test_crash_restart_recovery_on_unified_write():
 
         # "process half, crash"
         writer = cs.UnifiedBatchWriter(conn, "hierarchy_unified", "ps_code", "hierarchy")
-        for source_record_id, source_run_id, created_at, modified_at, payload in half:
+        for source_record_id, source_run_id, created_at, modified_at, payload, _observation_id in half:
             mapped = cs.apply_field_map(payload, field_maps.HIERARCHY["V2"]["map"])
             writer.add(payload["ps_code"], source_system="V2", source_record_id=source_record_id,
                        mapped_fields=mapped, extra_fields={}, source_run_id=source_run_id,

@@ -127,11 +127,15 @@ def fetch_latest_by_record_id(conn, source_table: str, source_system: str, sourc
         cur.execute(
             f"""
             SELECT DISTINCT ON (source_record_id)
-                source_record_id, source_run_id, source_created_at, source_modified_at, payload
+                source_record_id, source_run_id, source_created_at, source_modified_at, payload, id
             FROM {source_table}
             {where}
             ORDER BY source_record_id,
-                     COALESCE(source_modified_at, source_created_at) DESC NULLS LAST,
+                     CASE
+                         WHEN COALESCE(source_modified_at, source_created_at) > now() + interval '1 day'
+                         THEN NULL
+                         ELSE COALESCE(source_modified_at, source_created_at)
+                     END DESC NULLS LAST,
                      id DESC
             """,
             params,
@@ -182,6 +186,43 @@ def _values_differ(old, new):
     return _normalize_for_compare(old) != _normalize_for_compare(new)
 
 
+def as_aware(value):
+    """UTC datetime for ordering. None stays None. Naive values are UTC,
+    matching how this database session stores timestamptz. A missing or
+    unparseable value does not become 'now'."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=_dt.timezone.utc)
+        return value.astimezone(_dt.timezone.utc)
+    if isinstance(value, _dt.date):
+        return _dt.datetime(value.year, value.month, value.day, tzinfo=_dt.timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return as_aware(parsed)
+    return None
+
+
+def ordering_ts(value, *, now=None):
+    """Timestamp used only to decide which observation wins.
+
+    A value more than a day ahead of now is not treated as newer. One
+    bad future stamp must not freeze the row against every later correction.
+    The stored current_as_of keeps the source value unchanged.
+    """
+    ts = as_aware(value)
+    if ts is None:
+        return None
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    if ts > now + _dt.timedelta(days=1):
+        return None
+    return ts
+
+
 class UnifiedBatchWriter:
     """Batches all upserts + change_log entries for one *_unified table into
     a single load, single bulk upsert, and single bulk change_log insert."""
@@ -194,6 +235,7 @@ class UnifiedBatchWriter:
         self.counts = {"inserted": 0, "updated": 0, "unchanged": 0, "skipped_no_pk": 0}
         self._pending_rows = {}  # pk -> dict of all columns to write
         self._pending_change_log = []
+        self._obs_ids = {}
         self._column_types = _load_column_types(conn, unified_table)
         self._existing = self._load_existing()
 
@@ -204,7 +246,7 @@ class UnifiedBatchWriter:
             return {row[0]: dict(zip(cols, row)) for row in cur.fetchall()}
 
     def add(self, pk_value, *, source_system, source_record_id, mapped_fields, extra_fields,
-            source_run_id, current_as_of):
+            source_run_id, current_as_of, observation_id=None):
         existing = self._existing.get(pk_value)
         all_fields = {**mapped_fields, **extra_fields}
         coerced_fields = {}
@@ -213,31 +255,55 @@ class UnifiedBatchWriter:
             coerced_fields[k] = _coerce_value(v, dtype, maxlen)
         all_fields = coerced_fields
 
+        incoming_ts = as_aware(current_as_of)
+        incoming_order = ordering_ts(current_as_of)
         if existing is not None:
-            existing_as_of = existing.get("current_as_of")
-            if existing_as_of is not None and current_as_of is not None and current_as_of < existing_as_of:
+            existing_order = ordering_ts(existing.get("current_as_of"))
+            # A missing or unusable timestamp is not newer than a known
+            # one, and a strictly older instant never replaces current
+            # state. Equal instants, including two missing ones, are
+            # ordered by observation id when both are known, so A-then-B
+            # and B-then-A converge.
+            if existing_order is not None and incoming_order is None:
                 self.counts["unchanged"] += 1
-                return  # strictly older than what's already current -- never regress
+                return
+            if (
+                existing_order is not None
+                and incoming_order is not None
+                and incoming_order < existing_order
+            ):
+                self.counts["unchanged"] += 1
+                return
+            if incoming_order == existing_order:
+                prev_obs = self._obs_ids.get(pk_value)
+                if (
+                    observation_id is not None
+                    and prev_obs is not None
+                    and observation_id < prev_obs
+                ):
+                    self.counts["unchanged"] += 1
+                    return
 
         any_change = existing is None
         for field, new_value in all_fields.items():
             old_value = existing.get(field) if existing else None
             if _values_differ(old_value, new_value):
                 any_change = True
-                classification = "initial_observation" if existing is None else "business_change"
-                self._pending_change_log.append((
-                    self.entity, pk_value, field,
-                    None if old_value is None else str(old_value),
-                    None if new_value is None else str(new_value),
-                    current_as_of, source_system, source_run_id, classification,
-                ))
+                if incoming_ts is not None:
+                    classification = "initial_observation" if existing is None else "business_change"
+                    self._pending_change_log.append((
+                        self.entity, pk_value, field,
+                        None if old_value is None else str(old_value),
+                        None if new_value is None else str(new_value),
+                        incoming_ts, source_system, source_run_id, classification,
+                    ))
 
         row = {
             self.unified_pk_col: pk_value,
             "source_record_id": source_record_id,
             **all_fields,
             "current_source_run_id": source_run_id,
-            "current_as_of": current_as_of,
+            "current_as_of": incoming_ts,
         }
         if "source_system" in self._column_types:
             row["source_system"] = source_system
@@ -255,6 +321,8 @@ class UnifiedBatchWriter:
         merged = dict(existing) if existing else {}
         merged.update(self._pending_rows[pk_value])
         self._existing[pk_value] = merged
+        if observation_id is not None:
+            self._obs_ids[pk_value] = observation_id
 
     def flush(self):
         if self._pending_change_log:
@@ -316,7 +384,7 @@ def run_entity(conn, *, entity: str, unified_table: str, unified_pk_col: str,
     rows = fetch_latest_by_record_id(conn, source_table, source_system, source_table_filter)
     writer = UnifiedBatchWriter(conn, unified_table, unified_pk_col, entity)
     skipped = 0
-    for source_record_id, source_run_id, source_created_at, source_modified_at, payload in rows:
+    for source_record_id, source_run_id, source_created_at, source_modified_at, payload, observation_id in rows:
         pk_value = unified_pk_fn(payload)
         if not pk_value:
             skipped += 1
@@ -326,7 +394,8 @@ def run_entity(conn, *, entity: str, unified_table: str, unified_pk_col: str,
         current_as_of = source_modified_at or source_created_at
         writer.add(str(pk_value), source_system=source_system, source_record_id=source_record_id,
                    mapped_fields=mapped, extra_fields=extra,
-                   source_run_id=source_run_id, current_as_of=current_as_of)
+                   source_run_id=source_run_id, current_as_of=current_as_of,
+                   observation_id=observation_id)
     counts = writer.flush()
     counts["skipped_no_pk"] = skipped
     return counts
@@ -358,7 +427,7 @@ def run_v1_accused_grouped(conn, *, consolidation_run_id: str):
     groups = {}
     for source_record_id, source_run_id, source_created_at, source_modified_at, payload, row_id in rows:
         key = logical_key(payload)
-        ts = source_modified_at or source_created_at
+        ts = ordering_ts(source_modified_at or source_created_at)
         sort_key = (ts or _MIN_TS, row_id)
         if key not in groups or sort_key > groups[key][0]:
             groups[key] = (sort_key, source_record_id, source_run_id, payload)
@@ -390,7 +459,8 @@ def run_v1_accused_grouped(conn, *, consolidation_run_id: str):
         extra = {"crime_id": fir, "person_id": person_id, "unlinked_person_flag": person_id is None}
         writer.add(pk_value, source_system="V1", source_record_id=source_record_id,
                    mapped_fields=mapped, extra_fields=extra,
-                   source_run_id=source_run_id, current_as_of=ts)
+                   source_run_id=source_run_id, current_as_of=ts,
+                   observation_id=sort_key[1])
 
     counts = writer.flush()
     counts.update(link_counts)
@@ -411,7 +481,7 @@ def run_v1_arrests(conn, correlation_lookup: dict, *, consolidation_run_id: str)
     writer = UnifiedBatchWriter(conn, "arrests_unified", "arrest_id", "arrest")
     link_counts = {"accused_linked": 0, "accused_unresolved": 0, "skipped_no_pk": 0}
     unresolved_gaps = []
-    for source_record_id, source_run_id, created_at, modified_at, payload in rows:
+    for source_record_id, source_run_id, created_at, modified_at, payload, observation_id in rows:
         fir = payload.get("fir_reg_num")
         if not fir:
             link_counts["skipped_no_pk"] += 1
@@ -428,7 +498,8 @@ def run_v1_arrests(conn, correlation_lookup: dict, *, consolidation_run_id: str)
         current_as_of = modified_at or created_at
         writer.add(f"V1:{source_record_id}", source_system="V1", source_record_id=source_record_id,
                    mapped_fields=mapped, extra_fields=extra,
-                   source_run_id=source_run_id, current_as_of=current_as_of)
+                   source_run_id=source_run_id, current_as_of=current_as_of,
+                   observation_id=observation_id)
     counts = writer.flush()
     counts.update(link_counts)
     _bulk_record_gaps(conn, unresolved_gaps)

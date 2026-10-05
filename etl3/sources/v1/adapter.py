@@ -330,6 +330,88 @@ class V1Adapter(SourceAdapter):
             conn.rollback()
             conn.close()
 
+    def list_record_ids(self, module: str) -> list:
+        """Current primary keys as text. Read-only. Used to find rows the
+        observation layer has not captured yet."""
+        if module not in MODULE_TABLE:
+            raise ValueError(f"Unsupported V1 module: {module!r}")
+        table_name, pk_col = MODULE_TABLE[module]
+        conn = connections.get_v1_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {pk_col}::text FROM cctns.{table_name}")
+                return [row[0] for row in cur.fetchall()]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def list_record_stamps(self, module: str) -> list:
+        """(pk, updated_at, None). The third slot is the source run id, which
+        V1 business rows do not carry. Falls back to pk-only if updated_at
+        is absent so catch-up still sees missing keys."""
+        if module not in MODULE_TABLE:
+            raise ValueError(f"Unsupported V1 module: {module!r}")
+        table_name, pk_col = MODULE_TABLE[module]
+        conn = connections.get_v1_source_connection()
+        try:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT {pk_col}::text, updated_at FROM cctns.{table_name}"
+                    )
+                    return [(pk, modified, None) for pk, modified in cur.fetchall()]
+            except Exception:
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT {pk_col}::text FROM cctns.{table_name}")
+                    return [(pk, None, None) for (pk,) in cur.fetchall()]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def fetch_rows_by_pk(self, module: str, ids: list) -> list:
+        if module not in MODULE_TABLE:
+            raise ValueError(f"Unsupported V1 module: {module!r}")
+        if not ids:
+            return []
+        table_name, pk_col = MODULE_TABLE[module]
+        conn = connections.get_v1_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM cctns.{table_name} WHERE {pk_col}::text = ANY(%s)",
+                    (list(ids),),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    return []
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in rows]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def run_orders(self, module: str, run_ids: list) -> dict:
+        """{run_uuid: bigint run_log.id} for successful runs of this module.
+        The bigint id is the only monotonic order V1 exposes."""
+        if not run_ids:
+            return {}
+        conn = connections.get_v1_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT run_id::text, id
+                    FROM cctns.cctns_v1_etl_run_log
+                    WHERE entity = %s AND run_id::text = ANY(%s)
+                    """,
+                    (module, list(run_ids)),
+                )
+                return {run_id: log_id for run_id, log_id in cur.fetchall()}
+        finally:
+            conn.rollback()
+            conn.close()
+
     def get_source_gap_state(self) -> list:
         conn = connections.get_v1_source_connection()
         try:

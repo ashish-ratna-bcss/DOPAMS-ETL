@@ -52,6 +52,19 @@ def run_with_run_log(conn, work):
     """
     run_id = common.start_consolidation_run(conn)
     conn.commit()
+    # A hard stop cannot run the except handler below. The next run closes
+    # that leftover row so `running` cannot accumulate across restarts.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE consolidation_run_log
+            SET finished_at = now(), status = 'failed',
+                error_message = 'interrupted: run did not finish'
+            WHERE status = 'running' AND run_id <> %s
+            """,
+            (run_id,),
+        )
+    conn.commit()
     progress = {}
     try:
         sources_processed, rows_observed = work(conn, run_id, progress)
@@ -65,6 +78,8 @@ def run_with_run_log(conn, work):
     except Exception as exc:
         try:
             conn.rollback()
+            from etl3.sync.cursor import mark_cursors_failed
+            mark_cursors_failed(conn)
             common.finish_consolidation_run(
                 conn, run_id, status="failed",
                 sources_processed={k: "phase4" for k in progress},
@@ -148,8 +163,12 @@ def _consolidate(conn, run_id, progress):
     conn.commit()
 
     # Visibility only. Does not change accused_id, person_id, or change_log.
-    from etl3.merger.v2_arrest_gaps import record_v2_unresolved_arrest_accused_gaps
+    from etl3.merger.v2_arrest_gaps import (
+        record_v2_unresolved_arrest_accused_gaps,
+        resolve_arrest_gaps_now_linked,
+    )
     report("gaps[V2 arrest->accused]", record_v2_unresolved_arrest_accused_gaps(conn))
+    report("gaps[arrest linked]", {"resolved": resolve_arrest_gaps_now_linked(conn)})
     conn.commit()
 
     # --- chargesheets (depends on crimes only) ---
@@ -235,47 +254,11 @@ def _consolidate(conn, run_id, progress):
     report("identity_links[V1<->V2]", identity_result)
     conn.commit()
 
-    # --- consolidation cursor: latest-observed run per (source, module) ---
-    cursor_entries = [
-        ("V1", "fir", "crimes_unified"), ("V2", "crimes", "crimes_unified"),
-        ("V1", "accused_details", "persons_unified"), ("V2", "persons", "persons_unified"),
-        ("V1", "accused", "accused_unified"), ("V2", "accused", "accused_unified"),
-        ("V1", "accused_details", "arrests_unified"), ("V2", "arrests", "arrests_unified"),
-        ("V1", "court", "chargesheets_unified"), ("V2", "chargesheets", "chargesheets_unified"),
-        ("V1", "accused", "seizures_unified"), ("V2", "mo_seizures", "seizures_unified"),
-        ("V2", "properties", "properties_unified"), ("V2", "fsl_case_property", "fsl_unified"),
-        ("V2", "disposal", "disposal_unified"), ("V2", "interrogation_reports", "interrogation_unified"),
-        ("V2", "hierarchy", "hierarchy_unified"),
-    ]
-    no_source_system_col = {"properties_unified", "fsl_unified", "disposal_unified", "hierarchy_unified", "interrogation_unified"}
-    with conn.cursor() as cur:
-        for source_system, module, table in cursor_entries:
-            if table in no_source_system_col:
-                cur.execute(
-                    f"SELECT current_source_run_id FROM {table} "
-                    f"ORDER BY current_as_of DESC NULLS LAST LIMIT 1"
-                )
-            else:
-                cur.execute(
-                    f"SELECT current_source_run_id FROM {table} WHERE source_system = %s "
-                    f"ORDER BY current_as_of DESC NULLS LAST LIMIT 1",
-                    (source_system,),
-                )
-            row = cur.fetchone()
-            latest_run_id = row[0] if row else None
-            cur.execute(
-                """
-                INSERT INTO consolidation_cursor (source_system, source_module, last_processed_source_run_id, last_processed_at, status)
-                VALUES (%s, %s, %s, now(), 'idle')
-                ON CONFLICT (source_system, source_module) DO UPDATE SET
-                    last_processed_source_run_id = EXCLUDED.last_processed_source_run_id,
-                    last_processed_at = EXCLUDED.last_processed_at,
-                    status = 'idle'
-                """,
-                (source_system, module, latest_run_id),
-            )
+    # --- consolidation cursor: highest observed source run, never a regression ---
+    from etl3.sync.cursor import advance_observed_cursors
+    cursor_results = advance_observed_cursors(conn)
     conn.commit()
-    print("consolidation_cursor populated for", len(cursor_entries), "(source, module) pairs")
+    print("consolidation_cursor:", cursor_results)
 
     dt = time.time() - t0
     total_changed = sum(c.get("inserted", 0) + c.get("updated", 0) for c in results.values())

@@ -157,6 +157,86 @@ class V2Adapter(SourceAdapter):
             conn.rollback()
             conn.close()
 
+    def list_record_ids(self, module: str) -> list:
+        if module not in MODULE_PK:
+            raise ValueError(f"Unsupported V2 module: {module!r}")
+        pk_col = MODULE_PK[module]
+        conn = connections.get_v2_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {pk_col}::text FROM {module}")
+                return [row[0] for row in cur.fetchall()]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def list_record_stamps(self, module: str) -> list:
+        """(pk, date_modified, etl_run_id or None). A missing date_modified
+        column degrades to pk-only rather than dropping the module."""
+        if module not in MODULE_PK:
+            raise ValueError(f"Unsupported V2 module: {module!r}")
+        pk_col = MODULE_PK[module]
+        conn = connections.get_v2_source_connection()
+        try:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT {pk_col}::text, date_modified, etl_run_id::text FROM {module}"
+                    )
+                    return [(pk, modified, run_id) for pk, modified, run_id in cur.fetchall()]
+            except Exception:
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT {pk_col}::text FROM {module}")
+                    return [(pk, None, None) for (pk,) in cur.fetchall()]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def fetch_rows_by_pk(self, module: str, ids: list) -> list:
+        if module not in MODULE_PK:
+            raise ValueError(f"Unsupported V2 module: {module!r}")
+        if not ids:
+            return []
+        pk_col = MODULE_PK[module]
+        conn = connections.get_v2_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM {module} WHERE {pk_col}::text = ANY(%s)",
+                    (list(ids),),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    return []
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in rows]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def run_orders(self, module: str, run_ids: list) -> dict:
+        """{etl_run_id: max(fetched_at)}. UUIDs are not ordered; fetched_at is
+        only a display order for the cursor, never the exclusion set."""
+        if module not in MODULE_PK or not run_ids:
+            return {}
+        conn = connections.get_v2_source_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT etl_run_id::text, max(fetched_at)
+                    FROM {module}
+                    WHERE etl_run_id::text = ANY(%s)
+                    GROUP BY etl_run_id
+                    """,
+                    (list(run_ids),),
+                )
+                return {run_id: fetched for run_id, fetched in cur.fetchall()}
+        finally:
+            conn.rollback()
+            conn.close()
+
     def get_source_gap_state(self) -> list:
         conn = connections.get_v2_source_connection()
         gaps = []
