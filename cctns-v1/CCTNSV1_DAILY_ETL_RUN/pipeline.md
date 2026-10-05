@@ -1,6 +1,6 @@
 # CCTNS V1 Daily ETL — full overview
 
-Nightly pipeline: pull data from **four CCTNS V1 HTTP APIs** on dopams infrastructure, load into **PostgreSQL** on **dopams-new**, orchestrated by **Apache Airflow 2.10** (two DAGs).
+Nightly pipeline: pull data from **CCTNS V1 HTTP APIs & Alfresco Media**, load into **PostgreSQL** on **dopams-new**, orchestrated by **Apache Airflow 2.10** (three DAGs).
 
 - **DAG behavior and task graphs:** [`dags/README.md`](dags/README.md)  
 - **Deploy, PM2, Airflow UI:** [`deploy/README.md`](deploy/README.md)
@@ -11,6 +11,9 @@ Nightly pipeline: pull data from **four CCTNS V1 HTTP APIs** on dopams infrastru
 |-----|-----------------|---------------------|-----|
 | `cctns_v1_daily_sync_fir_court_accused_details` | **00:30** | `0 19 * * *` | Fast 3× GET; FIR loads first for FK checks |
 | `cctns_v1_daily_sync_accused_dossier` | **01:30** | `0 20 * * *` | Long date-range POST; **1 hour after** simple APIs |
+| `cctns_v1_daily_sync_media_attachments` | **05:00** | `30 23 * * *` | Downloads new FIR & Court document PDFs to disk |
+
+
 
 IST = UTC + 5 hours 30 minutes (no DST).
 
