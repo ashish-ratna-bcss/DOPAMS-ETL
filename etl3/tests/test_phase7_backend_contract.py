@@ -41,6 +41,43 @@ def test_crimes_with_no_ps_code_stay_visible():
         conn.close()
 
 
+def test_views_do_not_drop_or_duplicate_rows():
+    conn = connections.get_unified_connection(readonly=True)
+    try:
+        with conn.cursor() as cur:
+            pairs = (
+                ("crime", "crimes_unified", "crime_id"),
+                ("accused", "accused_unified", "accused_id"),
+                ("person", "persons_unified", "person_id"),
+                ("arrest", "arrests_unified", "arrest_id"),
+                ("chargesheet", "chargesheets_unified", "charge_sheet_id"),
+                ("fsl_historical", "fsl_unified", "case_property_id"),
+            )
+            for view, table, pk in pairs:
+                assert _one(cur, f"SELECT count(*) FROM be_read.{view}") == _one(
+                    cur, f"SELECT count(*) FROM {table}"
+                )
+                assert _one(cur, f"SELECT count(*) FROM be_read.{view}") == _one(
+                    cur, f"SELECT count(DISTINCT {pk}) FROM be_read.{view}"
+                )
+            unmatched_sql = """
+                SELECT count(*) FROM {table} c
+                WHERE c.ps_code IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM be_read.hierarchy h WHERE h.ps_code = c.ps_code
+                  )
+            """
+            assert _one(cur, unmatched_sql.format(table="crimes_unified")) == _one(
+                cur, unmatched_sql.format(table="be_read.crime")
+            )
+            assert _one(cur, "SELECT count(*) FROM be_read.arrest WHERE accused_id IS NULL") == _one(
+                cur, "SELECT count(*) FROM arrests_unified WHERE accused_id IS NULL"
+            )
+            assert _one(cur, "SELECT count(*) FROM be_read.arrest WHERE accused_id IS NULL") > 0
+    finally:
+        conn.close()
+
+
 def test_chargesheet_ids_stay_source_scoped():
     conn = connections.get_unified_connection(readonly=True)
     try:
@@ -71,6 +108,17 @@ def test_chargesheet_ids_stay_source_scoped():
             distinct_ids = _one(cur, "SELECT count(DISTINCT charge_sheet_id) FROM be_read.chargesheet")
             total = _one(cur, "SELECT count(*) FROM be_read.chargesheet")
             assert distinct_ids == total
+            cur.execute(
+                """
+                SELECT charge_sheet_id, source_module, crime_id
+                FROM be_read.chargesheet
+                WHERE source_record_id = '1'
+                ORDER BY charge_sheet_id
+                """
+            )
+            raw_one = cur.fetchall()
+            assert [row[0] for row in raw_one] == ["V1:court:1", "V2:charge_sheet_updates:1"]
+            assert raw_one[0][2] != raw_one[1][2]
     finally:
         conn.close()
 
@@ -158,15 +206,33 @@ def test_contract_rejects_writes_and_sources_stay_read_only():
     unified = connections.get_unified_connection()
     try:
         with unified.cursor() as cur:
-            try:
-                cur.execute("UPDATE be_read.chargesheet SET court_name = court_name")
-            except psycopg2.Error as exc:
-                unified.rollback()
-                assert "read-only" in str(exc)
-            else:
-                raise AssertionError("chargesheet view accepted a write")
+            statements = (
+                "UPDATE be_read.chargesheet SET court_name = court_name",
+                "INSERT INTO be_read.crime (crime_id) VALUES ('etl3-p7-probe')",
+                "DELETE FROM be_read.crime WHERE crime_id = (SELECT crime_id FROM be_read.crime LIMIT 1)",
+            )
+            for sql in statements:
+                try:
+                    cur.execute(sql)
+                except psycopg2.Error as exc:
+                    unified.rollback()
+                    assert "ETL-3 owns" in str(exc)
+                else:
+                    raise AssertionError("view accepted a write: " + sql)
     finally:
         unified.close()
+
+    readonly = connections.get_unified_connection(readonly=True)
+    try:
+        with readonly.cursor() as cur:
+            try:
+                cur.execute("UPDATE crimes_unified SET fir_num = fir_num")
+            except psycopg2.errors.ReadOnlySqlTransaction:
+                readonly.rollback()
+            else:
+                raise AssertionError("read-only session updated crimes_unified")
+    finally:
+        readonly.close()
 
     for label, getter, sql in (
         ("V1", connections.get_v1_source_connection, "CREATE TABLE etl3_p7_probe (x int)"),
@@ -185,6 +251,7 @@ def test_contract_rejects_writes_and_sources_stay_read_only():
 
 def main():
     check("null police-station codes stay visible", test_crimes_with_no_ps_code_stay_visible)
+    check("views do not drop or duplicate rows", test_views_do_not_drop_or_duplicate_rows)
     check("chargesheet ids stay source scoped", test_chargesheet_ids_stay_source_scoped)
     check("null persons stay unmerged", test_null_person_links_remain_and_people_are_not_merged)
     check("pagination does not overlap", test_one_person_can_have_many_accused_and_pages_do_not_overlap)
