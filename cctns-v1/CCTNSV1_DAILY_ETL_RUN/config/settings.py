@@ -16,6 +16,20 @@ FIR_API_URL = os.environ.get("FIR_API_URL")
 COURT_API_URL = os.environ.get("COURT_API_URL")
 ACCUSED_DETAILS_API_URL = os.environ.get("ACCUSED_DETAILS_API_URL")
 ACCUSED_API_URL = os.environ.get("ACCUSED_API_URL")
+ALFRESCO_DOWNLOAD_API_URL = os.environ.get("ALFRESCO_DOWNLOAD_API_URL")
+
+# --- Media Storage Configuration ---
+MEDIA_BASE_DIR = os.environ.get("MEDIA_BASE_DIR", "/home/tganb/dopams/media_cctnsv1")
+try:
+    MEDIA_DOWNLOAD_CONCURRENCY = int(os.environ.get("MEDIA_DOWNLOAD_CONCURRENCY", "5"))
+except ValueError:
+    MEDIA_DOWNLOAD_CONCURRENCY = 5
+
+try:
+    MEDIA_DOWNLOAD_TIMEOUT_SECS = int(os.environ.get("MEDIA_DOWNLOAD_TIMEOUT_SECS", "60"))
+except ValueError:
+    MEDIA_DOWNLOAD_TIMEOUT_SECS = 60
+
 
 # --- Postgres (destination: cctns_v1 database on dopams-new) ---
 # PG_HOST has no default — missing .env must fail, not silently hit a LAN IP.

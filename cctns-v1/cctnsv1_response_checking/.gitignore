@@ -2,3 +2,5 @@ node_modules/
 .env
 *_records.json
 response/
+*.pdf
+

@@ -39,7 +39,9 @@ INIT_SQL_FILES = (
     "006_natural_key_cctns_accused.sql",
     "007_failed_fetch_window.sql",
     "008_audit_pii_redact.sql",
+    "009_create_media_files_table.sql",
 )
+
 
 _schema_applied = False
 
