@@ -435,7 +435,8 @@ def test_reconciliation_classifies_instead_of_hiding():
     assert classify_module(source_count=10, observed_count=4, collapse=True) == "UNRESOLVED"
     assert classify_module(source_count=10, observed_count=12, collapse=False) == "EXPECTED"
     assert classify_module(source_count=3, observed_count=3, collapse=True) == "EXPECTED"
-    assert classify_module(source_count=1, observed_count=0, collapse=False, defect=True) == "DEFECT"
+    assert classify_module(source_count=1, observed_count=0, collapse=False, defect=True) == "UNRESOLVED"
+    assert classify_module(source_count=10, observed_count=10, collapse=False, defect=True) == "MISMATCH"
 
 
 def test_run_log_success_failure_restart_and_interrupted():

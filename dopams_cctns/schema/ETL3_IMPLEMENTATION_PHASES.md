@@ -1,6 +1,8 @@
 # ETL-3 Implementation Phases
 
-Each phase is independently verifiable — it produces something that can be checked against live V1/V2 data before the next phase starts, and no phase requires writing to `cctns_v1` or `cctns-v2`. Phases 0–2 are prerequisites that exist outside ETL-3's own code. See `ETL3_MERGER_IMPLEMENTATION_PLAN.md` for the full reasoning behind each design decision referenced here, and `ETL3_UNIFIED_SCHEMA.sql` for the exact DDL.
+The phase numbers in this table are the original design sequence. They are not the phase numbers used to build `etl3/`. The delivered pipeline is Phases 0–6 in that directory, ending with the production-readiness audit. Phase 0.5 (locate the DOPAMS backend) is still open and blocks cutover, not ETL readiness.
+
+Each design phase below was written to be independently verifiable — it produces something that can be checked against live V1/V2 data before the next phase starts, and no phase requires writing to `cctns_v1` or `cctns-v2`. Phases 0–2 are prerequisites that exist outside ETL-3's own code. See `ETL3_MERGER_IMPLEMENTATION_PLAN.md` for the full reasoning behind each design decision referenced here, and `ETL3_UNIFIED_SCHEMA.sql` for the exact DDL.
 
 | Phase | Scope | Depends on | Verification before moving on | Status |
 |---|---|---|---|---|

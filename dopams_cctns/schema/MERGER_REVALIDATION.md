@@ -1,5 +1,7 @@
 # CCTNS V1 + V2 → Unified DOPAMS — Revalidated Merger Architecture
 
+This revalidation is a design record. Delivered ETL-3 behavior is in `etl3/`. `fsl_case_property` is observed and is not merged. V1 court ids and V2 charge-sheet update ids are namespaced in `chargesheets_unified` because the raw numbers collide. Current counts and statuses are in `etl3/docs/PHASE_6_PRODUCTION_READINESS.md`.
+
 **Purpose of this document:** the original merger analysis (`CCTNS_V1_vs_V2_Column_Comparison_Report.pdf` and `MERGER_DOSSIER.md`, plus the earlier `schema.sql`/`DESIGN.md` draft they both build on) was produced across several passes, some before the V1/V2 ETL audits reached their final state. This document re-walks every major assumption against the **current** code and **current** live data and states, explicitly, what still holds, what changed, and what the final architecture should be. It does not silently correct the earlier documents — they remain on disk, unedited, as the historical baseline.
 
 **Evidence tags:** `[CODE VERIFIED]` `[DATABASE VERIFIED]` `[LIVE API VERIFIED]` `[DOCUMENT VERIFIED]` `[INFERRED]` `[UNKNOWN]`.

@@ -1,27 +1,66 @@
 """Classify source → observation → unified differences.
 
 Classifications:
-  EXPECTED           counts agree, or a known collapse/retention explains them
-  KNOWN_SOURCE_GAP   an open source_gap_ledger row already accounts for the area
-  UNRESOLVED         a current source primary key has no observation
-  DEFECT             duplicate keys, duplicate gap keys, or a foreign-key miss
+  EXPECTED                 observation is complete, and the unified count is
+                           explainable (equal, or a documented logical collapse)
+  INTENTIONALLY_EXCLUDED   the module is captured and is not merged
+  UNRESOLVED               a current source key has no observation, or an
+                           observed row has no current-state row and no
+                           documented collapse
+  MISMATCH                 unified rows exceed the logical source population,
+                           or an integrity check failed
+  KNOWN_SOURCE_LIMITATION  an open gap whose cause is the source, not ETL-3
+
+Older rows may still say DEFECT or KNOWN_SOURCE_GAP. New rows use the names above.
 """
 from psycopg2.extras import execute_values
 
 from etl3.sync.catalog import MODULES
 
+# Open gap_type -> why it is open. An unknown type is an ETL defect so a new
+# gap cannot hide inside a known bucket.
+GAP_CLASS = {
+    "ora_06502_window": "KNOWN_SOURCE_LIMITATION",
+    "unresolved_record_key": "KNOWN_SOURCE_LIMITATION",
+    "v1_person_key_absent": "KNOWN_SOURCE_LIMITATION",
+    "fk_retry_capped": "KNOWN_SOURCE_LIMITATION",
+    "unlinked_accused": "KNOWN_SOURCE_LIMITATION",
+    "unlinked_persons_placeholder": "KNOWN_SOURCE_LIMITATION",
+    "address_unresolved": "DATA_QUALITY",
+    "unresolved_arrest_accused_link": "UNRESOLVED_RELATIONSHIP",
+    "unresolved_accused_person_link": "UNRESOLVED_RELATIONSHIP",
+    "unresolved_interrogation_person_link": "UNRESOLVED_RELATIONSHIP",
+    "unresolved_v1_ps_code": "UNRESOLVED_RELATIONSHIP",
+    "ambiguous_v1_ps_code": "UNRESOLVED_RELATIONSHIP",
+}
+
+
+def classify_gap(gap_type: str) -> str:
+    return GAP_CLASS.get(gap_type, "ETL_DEFECT")
+
 
 def classify_module(*, source_count: int, observed_count: int, collapse: bool, defect: bool = False,
-                    excluded: bool = False) -> str:
-    """excluded: the module is intentionally not merged into a unified table.
+                    excluded: bool = False, unified_count=None) -> str:
+    """A missing observation is UNRESOLVED even when the module is excluded.
 
-    A unified count below the source count is EXPECTED in that case. An
-    observation shortfall is still UNRESOLVED, because the source row was
-    not captured at all.
+    Exclusion applies only after the source row has been captured. A logical
+    collapse (V1 accused grouping) may leave unified below source. Unified
+    above that population is a MISMATCH. unified_count is optional so a
+    caller that only knows the observation counts is not forced to invent one.
     """
-    if defect and not excluded:
-        return "DEFECT"
     if observed_count < source_count:
+        return "UNRESOLVED"
+    if excluded:
+        return "INTENTIONALLY_EXCLUDED"
+    if defect:
+        return "MISMATCH"
+    if unified_count is None or collapse:
+        if unified_count is not None and unified_count > source_count:
+            return "MISMATCH"
+        return "EXPECTED"
+    if unified_count > source_count:
+        return "MISMATCH"
+    if unified_count < source_count:
         return "UNRESOLVED"
     return "EXPECTED"
 
@@ -39,9 +78,27 @@ def _observed_count(conn, spec) -> int:
         return cur.fetchone()[0]
 
 
+def _shares_unified_table(spec) -> bool:
+    fellows = [
+        other for other in MODULES
+        if other["unified_table"] == spec["unified_table"]
+        and other["source_system"] == spec["source_system"]
+        and not other.get("excluded_from_unified")
+    ]
+    return len(fellows) > 1
+
+
 def _unified_count(conn, spec) -> int:
     with conn.cursor() as cur:
-        if spec["has_source_system"]:
+        if _shares_unified_table(spec):
+            cur.execute(
+                f"""
+                SELECT count(*) FROM {spec['unified_table']}
+                WHERE source_system = %s AND source_module = %s
+                """,
+                (spec["source_system"], spec["module"]),
+            )
+        elif spec["has_source_system"]:
             cur.execute(
                 f"SELECT count(*) FROM {spec['unified_table']} WHERE source_system = %s",
                 (spec["source_system"],),
@@ -95,23 +152,24 @@ def reconcile(conn, source_counts: dict) -> list:
             observed_count=observed,
             collapse=spec["collapse"],
             excluded=spec.get("excluded_from_unified", False),
+            unified_count=unified,
         )
         rows.append((spec["source_system"], spec["source_table"], source_count, observed, unified,
                      source_count - observed, status))
     if defect:
-        rows.append(("V1", "__integrity__", 0, 0, 0, 0, "DEFECT"))
+        rows.append(("V1", "__integrity__", 0, 0, 0, 0, "MISMATCH"))
 
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT source_system, count(*)
+            SELECT source_system, gap_type, count(*)
             FROM source_gap_ledger
             WHERE status = 'OPEN'
-            GROUP BY source_system
+            GROUP BY source_system, gap_type
             """
         )
-        for system, open_gaps in cur.fetchall():
-            rows.append((system, "source_gap_ledger", open_gaps, open_gaps, open_gaps, 0, "KNOWN_SOURCE_GAP"))
+        for system, gap_type, open_gaps in cur.fetchall():
+            rows.append((system, f"gap:{gap_type}", open_gaps, open_gaps, open_gaps, 0, classify_gap(gap_type)))
 
     if rows:
         with conn.cursor() as cur:

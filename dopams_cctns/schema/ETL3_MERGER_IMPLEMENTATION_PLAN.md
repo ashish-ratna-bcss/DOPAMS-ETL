@@ -1,6 +1,11 @@
 # ETL-3: CCTNS Unified Merger ETL — Implementation Plan
 
-**Status: design only. No code has been written. No source database has been modified.** This document, plus its three companions (`ETL3_SOURCE_COMPATIBILITY_MATRIX.md`, `ETL3_UNIFIED_SCHEMA.sql`, `ETL3_RISK_REGISTER.md`, `ETL3_IMPLEMENTATION_PHASES.md`), is the complete design investigation requested before any ETL-3 implementation begins.
+**Status: design record, written before implementation.** ETL-3 has since been built in `etl3/`. Where this plan disagrees with the code or the live `dopams_cctns` database, the code and the Phase 6 readiness report win. Two corrections matter:
+
+- V1 `court_id` and V2 `charge_sheet_updates.id` are the same kind of small integer. They are not a safe global primary key. `chargesheets_unified.charge_sheet_id` is `{source_system}:{module}:{raw id}`.
+- `fsl_case_property` is observed and is not merged. Historical `fsl_unified` rows were not deleted.
+
+This document, plus its companions, remains the design investigation. It is not a claim that no code exists.
 
 **Evidence tags:** `[CODE VERIFIED]` `[DATABASE VERIFIED]` `[DOCUMENT VERIFIED]` `[INFERRED]` `[UNKNOWN]`.
 
@@ -72,10 +77,10 @@ If ETL-3 stops: V1 and V2 continue exactly as they do today (confirmed empirical
 | `persons_unified` | `cctns_accused_details` (person_code + identity fields) | `persons` | Direct field mapping | Candidate overlap only, via `identity_links`, never merged | Never auto-merged — see §9 |
 | `accused_unified` | `cctns_accused` (dossier) + `cctns_accused_details` | `accused` | Field mapping; V1's natural-key churn collapsed to current+history | 0 overlap at crime level | V1 stale-duplicate collapse (§10); V2 NULL-`person_id` rows kept, flagged unlinked, never dropped |
 | `arrests_unified` | fields embedded in `cctns_accused_details` | `arrests` | Synthesize V1 arrest sub-entity from dossier fields | 0 overlap | None beyond source-level (0 duplicates confirmed both sides) |
-| `chargesheets_unified` | `cctns_court` | `chargesheets` + `charge_sheet_updates` | V1 flat row split conceptually into chargesheet + its own lifecycle; V2 already split, both land in one unified table distinguished by `source_table` in `chargesheets_source` | 0 overlap | None |
+| `chargesheets_unified` | `cctns_court` | `chargesheets` + `charge_sheet_updates` | V1 flat row; V2 split. Both land in one table. The unified primary key is namespaced because V1 `court_id` and V2 update `id` collide as raw numbers. Case identity does not overlap. | 0 case overlap; raw ids collide | Namespace the primary key |
 | `seizures_unified` | drug fields embedded in `cctns_accused` dossier row | `mo_seizures` | Synthesize one seizure per V1 dossier row; V2 already one-to-many via its own table | 0 overlap | None |
 | `properties_unified` | — (no V1 equivalent) | `properties` | Direct | V2-exclusive | None |
-| `fsl_unified` | — (no V1 equivalent) | `fsl_case_property` | Direct | V2-exclusive | None |
+| `fsl_unified` | — (no V1 equivalent) | `fsl_case_property` | Observed only. Not merged. Historical unified rows, if present, are not deleted. | V2-exclusive, intentionally excluded | None |
 | `disposal_unified` | partially — `court_disposal_type`/`court_disposal_dt` fields fold into `chargesheets_unified`, not a separate V1 entity | `disposal` | Direct for V2; V1 has no standalone disposal entity | V2-exclusive as a separate table; V1's disposal concept lives inside its chargesheet row | None |
 | `interrogation_unified` | V1's 60 `INT_*` relative fields fold into `accused_source.payload` JSONB, not a separate entity | `interrogation_reports` | Direct for V2 | V2-exclusive as a standalone entity; V1's equivalent data is present but structurally embedded, not dropped | None |
 | `hierarchy_unified` | — (no V1 equivalent — V1 has no organizational hierarchy codes at all, confirmed in the original audit) | `hierarchy` | Direct | V2-exclusive | None |

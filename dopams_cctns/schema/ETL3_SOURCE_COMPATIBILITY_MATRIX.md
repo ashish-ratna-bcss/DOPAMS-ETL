@@ -1,5 +1,7 @@
 # ETL-3 Source Compatibility Matrix
 
+The row counts in this matrix are the design-time snapshot. They are not the current live counts. Current reconciliation is in `etl3/docs/PHASE_6_PRODUCTION_READINESS.md`.
+
 Table-by-table incremental-read analysis for both source databases, queried fresh this session against `information_schema` and the live data. Companion to `ETL3_MERGER_IMPLEMENTATION_PLAN.md`. Evidence tags: `[CODE VERIFIED]` `[DATABASE VERIFIED]` `[INFERRED]` `[UNKNOWN]`.
 
 ---

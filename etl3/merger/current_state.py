@@ -382,7 +382,7 @@ class UnifiedBatchWriter:
 def run_entity(conn, *, entity: str, unified_table: str, unified_pk_col: str,
                 source_table: str, source_system: str, field_map_entry: dict,
                 consolidation_run_id: str, source_table_filter: str = None,
-                extra_fields_fn=None) -> dict:
+                extra_fields_fn=None, pk_namespace: str = None) -> dict:
     """extra_fields_fn(payload) -> dict of relationship/computed columns
     (crime_id, person_id, unlinked_person_flag, ...) not covered by the
     plain field_map."""
@@ -397,6 +397,8 @@ def run_entity(conn, *, entity: str, unified_table: str, unified_pk_col: str,
         if not pk_value:
             skipped += 1
             continue
+        if pk_namespace:
+            pk_value = f"{pk_namespace}:{pk_value}"
         mapped = apply_field_map(payload, field_map)
         extra = extra_fields_fn(payload) if extra_fields_fn else {}
         current_as_of = source_modified_at or source_created_at

@@ -38,9 +38,9 @@ def test_fsl_is_excluded_from_unified_merge():
     assert "fsl_unified" not in [item[1] for item in UNIFIED_V2_ONLY]
     spec = next(item for item in MODULES if item["module"] == "fsl_case_property")
     assert spec["excluded_from_unified"] is True
-    assert classify_module(source_count=2009, observed_count=2009, collapse=False, excluded=True) == "EXPECTED"
+    assert classify_module(source_count=2006, observed_count=2006, collapse=False, excluded=True, unified_count=2006) == "INTENTIONALLY_EXCLUDED"
     assert classify_module(source_count=10, observed_count=9, collapse=False, excluded=True) == "UNRESOLVED"
-    assert classify_module(source_count=10, observed_count=10, collapse=False, excluded=True, defect=True) == "EXPECTED"
+    assert classify_module(source_count=10, observed_count=10, collapse=False, excluded=True, defect=True) == "INTENTIONALLY_EXCLUDED"
 
 
 def test_ps_normalization_and_exact_district_match():

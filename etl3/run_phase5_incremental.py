@@ -27,7 +27,7 @@ from etl3.db import connections
 from etl3.loaders import v1_observations as v1obs
 from etl3.loaders import v2_observations as v2obs
 from etl3.run_phase4_consolidation import _consolidate, run_with_run_log
-from etl3.sync.catalog import MODULES
+from etl3.sync.catalog import MODULES, registry_gap
 from etl3.sync.catchup import catch_up_all
 from etl3.sync.cursor import known_run_ids
 from etl3.sync.gaps import copy_source_gaps
@@ -54,6 +54,10 @@ def _mark_cursors_running(conn):
 
 
 def run_incremental(conn):
+    missing, extra = registry_gap()
+    if missing or extra:
+        raise RuntimeError(f"module registry does not match the adapters: missing={missing} extra={extra}")
+
     def work(conn, run_id, progress):
         gaps = copy_source_gaps(conn)
         conn.commit()

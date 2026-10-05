@@ -1,6 +1,8 @@
 # ETL-3 Risk Register
 
-Every risk identified across the full merger-planning effort (original dossier, revalidation, and this ETL-3 design pass), re-stated in the required format. Risks R1–R10 are carried from `MERGER_DOSSIER.md` §26 and `MERGER_REVALIDATION.md` §25; R11 onward are new to this ETL-3 design pass. None of these have been mitigated in code yet — this is a planning document.
+Every risk identified across the full merger-planning effort (original dossier, revalidation, and this ETL-3 design pass), re-stated in the required format. Risks R1–R10 are carried from `MERGER_DOSSIER.md` §26 and `MERGER_REVALIDATION.md` §25; R11 onward are new to this ETL-3 design pass.
+
+The status column below is the design-time status. It is not the Phase 6 status. In the delivered ETL: identity links stay `candidate` (R1); source writes are rejected by a read-only session (R12); V1 run identity uses the row-action join (R11); FSL is excluded from the unified merge (R14 is an observation, not a unified defect). DOPAMS backend location (R5/R8) is still unresolved and is a cutover blocker, not an ETL blocker. See `etl3/docs/PHASE_6_PRODUCTION_READINESS.md`.
 
 | # | Risk | Evidence | Impact | Mitigation | Verification method | Status |
 |---|---|---|---|---|---|---|

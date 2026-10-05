@@ -51,6 +51,20 @@ MODULES = [
 ]
 
 
+def registry_gap():
+    """Adapter modules with no catalog row, and catalog rows with no adapter.
+
+    Reconciliation and catch-up walk MODULES. A module that exists only on
+    an adapter would be read by nothing and would not appear as a gap.
+    """
+    from etl3.sources.v1.adapter import MODULE_TABLE
+    from etl3.sources.v2.adapter import MODULE_PK
+
+    adapters = {("V1", name) for name in MODULE_TABLE} | {("V2", name) for name in MODULE_PK}
+    catalog = {(item["source_system"], item["module"]) for item in MODULES}
+    return sorted(adapters - catalog), sorted(catalog - adapters)
+
+
 def adapter_for(source_system: str):
     if source_system == "V1":
         from etl3.sources.v1.adapter import V1Adapter

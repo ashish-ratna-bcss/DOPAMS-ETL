@@ -222,8 +222,9 @@ CREATE TABLE arrests_unified (
 );
 
 CREATE TABLE chargesheets_unified (
-    charge_sheet_id         VARCHAR(100) PRIMARY KEY,
+    charge_sheet_id         VARCHAR(100) PRIMARY KEY,  -- '{source_system}:{source_module}:{raw id}', not the raw id
     source_system          VARCHAR(2) NOT NULL CHECK (source_system IN ('V1','V2')),
+    source_module          VARCHAR(100),              -- court | chargesheets | charge_sheet_updates
     source_record_id       VARCHAR(100) NOT NULL,
     crime_id               VARCHAR(100) NOT NULL REFERENCES crimes_unified(crime_id),
     chargesheet_no           VARCHAR(50),
@@ -238,7 +239,7 @@ CREATE TABLE chargesheets_unified (
     current_source_run_id       VARCHAR(100) NOT NULL,
     current_as_of              TIMESTAMPTZ NOT NULL,
     computed_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (source_system, source_record_id)
+    UNIQUE (source_system, source_module, source_record_id)
 );
 CREATE INDEX idx_chargesheets_unified_crime ON chargesheets_unified(crime_id);
 
@@ -435,7 +436,7 @@ CREATE TABLE reconciliation_run_log (
     observed_count        INT NOT NULL,                    -- rows in the corresponding *_source table for this source
     unified_count         INT NOT NULL,                    -- rows in the corresponding *_unified table
     delta               INT NOT NULL,
-    status              VARCHAR(20) NOT NULL              -- 'ok' | 'delta_within_tolerance' | 'delta_alert'
+    status              VARCHAR(40) NOT NULL              -- EXPECTED | UNRESOLVED | MISMATCH | INTENTIONALLY_EXCLUDED | KNOWN_SOURCE_LIMITATION | DATA_QUALITY | UNRESOLVED_RELATIONSHIP | ETL_DEFECT
 );
 
 

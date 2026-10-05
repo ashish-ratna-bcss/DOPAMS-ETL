@@ -21,6 +21,7 @@ from etl3.db import connections
 from etl3.loaders import common
 from etl3.merger import current_state as cs
 from etl3.merger import field_maps
+from etl3.sync.run_lock import ConcurrentRunError, acquire, release
 
 
 def _crime_id_v1(payload):
@@ -57,6 +58,14 @@ UNIFIED_V2_ONLY = (
 )
 
 
+def _with_source_module(base, module):
+    def fn(payload):
+        fields = dict(base(payload) if base else {})
+        fields["source_module"] = module
+        return fields
+    return fn
+
+
 def run_with_run_log(conn, work):
     """
     Open a consolidation_run_log row, run work, then mark it success.
@@ -66,7 +75,26 @@ def run_with_run_log(conn, work):
     raises, the same row is marked failed (after rolling back the aborted
     transaction) and the exception is re-raised. A clean return is never
     marked failed.
+
+    A second call while one run holds the unified session lock raises
+    ConcurrentRunError and does not open a run-log row.
     """
+    if not acquire(conn):
+        raise ConcurrentRunError("another ETL-3 consolidation run already holds the lock")
+    try:
+        return _run_with_run_log(conn, work)
+    finally:
+        try:
+            release(conn)
+        except Exception:
+            try:
+                conn.rollback()
+                release(conn)
+            except Exception:
+                pass
+
+
+def _run_with_run_log(conn, work):
     run_id = common.start_consolidation_run(conn)
     conn.commit()
     # A hard stop cannot run the except handler below. The next run closes
@@ -214,20 +242,25 @@ def _consolidate(conn, run_id, progress):
     conn.commit()
 
     # --- chargesheets (depends on crimes only) ---
+    # The primary key is source-system and module, not the raw id. V1 court
+    # ids and V2 charge-sheet update ids use the same numbers.
     report("chargesheets[V1]", cs.run_entity(conn, entity="chargesheet", unified_table="chargesheets_unified",
            unified_pk_col="charge_sheet_id", source_table="chargesheets_source", source_system="V1",
            field_map_entry=field_maps.CHARGESHEETS["V1"], consolidation_run_id=run_id,
-           extra_fields_fn=_crime_id_v1))
-    conn.commit()
+           extra_fields_fn=_with_source_module(_crime_id_v1, "court"),
+           pk_namespace="V1:court"))
     report("chargesheets[V2:chargesheets]", cs.run_entity(conn, entity="chargesheet", unified_table="chargesheets_unified",
            unified_pk_col="charge_sheet_id", source_table="chargesheets_source", source_system="V2",
            source_table_filter="chargesheets", field_map_entry=field_maps.CHARGESHEETS["V2:chargesheets"],
-           consolidation_run_id=run_id, extra_fields_fn=_crime_id_v2))
-    conn.commit()
+           consolidation_run_id=run_id,
+           extra_fields_fn=_with_source_module(_crime_id_v2, "chargesheets"),
+           pk_namespace="V2:chargesheets"))
     report("chargesheets[V2:charge_sheet_updates]", cs.run_entity(conn, entity="chargesheet", unified_table="chargesheets_unified",
            unified_pk_col="charge_sheet_id", source_table="chargesheets_source", source_system="V2",
            source_table_filter="charge_sheet_updates", field_map_entry=field_maps.CHARGESHEETS["V2:charge_sheet_updates"],
-           consolidation_run_id=run_id, extra_fields_fn=_crime_id_v2))
+           consolidation_run_id=run_id,
+           extra_fields_fn=_with_source_module(_crime_id_v2, "charge_sheet_updates"),
+           pk_namespace="V2:charge_sheet_updates"))
     conn.commit()
 
     # --- seizures (depends on crimes only) ---
