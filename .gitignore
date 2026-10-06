@@ -44,3 +44,6 @@ build/
 # Misc
 .temp
 *.log
+testing_UI/server/cache/
+cache/
+
