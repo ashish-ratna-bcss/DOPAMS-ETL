@@ -44,14 +44,16 @@ const fs = require('fs');
 const buildPath = path.join(__dirname, '..', 'build');
 if (fs.existsSync(buildPath)) {
   app.use(express.static(buildPath));
-  app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api')) {
-      res.sendFile(path.join(buildPath, 'index.html'));
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api')) {
+      return res.sendFile(path.join(buildPath, 'index.html'));
     }
+    next();
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`🚀 CCTNS API Bridge running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 CCTNS API Bridge running on http://0.0.0.0:${PORT}`);
 });
+
 
