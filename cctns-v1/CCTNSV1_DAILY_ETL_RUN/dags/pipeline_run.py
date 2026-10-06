@@ -16,8 +16,9 @@ A separate local log file would just be a third copy of the same
 information, so there isn't one.
 
 Runnable standalone for testing:
-    python dags/pipeline_run.py simple
-    python dags/pipeline_run.py accused
+    python dags/pipeline_run.py cycle     # full daily cycle (the only success marker)
+    python dags/pipeline_run.py simple    # FIR + court + accused_details, marker withheld
+    python dags/pipeline_run.py accused   # accused only, marker withheld
 
 Current upsert-ready status per entity (see db/sql/001_schema_fix.sql):
     fir              -- ready (real PK, 0 duplicates)
@@ -29,7 +30,6 @@ written to Postgres -- see pipeline.md.
 """
 import os
 import sys
-import uuid
 import logging
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,6 +49,8 @@ from db.failed_windows import (  # noqa: E402
     record_open_failed_windows,
     resolve_windows_not_failing,
 )
+from db.cycle_log import SqlCycleLog  # noqa: E402
+from db.orchestrate_cycle import orchestrate_daily_cycle, orchestrate_partial_cycle  # noqa: E402
 from db.run_lock import EntityRunLock  # noqa: E402
 from db.run_log import abandon_stale_running, finish_entity_run, start_entity_run  # noqa: E402
 from db.upsert import upsert_records  # noqa: E402
@@ -96,21 +98,71 @@ def _sync_failed_window_ledger(cur, entity: str, run_id: str, windows: list) -> 
     resolve_windows_not_failing(cur, entity, run_id, windows)
 
 
-def run_single_entity(entity_key: str) -> dict:
-    """Run one API entity (used by per-task Airflow operators)."""
+def _execute_entity(entity_key: str, run_id: str) -> dict:
+    """Run one entity under the caller's cycle lock. Does not write the cycle marker."""
     registry = {**SIMPLE_ENTITIES, **ACCUSED_YEARLY_ENTITY}
     if entity_key not in registry:
         raise KeyError(f"Unknown entity: {entity_key}")
-    run_id = str(uuid.uuid4())
     logger.info("=== entity=%s run_id=%s ===", entity_key, run_id)
     conn = get_connection()
     try:
-        summary = _run_entities({entity_key: registry[entity_key]}, run_id, conn)
-        result = summary[entity_key]
+        with EntityRunLock(entity_key):
+            result = _run_one_entity(entity_key, registry[entity_key], run_id, conn)
         logger.info("=== entity=%s result=%s ===", entity_key, result)
         return result
     finally:
         conn.close()
+
+
+def _open_cycle_log() -> SqlCycleLog:
+    return SqlCycleLog(get_connection())
+
+
+def run_daily_cycle() -> dict:
+    """FIR, then court and accused details together, then accused. One run_id."""
+    log_holder: dict = {}
+
+    def open_log() -> SqlCycleLog:
+        log = _open_cycle_log()
+        log_holder["log"] = log
+        return log
+
+    try:
+        return orchestrate_daily_cycle(execute_entity=_execute_entity, open_log=open_log)
+    finally:
+        log = log_holder.get("log")
+        if log is not None:
+            log.conn.close()
+
+
+def run_partial_cycle(entity_names: tuple[str, ...]) -> dict:
+    """Same cycle lock and one run_id. Never writes the success marker."""
+    log_holder: dict = {}
+
+    def open_log() -> SqlCycleLog:
+        log = _open_cycle_log()
+        log_holder["log"] = log
+        return log
+
+    try:
+        return orchestrate_partial_cycle(
+            entity_names,
+            execute_entity=_execute_entity,
+            open_log=open_log,
+        )
+    finally:
+        log = log_holder.get("log")
+        if log is not None:
+            log.conn.close()
+
+
+def run_single_entity(entity_key: str) -> dict:
+    """One entity under the daily-cycle lock. Does not complete a cycle."""
+    summary = run_partial_cycle((entity_key,))
+    result = summary["entities"].get(entity_key)
+    if result is None:
+        raise RuntimeError(summary["reason"])
+    return result
 
 
 def _run_entities(entities: dict, run_id: str, conn) -> dict:
@@ -362,41 +414,30 @@ def _run_one_entity(entity: str, cfg: dict, run_id: str, conn) -> dict:
 
 
 def run_simple_apis():
-    """FIR, Court, Accused Details -- 3 plain unfiltered-GET endpoints."""
-    run_id = str(uuid.uuid4())
-    logger.info("=== Starting simple-APIs run_id=%s (fir, court, accused_details) ===", run_id)
-    conn = get_connection()
-    try:
-        summary = _run_entities(SIMPLE_ENTITIES, run_id, conn)
-    finally:
-        conn.close()
-    logger.info("=== simple-APIs run %s complete ===", run_id)
-    for entity, result in summary.items():
-        logger.info("  %-16s %s", entity, result)
-    return run_id, summary
+    """FIR, Court, Accused Details under the cycle lock. Success marker withheld."""
+    summary = run_partial_cycle(("fir", "court", "accused_details"))
+    logger.info("=== simple-APIs run %s status=%s ===", summary["run_id"], summary["status"])
+    return summary
 
 
 def run_accused_yearly():
-    """Accused date-range endpoint only -- 7-day chunks + adaptive halving."""
-    run_id = str(uuid.uuid4())
-    logger.info("=== Starting accused-yearly run_id=%s (accused date-range) ===", run_id)
-    conn = get_connection()
-    try:
-        summary = _run_entities(ACCUSED_YEARLY_ENTITY, run_id, conn)
-    finally:
-        conn.close()
-    logger.info("=== accused-yearly run %s complete ===", run_id)
-    for entity, result in summary.items():
-        logger.info("  %-16s %s", entity, result)
-    return run_id, summary
+    """Accused only, under the cycle lock. Success marker withheld."""
+    summary = run_partial_cycle(("accused",))
+    logger.info("=== accused-yearly run %s status=%s ===", summary["run_id"], summary["status"])
+    return summary
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "simple"
-    if mode == "simple":
-        run_simple_apis()
+    mode = sys.argv[1] if len(sys.argv) > 1 else "cycle"
+    if mode == "cycle":
+        result = run_daily_cycle()
+    elif mode == "simple":
+        result = run_simple_apis()
     elif mode == "accused":
-        run_accused_yearly()
+        result = run_accused_yearly()
     else:
-        print("Usage: python dags/pipeline_run.py [simple|accused]")
+        print("Usage: python dags/pipeline_run.py [cycle|simple|accused]")
+        sys.exit(1)
+    logger.info("cycle result %s", result)
+    if result.get("status") == "failed":
         sys.exit(1)

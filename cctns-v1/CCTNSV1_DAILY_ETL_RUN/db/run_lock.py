@@ -1,7 +1,6 @@
 """Process-level locks so the same CCTNS V1 entity cannot extract concurrently."""
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 from types import TracebackType
@@ -28,6 +27,8 @@ class EntityRunLock:
         os.makedirs(os.path.dirname(self.path) or "/tmp", exist_ok=True)
         self._fh = open(self.path, "w", encoding="utf-8")
         try:
+            import fcntl
+
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             self._fh.close()
@@ -50,6 +51,8 @@ class EntityRunLock:
         if self._fh is None:
             return
         try:
+            import fcntl
+
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
         finally:
             self._fh.close()

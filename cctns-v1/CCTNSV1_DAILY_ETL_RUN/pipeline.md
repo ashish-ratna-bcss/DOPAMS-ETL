@@ -1,6 +1,6 @@
 # CCTNS V1 Daily ETL — full overview
 
-Nightly pipeline: pull data from **CCTNS V1 HTTP APIs & Alfresco Media**, load into **PostgreSQL** on **dopams-new**, orchestrated by **Apache Airflow 2.10** (three DAGs).
+Nightly pipeline: pull data from **CCTNS V1 HTTP APIs & Alfresco Media**, load into **PostgreSQL** on **dopams-new**, orchestrated by **Apache Airflow 2.10**. One data DAG runs the daily cycle. Media is a separate DAG and is not part of the cycle-success marker.
 
 - **DAG behavior and task graphs:** [`dags/README.md`](dags/README.md)  
 - **Deploy, PM2, Airflow UI:** [`deploy/README.md`](deploy/README.md)
@@ -9,9 +9,8 @@ Nightly pipeline: pull data from **CCTNS V1 HTTP APIs & Alfresco Media**, load i
 
 | DAG | **IST (India)** | UTC (Airflow cron) | Why |
 |-----|-----------------|---------------------|-----|
-| `cctns_v1_daily_sync_fir_court_accused_details` | **00:30** | `0 19 * * *` | Fast 3× GET; FIR loads first for FK checks |
-| `cctns_v1_daily_sync_accused_dossier` | **01:30** | `0 20 * * *` | Long date-range POST; **1 hour after** simple APIs |
-| `cctns_v1_daily_sync_media_attachments` | **05:00** | `30 23 * * *` | Downloads new FIR & Court document PDFs to disk |
+| `cctns_v1_daily_cycle` | **00:30, 06:30, 12:30, 18:30** | `0 1,7,13,19 * * *` | One lock and one `run_id` per cycle: FIR, then court + accused details, then accused. The next tick waits while a cycle is still running. Marker only after all four succeed |
+| `cctns_v1_daily_sync_media_attachments` | **05:00** | `30 23 * * *` | Downloads new FIR & Court document PDFs to disk. Outside the ETL-3 V1 gate |
 
 
 
@@ -336,7 +335,7 @@ flowchart TB
 2. Review ambiguous groups (query at top of **`db/sql/001_schema_fix.sql`**).
 3. Finalize **`natural_key`** expressions in that file; uncomment and run the migration.
 4. In **`dags/pipeline_run.py`**, set `"upsert_ready": True` for `court`, `accused_details`, and/or `accused`.
-5. Trigger DAGs or wait for **00:30 IST** (simple) / **01:30 IST** (accused); verify counts in `cctns_*` and task logs.
+5. Trigger `cctns_v1_daily_cycle` or wait for the next 6-hour slot (**00:30, 06:30, 12:30, or 18:30 IST**); verify that cycle's `cctns_v1_etl_cycle` row is `succeeded` and counts in `cctns_*`.
 
 ---
 
@@ -359,7 +358,7 @@ flowchart TB
 |----------|-----|
 | Full pull every night | API has no trusted incremental cursor |
 | Upsert with `IS DISTINCT FROM` | Avoid spurious writes and manual diff code |
-| Two DAGs | Accused POST is slow and failure-prone; do not block FIR |
+| One data DAG | Accused still runs after FIR, court, and accused details, under one cycle lock, so a partial night cannot look complete |
 | Fetch-only until keys reviewed | Wrong `natural_key` would merge distinct people (see `001_schema_fix.sql` header) |
 | Same DB for ETL + Airflow | Simpler ops on dopams-new; separated by **schema** |
 | `.env` at project root | Airflow task subprocesses always see API URLs and Postgres creds |

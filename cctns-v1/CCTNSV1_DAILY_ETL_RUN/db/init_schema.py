@@ -40,6 +40,7 @@ INIT_SQL_FILES = (
     "007_failed_fetch_window.sql",
     "008_audit_pii_redact.sql",
     "009_create_media_files_table.sql",
+    "010_etl_cycle.sql",
 )
 
 
