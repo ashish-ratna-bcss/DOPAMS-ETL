@@ -1,4 +1,4 @@
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:5001/api';
+const API_BASE = process.env.REACT_APP_API_BASE || '/api';
 
 async function request(endpoint, options = {}) {
   const url = `${API_BASE}${endpoint}`;
@@ -35,10 +35,8 @@ export const api = {
   getV1FirDetail: (fir_reg_num) => request(`/v1/fir/${encodeURIComponent(fir_reg_num)}`),
   getV1Districts: () => request('/v1/districts'),
   getV1MediaPdfUrl: (attach_path, dms_file_name, download = false) => {
-    const host = window.location.hostname || 'localhost';
-    const base = process.env.REACT_APP_API_BASE || `http://${host}:5001/api`;
     const dl = download ? '&download=1' : '';
-    return `${base}/v1/media/pdf?path=${encodeURIComponent(attach_path)}&name=${encodeURIComponent(dms_file_name)}${dl}`;
+    return `${API_BASE}/v1/media/pdf?path=${encodeURIComponent(attach_path)}&name=${encodeURIComponent(dms_file_name)}${dl}`;
   },
 
   // V2 API
@@ -52,13 +50,12 @@ export const api = {
   // Media
   getMediaInfo: (file_id) => request(`/media/info/${encodeURIComponent(file_id)}`),
   getMediaStreamUrl: (file_id) => {
-    const host = window.location.hostname || 'localhost';
-    const base = process.env.REACT_APP_API_BASE || `http://${host}:5001/api`;
-    return `${base}/media/stream/${encodeURIComponent(file_id)}`;
+    return `${API_BASE}/media/stream/${encodeURIComponent(file_id)}`;
   },
 
   // Cross Compare
   getCompare: (query) => request(`/compare/${encodeURIComponent(query)}`),
 };
+
 
 export default api;
