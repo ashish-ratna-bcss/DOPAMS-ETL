@@ -1,13 +1,13 @@
-"""Run one ETL-3 incremental pass after the latest V1 cycle and a successful V2 run.
+"""Run one ETL-3 incremental pass after the V1 and V2 cycles for the same slot.
 
-V1 cycles start every 6 hours at 00:30, 06:30, 12:30, and 18:30 IST. ETL-3
-uses the latest cycle that started in the current or previous slot. That
-cycle must be succeeded, and its four entity rows must share its run_id.
-The media DAG is ignored.
+V1 and V2 each start on the fixed clock 00:00, 06:00, 12:00, and 18:00 IST.
+ETL-3 runs slot N only when that slot's V1 cycle and that slot's V2 cycle
+have both succeeded. The checker starts the pass on its next look; there is
+no extra delay. A success from another slot is not reused. Media is ignored.
 
-V2 is ready when master_etl.py is not running and LAST_RUN in the V2 env file
-is on or after the current slot's date. LAST_RUN moves only after a full
-successful master_etl.py run.
+V2 success for a slot is that slot's master.log LAST_RUN persist line.
+LAST_RUN in the V2 env file must also be on or after the slot date. Neither
+signal is written by a failed or partial V2 run.
 
 A success that started after that V1 marker does not run again for the same
 marker. Pass --check to print the decision without starting ETL-3.
@@ -27,7 +27,7 @@ from dotenv import dotenv_values
 
 from etl3.config import settings
 from etl3.db import connections
-from etl3.source_readiness import IST, judge
+from etl3.source_readiness import IST, discover_v2_runs, judge
 
 
 def process_commands():
@@ -40,18 +40,18 @@ def process_commands():
     return result.stdout
 
 
-def latest_v1_cycle(conn, boundary):
+def recent_v1_cycles(conn, floor):
     try:
-        return _latest_v1_cycle(conn, boundary)
+        return _recent_v1_cycles(conn, floor)
     except Exception as exc:
         # 42P01 undefined_table: schema migration has not created the cycle marker yet.
         if getattr(exc, "pgcode", None) != "42P01":
             raise
         conn.rollback()
-        return None, []
+        return [], {}
 
 
-def _latest_v1_cycle(conn, boundary):
+def _recent_v1_cycles(conn, floor):
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -59,40 +59,42 @@ def _latest_v1_cycle(conn, boundary):
             FROM cctns.cctns_v1_etl_cycle
             WHERE started_at >= %s
             ORDER BY started_at DESC
-            LIMIT 1
             """,
-            (boundary,),
+            (floor,),
         )
-        row = cur.fetchone()
-    if row is None:
-        return None, []
-    cycle = {
-        "run_id": row[0],
-        "status": row[1],
-        "started_at": row[2],
-        "finished_at": row[3],
-        "cycle_start": row[4],
-    }
+        cycles = [
+            {
+                "run_id": run_id,
+                "status": status,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "cycle_start": cycle_start,
+            }
+            for run_id, status, started_at, finished_at, cycle_start in cur.fetchall()
+        ]
+    if not cycles:
+        return [], {}
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT entity, status, started_at, finished_at, run_id::text
             FROM cctns.cctns_v1_etl_run_log
-            WHERE run_id = %s
+            WHERE run_id::text = ANY(%s)
             """,
-            (cycle["run_id"],),
+            ([cycle["run_id"] for cycle in cycles],),
         )
-        entities = [
-            {
-                "entity": entity,
-                "status": status,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "run_id": run_id,
-            }
-            for entity, status, started_at, finished_at, run_id in cur.fetchall()
-        ]
-    return cycle, entities
+        by_run: dict[str, list] = {}
+        for entity, status, started_at, finished_at, run_id in cur.fetchall():
+            by_run.setdefault(run_id, []).append(
+                {
+                    "entity": entity,
+                    "status": status,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "run_id": run_id,
+                }
+            )
+    return cycles, by_run
 
 
 def read_v2_last_run() -> str | None:
@@ -101,19 +103,24 @@ def read_v2_last_run() -> str | None:
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
-def etl3_already_ran(conn, finished_at):
+def etl3_successes_since(conn, floor):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT run_id::text, started_at
+            SELECT started_at
             FROM consolidation_run_log
             WHERE status = 'success' AND started_at >= %s
             ORDER BY started_at DESC
-            LIMIT 1
             """,
-            (finished_at,),
+            (floor,),
         )
-        return cur.fetchone()
+        return [row[0] for row in cur.fetchall()]
+
+
+def v2_log_roots() -> list[Path]:
+    roots = [Path(settings.V2_SOURCE_ENV_PATH).resolve().parent / "etl_master" / "logs"]
+    roots.append(Path("/logs"))
+    return roots
 
 
 def collect_snapshot(now=None, commands=None):
@@ -125,26 +132,23 @@ def collect_snapshot(now=None, commands=None):
     floor = cycle_boundary(now)
     v1 = connections.get_v1_source_connection()
     try:
-        cycle, entities = latest_v1_cycle(v1, floor)
+        cycles, entities_by_run_id = recent_v1_cycles(v1, floor)
     finally:
         v1.close()
 
-    prior_started = None
-    if cycle and cycle.get("finished_at") is not None:
-        unified = connections.get_unified_connection(readonly=True)
-        try:
-            prior = etl3_already_ran(unified, cycle["finished_at"])
-        finally:
-            unified.close()
-        if prior:
-            prior_started = prior[1]
+    unified = connections.get_unified_connection(readonly=True)
+    try:
+        successes = etl3_successes_since(unified, floor)
+    finally:
+        unified.close()
     return {
         "now": now,
         "commands": commands,
-        "cycle": cycle,
-        "entities": entities,
+        "cycles": cycles,
+        "entities_by_run_id": entities_by_run_id,
+        "v2_runs": discover_v2_runs(v2_log_roots()),
         "v2_last_run": read_v2_last_run(),
-        "etl3_prior_started_at": prior_started,
+        "etl3_successes": successes,
     }
 
 

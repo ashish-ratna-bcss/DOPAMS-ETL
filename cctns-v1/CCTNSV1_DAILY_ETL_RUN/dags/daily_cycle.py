@@ -2,7 +2,7 @@
 One CCTNS V1 data cycle, every 6 hours.
 
 Airflow DAG id: cctns_v1_daily_cycle
-Schedule: 00:30, 06:30, 12:30, 18:30 IST (cron 0 1,7,13,19 * * * UTC)
+Schedule: 00:00, 06:00, 12:00, 18:00 IST (cron 30 0,6,12,18 * * * UTC)
 
 The task holds one cycle lock and one run_id:
     FIR, then Court and Accused Details together, then Accused.
@@ -38,7 +38,7 @@ CYCLE_ATTEMPT_TIMEOUT = timedelta(hours=12)
 CYCLE_DAGRUN_TIMEOUT = timedelta(hours=37)
 
 DAG_DOC = """
-## CCTNS V1 — one data cycle every 6 hours (**00:30, 06:30, 12:30, 18:30 IST**)
+## CCTNS V1 — one data cycle every 6 hours (**00:00, 06:00, 12:00, 18:00 IST**)
 
 | Step | Entities | Rule |
 |------|----------|------|
@@ -56,7 +56,7 @@ its own `run_id` and marker. Media is a separate DAG and is not part of the mark
 @dag(
     dag_id=DAG_ID_DAILY_CYCLE,
     description=(
-        "Every 6 hours from 00:30 IST: one CCTNS V1 cycle "
+        "Every 6 hours from 00:00 IST: one CCTNS V1 cycle "
         "(FIR, then court + accused details, then accused)"
     ),
     schedule=SCHEDULE_DAILY_CYCLE,

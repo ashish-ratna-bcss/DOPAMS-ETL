@@ -15,8 +15,9 @@ DONE_STATUSES = frozenset({"loaded", "loaded_with_known_gaps"})
 CYCLE_SUCCEEDED = "succeeded"
 
 
-# Same 6-hour cadence the V2 orchestrator is operated on. V1 keeps the
-# existing 00:30 IST anchor, so the slots are 00:30, 06:30, 12:30, 18:30 IST.
+# Fixed clock, shared with the V2 operating cadence the gate matches against.
+# Slots are 00:00, 06:00, 12:00, and 18:00 IST. A late finish does not move
+# the next slot: the slot is always the clock hour that contains the start.
 CYCLE_SLOT = timedelta(hours=6)
 _SLOT_HOURS = (0, 6, 12, 18)
 
@@ -30,16 +31,20 @@ def _as_ist_now(now: datetime) -> datetime:
 
 
 def cycle_slot_start(now: datetime) -> datetime:
-    """Start of the 6-hour slot that contains `now` (minute 30)."""
+    """Start of the fixed 6-hour slot that contains `now`.
+
+    The grid is 00:00, 06:00, 12:00, 18:00 IST. Completion time does not
+    move the next boundary.
+    """
     now = _as_ist_now(now)
     candidate = None
     for hour in _SLOT_HOURS:
-        slot = now.replace(hour=hour, minute=30, second=0, microsecond=0)
+        slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
         if slot <= now:
             candidate = slot
     if candidate is None:
-        # Before 00:30, the open slot started at 18:30 the previous evening.
-        candidate = (now - timedelta(days=1)).replace(hour=18, minute=30, second=0, microsecond=0)
+        # Before 00:00, the open slot started at 18:00 the previous evening.
+        candidate = (now - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
     return candidate
 
 
@@ -92,7 +97,7 @@ def assess_entity_rows(rows: list[dict], run_id: str, boundary: datetime) -> tup
         except ValueError as exc:
             return False, str(exc)
         if started < boundary:
-            return False, f"V1 {entity} started before the previous 6-hour slot"
+            return False, f"V1 {entity} started before this 6-hour slot"
         if finished < started:
             return False, f"V1 {entity} finished before it started"
         row["_started"] = started
@@ -135,7 +140,7 @@ def assess_cycle_marker(cycle: dict | None, rows: list[dict], boundary: datetime
     except ValueError as exc:
         return False, str(exc)
     if cycle_start < boundary or started < boundary:
-        return False, "V1 cycle started before the previous 6-hour slot"
+        return False, "V1 cycle started before this 6-hour slot"
     if finished < started:
         return False, "V1 cycle marker finished before it started"
     return assess_entity_rows(rows, str(run_id), boundary)
@@ -162,3 +167,30 @@ def pick_latest_cycle(cycles: list[dict], floor: datetime) -> dict | None:
     if not eligible:
         return None
     return max(eligible, key=lambda cycle: _as_ist(cycle["started_at"]))
+
+
+def latest_cycle_for_slot(cycles: list[dict], slot: datetime) -> dict | None:
+    """Latest cycle whose own start falls in `slot`. Status is not filtered.
+
+    A newer failure in this slot wins over an older success in this slot.
+    A success from another slot is not eligible.
+    """
+    slot = cycle_slot_start(slot)
+    chosen = None
+    chosen_started = None
+    for cycle in cycles:
+        anchor = cycle.get("cycle_start") or cycle.get("started_at")
+        started = cycle.get("started_at")
+        if anchor is None or started is None:
+            continue
+        try:
+            anchor_ist = _as_ist(anchor)
+            started_ist = _as_ist(started)
+        except ValueError:
+            continue
+        if cycle_slot_start(anchor_ist) != slot:
+            continue
+        if chosen_started is None or started_ist >= chosen_started:
+            chosen = cycle
+            chosen_started = started_ist
+    return chosen

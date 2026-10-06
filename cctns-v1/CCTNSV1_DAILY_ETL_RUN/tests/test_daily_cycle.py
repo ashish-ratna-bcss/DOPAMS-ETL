@@ -299,8 +299,8 @@ class CycleOrchestratorTests(unittest.TestCase):
         self.assertEqual(first["status"], "succeeded")
         self.assertEqual(second["status"], "succeeded")
         self.assertNotEqual(first["run_id"], second["run_id"])
-        self.assertEqual(log1.cycle["cycle_start"], datetime(2026, 10, 6, 0, 30, tzinfo=IST))
-        self.assertEqual(log2.cycle["cycle_start"], datetime(2026, 10, 6, 6, 30, tzinfo=IST))
+        self.assertEqual(log1.cycle["cycle_start"], datetime(2026, 10, 6, 0, 0, tzinfo=IST))
+        self.assertEqual(log2.cycle["cycle_start"], datetime(2026, 10, 6, 6, 0, tzinfo=IST))
         self.assertEqual({row["run_id"] for row in log1.read_entities(first["run_id"])}, {first["run_id"]})
         self.assertEqual({row["run_id"] for row in log2.read_entities(second["run_id"])}, {second["run_id"]})
 
@@ -353,20 +353,21 @@ class CycleRuleTests(unittest.TestCase):
 
 
 class SixHourScheduleTests(unittest.TestCase):
-    def test_slots_are_every_six_hours_from_0030_ist(self):
+    def test_slots_stay_on_the_hour_even_after_a_late_finish(self):
         def at(day, hour, minute):
             return datetime(2026, 10, day, hour, minute, tzinfo=IST)
 
-        self.assertEqual(cycle_slot_start(at(6, 0, 15)), at(5, 18, 30))
-        self.assertEqual(cycle_slot_start(at(6, 0, 30)), at(6, 0, 30))
-        self.assertEqual(cycle_slot_start(at(6, 6, 29)), at(6, 0, 30))
-        self.assertEqual(cycle_slot_start(at(6, 6, 30)), at(6, 6, 30))
-        self.assertEqual(cycle_slot_start(at(6, 12, 30)), at(6, 12, 30))
-        self.assertEqual(cycle_slot_start(at(6, 18, 30)), at(6, 18, 30))
-        self.assertEqual(cycle_boundary(at(6, 8, 0)), at(6, 0, 30))
+        self.assertEqual(cycle_slot_start(at(5, 23, 59)), at(5, 18, 0))
+        self.assertEqual(cycle_slot_start(at(6, 0, 0)), at(6, 0, 0))
+        self.assertEqual(cycle_slot_start(at(6, 5, 59)), at(6, 0, 0))
+        self.assertEqual(cycle_slot_start(at(6, 6, 0)), at(6, 6, 0))
+        self.assertEqual(cycle_slot_start(at(6, 10, 15)), at(6, 6, 0))
+        self.assertEqual(cycle_slot_start(at(6, 12, 0)), at(6, 12, 0))
+        self.assertEqual(cycle_slot_start(at(6, 18, 0)), at(6, 18, 0))
+        self.assertEqual(cycle_boundary(at(6, 8, 0)), at(6, 0, 0))
 
     def test_latest_failure_hides_an_older_success(self):
-        floor = datetime(2026, 10, 6, 0, 30, tzinfo=IST)
+        floor = datetime(2026, 10, 6, 0, 0, tzinfo=IST)
         early = {
             "run_id": "morning",
             "status": "succeeded",
@@ -384,7 +385,7 @@ class SixHourScheduleTests(unittest.TestCase):
     def test_airflow_schedule_is_six_hours_and_keeps_the_twelve_hour_attempt(self):
         from dags.cctnsv1_dag_common import SCHEDULE_DAILY_CYCLE
 
-        self.assertEqual(SCHEDULE_DAILY_CYCLE, "0 1,7,13,19 * * *")
+        self.assertEqual(SCHEDULE_DAILY_CYCLE, "30 0,6,12,18 * * *")
         text = (Path(ROOT) / "dags" / "daily_cycle.py").read_text(encoding="utf-8")
         self.assertIn("max_active_runs=1", text)
         self.assertIn("timedelta(hours=12)", text)
