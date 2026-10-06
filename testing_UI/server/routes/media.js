@@ -88,7 +88,30 @@ router.get('/stream/:file_id', async (req, res) => {
     const disposition = download === '1' || download === 'true' || ext === 'docx' || ext === 'doc' ? 'attachment' : 'inline';
     const cleanFilename = fileName.endsWith(`.${ext}`) ? fileName : `${fileName}.${ext}`;
 
-    // 1. Fetch directly from remote V2 file server on dopams-new
+    // 1. Check local physical disk first (e.g. /mnt/shared-etl-files on dopams-182)
+    const baseDir = process.env.V2_MEDIA_BASE_DIR || '/mnt/shared-etl-files';
+    const cleanRelPath = (media.file_path || '').trim().replace(/^\/+/, '');
+    
+    let localDiskPath = path.join(baseDir, cleanRelPath);
+    if (!fs.existsSync(localDiskPath) || fs.statSync(localDiskPath).isDirectory()) {
+      if (fs.existsSync(`${localDiskPath}.${ext}`)) {
+        localDiskPath = `${localDiskPath}.${ext}`;
+      } else if (fs.existsSync(`${localDiskPath}.docx`)) {
+        localDiskPath = `${localDiskPath}.docx`;
+      } else if (fs.existsSync(`${localDiskPath}.pdf`)) {
+        localDiskPath = `${localDiskPath}.pdf`;
+      }
+    }
+
+    if (fs.existsSync(localDiskPath) && !fs.statSync(localDiskPath).isDirectory() && fs.statSync(localDiskPath).size > 0) {
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `${disposition}; filename="${cleanFilename}"`);
+      res.setHeader('X-Media-Source', 'LOCAL_DISK');
+      res.setHeader('X-Media-Origin-Path', localDiskPath);
+      return fs.createReadStream(localDiskPath).pipe(res);
+    }
+
+    // 2. Fetch directly from remote V2 file server on dopams-new
     let remoteUrl = getRemoteFileUrl(media);
 
     if (!remoteUrl) {
@@ -103,6 +126,8 @@ router.get('/stream/:file_id', async (req, res) => {
       if (remoteRes.statusCode === 200) {
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Disposition', `${disposition}; filename="${cleanFilename}"`);
+        res.setHeader('X-Media-Source', 'REMOTE_STORAGE');
+        res.setHeader('X-Media-Origin-Path', remoteUrl);
         if (remoteRes.headers['content-length']) {
           res.setHeader('Content-Length', remoteRes.headers['content-length']);
         }

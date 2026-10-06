@@ -396,8 +396,11 @@ export default function V1FirDetailModal({ fir_reg_num, isOpen, onClose }) {
                             <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)' }}>
                               {data.fir.dms_file_name}
                             </div>
-                            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                              Path: {data.fir.attach_path} • Streaming live from Alfresco / dopams-new
+                            <div style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', gap: '8px', alignItems: 'center', marginTop: '2px', flexWrap: 'wrap' }}>
+                              <span><strong>Path:</strong> {data.fir.attach_path}</span>
+                              <span style={{ background: '#dbeafe', color: '#1d4ed8', padding: '1px 6px', borderRadius: '4px', fontWeight: 600 }}>
+                                📡 Origin: Alfresco DMS (103.164.200.184)
+                              </span>
                             </div>
                           </div>
                         </div>

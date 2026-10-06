@@ -182,6 +182,8 @@ router.get('/media/pdf', async (req, res) => {
     if (fs.existsSync(fullDiskPath) && fs.statSync(fullDiskPath).size > 0) {
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Disposition', `${disposition}; filename="${cleanName}"`);
+      res.setHeader('X-Media-Source', 'LOCAL_DISK');
+      res.setHeader('X-Media-Origin-Path', fullDiskPath);
       return fs.createReadStream(fullDiskPath).pipe(res);
     }
 
@@ -193,6 +195,8 @@ router.get('/media/pdf', async (req, res) => {
       if (remoteRes.statusCode === 200) {
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Disposition', `${disposition}; filename="${cleanName}"`);
+        res.setHeader('X-Media-Source', 'ALFRESCO_DMS');
+        res.setHeader('X-Media-Origin-Path', targetUrl);
         if (remoteRes.headers['content-length']) {
           res.setHeader('Content-Length', remoteRes.headers['content-length']);
         }
@@ -206,6 +210,8 @@ router.get('/media/pdf', async (req, res) => {
             if (fallbackRes.statusCode === 200) {
               res.setHeader('Content-Type', contentType);
               res.setHeader('Content-Disposition', `${disposition}; filename="${cleanName}"`);
+              res.setHeader('X-Media-Source', 'PROXY_DOPAMS_182');
+              res.setHeader('X-Media-Origin-Path', fallbackUrl);
               return fallbackRes.pipe(res);
             }
             res.status(remoteRes.statusCode || 404).json({

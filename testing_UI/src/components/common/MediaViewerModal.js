@@ -139,14 +139,26 @@ export default function MediaViewerModal({ media, isOpen, onClose }) {
               <p style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
                 {displayName}
               </p>
-              <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '2px 0 0 0' }}>
-                Source: <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>{media.source_type}</span> ({media.source_field})
-                {media.identity_type ? ` • ${media.identity_type}` : ''}
-                {' • '}
-                <span style={{ color: '#16a34a', fontWeight: 600 }}>
-                  {media.is_downloaded ? '✓ Stored on dopams-new' : 'Live Remote'}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  Source Table: <strong style={{ color: 'var(--text-secondary)' }}>{media.source_type}</strong> ({media.source_field})
                 </span>
-              </p>
+                <span
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    background: '#dcfce7',
+                    color: '#15803d',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                  }}
+                >
+                  <CheckCircle size={12} /> Stored on Disk: /mnt/shared-etl-files (dopams-182)
+                </span>
+              </div>
             </div>
           </div>
 
