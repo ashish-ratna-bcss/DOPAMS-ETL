@@ -1,7 +1,7 @@
 """Decide whether one ETL-3 incremental pass may start.
 
-V1 and V2 each keep their own fixed 6-hour clock: 00:00, 06:00, 12:00, and
-18:00 IST. ETL-3 runs for slot N only when the V1 cycle for N and the V2 cycle
+V1 and V2 each keep the live 6-hour clock: 05:30, 11:30, 17:30, and
+23:30 IST. ETL-3 runs for slot N only when the V1 cycle for N and the V2 cycle
 for N have both succeeded. It starts on the next checker pass after the later
 of those two finishes. There is no extra delay.
 

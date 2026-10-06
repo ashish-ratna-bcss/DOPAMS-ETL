@@ -1,6 +1,6 @@
 # Airflow DAGs — how they run
 
-This folder defines **one data DAG** (`cctns_v1_daily_cycle`, every 6 hours from 00:00 IST) plus the separate media DAG. The business logic (HTTP fetch, upsert, schema bootstrap) lives in **`dags/pipeline_run.py`** and **`apis/`** / **`db/`**. Cycle order, the shared `run_id`, and the success marker live in **`db/orchestrate_cycle.py`**.
+This folder defines **one data DAG** (`cctns_v1_daily_cycle`, every 6 hours from 05:30 IST) plus the separate media DAG. The business logic (HTTP fetch, upsert, schema bootstrap) lives in **`dags/pipeline_run.py`** and **`apis/`** / **`db/`**. Cycle order, the shared `run_id`, and the success marker live in **`db/orchestrate_cycle.py`**.
 
 For the full pipeline story (APIs, Postgres, upsert, schemas), see **[`../pipeline.md`](../pipeline.md)**.  
 For server deploy and PM2, see **[`../deploy/README.md`](../deploy/README.md)**.
@@ -34,7 +34,7 @@ flowchart LR
 
 | Setting | Value |
 |--------|--------|
-| **Schedule (IST)** | Data cycle every **6 hours** at 00:00, 06:00, 12:00, 18:00 IST (`30 0,6,12,18 * * *` UTC). Media **05:00 IST**, outside the gate. `max_active_runs=1` so a long accused pull blocks the next tick without moving the clock. |
+| **Schedule (IST)** | Data cycle every **6 hours** at 05:30, 11:30, 17:30, 23:30 IST (`0 0,6,12,18 * * *` UTC), the same instants as the live V2 cron. Media **05:00 IST**, outside the gate. `max_active_runs=1` so a long accused pull blocks the next tick without moving the clock. |
 | **Executor** | `LocalExecutor` (tasks run as local Airflow worker processes) |
 | **DAG folder** | `CCTNSV1_DAILY_ETL_RUN/dags/` |
 | **Config** | Project root `.env` (loaded by `config/settings.py` and `deploy/airflow_with_env.sh`) |
@@ -59,7 +59,7 @@ After every `git pull` on the server, run **`./deploy/reload_pm2.sh`** so schedu
 
 DAG IDs (what you see in the UI):
 
-- `cctns_v1_daily_cycle` — data cycle every 6 hours (00:00, 06:00, 12:00, 18:00 IST)
+- `cctns_v1_daily_cycle` — data cycle every 6 hours (05:30, 11:30, 17:30, 23:30 IST)
 - `cctns_v1_daily_sync_media_attachments` — media, 05:00 IST, not part of the V1 completion marker
 
 The data cycle is one task, `run_daily_cycle`. It acquires `cctns_v1_etl_cycle.lock`, uses one `run_id`, runs FIR, then court and accused details together, then accused, and inserts `cctns_v1_etl_cycle.status = succeeded` only when all four stored rows pass that order. `loaded` and `loaded_with_known_gaps` are the success statuses. A failed or partial run is `failed` or `incomplete` and is not a marker.

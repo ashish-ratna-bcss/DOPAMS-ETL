@@ -9,7 +9,7 @@ Nightly pipeline: pull data from **CCTNS V1 HTTP APIs & Alfresco Media**, load i
 
 | DAG | **IST (India)** | UTC (Airflow cron) | Why |
 |-----|-----------------|---------------------|-----|
-| `cctns_v1_daily_cycle` | **00:00, 06:00, 12:00, 18:00** | `30 0,6,12,18 * * *` | One lock and one `run_id` per cycle: FIR, then court + accused details, then accused. The next tick waits while a cycle is still running. Marker only after all four succeed |
+| `cctns_v1_daily_cycle` | **05:30, 11:30, 17:30, 23:30** | `0 0,6,12,18 * * *` | One lock and one `run_id` per cycle: FIR, then court + accused details, then accused. The next tick waits while a cycle is still running. Marker only after all four succeed |
 | `cctns_v1_daily_sync_media_attachments` | **05:00** | `30 23 * * *` | Downloads new FIR & Court document PDFs to disk. Outside the ETL-3 V1 gate |
 
 
@@ -335,7 +335,7 @@ flowchart TB
 2. Review ambiguous groups (query at top of **`db/sql/001_schema_fix.sql`**).
 3. Finalize **`natural_key`** expressions in that file; uncomment and run the migration.
 4. In **`dags/pipeline_run.py`**, set `"upsert_ready": True` for `court`, `accused_details`, and/or `accused`.
-5. Trigger `cctns_v1_daily_cycle` or wait for the next 6-hour slot (**00:00, 06:00, 12:00, or 18:00 IST**); verify that cycle's `cctns_v1_etl_cycle` row is `succeeded` and counts in `cctns_*`.
+5. Trigger `cctns_v1_daily_cycle` or wait for the next 6-hour slot (**05:30, 11:30, 17:30, or 23:30 IST**); verify that cycle's `cctns_v1_etl_cycle` row is `succeeded` and counts in `cctns_*`.
 
 ---
 

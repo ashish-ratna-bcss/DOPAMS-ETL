@@ -1,6 +1,6 @@
 """Run one ETL-3 incremental pass after the V1 and V2 cycles for the same slot.
 
-V1 and V2 each start on the fixed clock 00:00, 06:00, 12:00, and 18:00 IST.
+V1 and V2 each start on the fixed clock 05:30, 11:30, 17:30, and 23:30 IST.
 ETL-3 runs slot N only when that slot's V1 cycle and that slot's V2 cycle
 have both succeeded. The checker starts the pass on its next look; there is
 no extra delay. A success from another slot is not reused. Media is ignored.

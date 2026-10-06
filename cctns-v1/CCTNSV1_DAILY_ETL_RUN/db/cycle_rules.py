@@ -15,11 +15,12 @@ DONE_STATUSES = frozenset({"loaded", "loaded_with_known_gaps"})
 CYCLE_SUCCEEDED = "succeeded"
 
 
-# Fixed clock, shared with the V2 operating cadence the gate matches against.
-# Slots are 00:00, 06:00, 12:00, and 18:00 IST. A late finish does not move
-# the next slot: the slot is always the clock hour that contains the start.
+# Fixed clock copied from the live V2 crontab (`0 */6 * * *` UTC). V2 itself
+# is not changed. Slots are 05:30, 11:30, 17:30, and 23:30 IST. A late finish
+# does not move the next slot.
 CYCLE_SLOT = timedelta(hours=6)
-_SLOT_HOURS = (0, 6, 12, 18)
+_SLOT_HOURS = (5, 11, 17, 23)
+_SLOT_MINUTE = 30
 
 
 def _as_ist_now(now: datetime) -> datetime:
@@ -33,18 +34,20 @@ def _as_ist_now(now: datetime) -> datetime:
 def cycle_slot_start(now: datetime) -> datetime:
     """Start of the fixed 6-hour slot that contains `now`.
 
-    The grid is 00:00, 06:00, 12:00, 18:00 IST. Completion time does not
-    move the next boundary.
+    The grid is 05:30, 11:30, 17:30, 23:30 IST, the same instants as V2's
+    live `0 */6 * * *` UTC cron. Completion time does not move the next boundary.
     """
     now = _as_ist_now(now)
     candidate = None
     for hour in _SLOT_HOURS:
-        slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        slot = now.replace(hour=hour, minute=_SLOT_MINUTE, second=0, microsecond=0)
         if slot <= now:
             candidate = slot
     if candidate is None:
-        # Before 00:00, the open slot started at 18:00 the previous evening.
-        candidate = (now - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+        # Before 05:30, the open slot started at 23:30 the previous evening.
+        candidate = (now - timedelta(days=1)).replace(
+            hour=23, minute=_SLOT_MINUTE, second=0, microsecond=0
+        )
     return candidate
 
 

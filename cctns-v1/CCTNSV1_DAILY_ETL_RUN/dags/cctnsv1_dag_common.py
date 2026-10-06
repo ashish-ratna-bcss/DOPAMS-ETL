@@ -15,13 +15,13 @@ DAG_ID_FIR_COURT_ACCUSED_DETAILS = "cctns_v1_daily_sync_fir_court_accused_detail
 DAG_ID_ACCUSED_DOSSIER = "cctns_v1_daily_sync_accused_dossier"
 DAG_ID_MEDIA_ATTACHMENTS = "cctns_v1_daily_sync_media_attachments"
 
-# Airflow cron is UTC. India (IST = UTC+5:30). Fixed clock, same hours V2 is
-# operated on. This repo does not contain the V2 crontab and does not change it.
-#   00:00 IST → 18:30 UTC
-#   06:00 IST → 00:30 UTC
-#   12:00 IST → 06:30 UTC
-#   18:00 IST → 12:30 UTC
-SCHEDULE_DAILY_CYCLE = "30 0,6,12,18 * * *"
+# Airflow cron is UTC. India (IST = UTC+5:30). This matches the live V2
+# crontab `0 */6 * * *` UTC. V2's crontab is not in this repo and is not changed.
+#   05:30 IST → 00:00 UTC
+#   11:30 IST → 06:00 UTC
+#   17:30 IST → 12:00 UTC
+#   23:30 IST → 18:00 UTC
+SCHEDULE_DAILY_CYCLE = "0 0,6,12,18 * * *"
 #   05:00 IST → 23:30 UTC — Media attachments. Not part of the ETL-3 V1 gate.
 SCHEDULE_MEDIA_ATTACHMENTS = "30 23 * * *"
 

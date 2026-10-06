@@ -21,8 +21,8 @@ from etl3.source_readiness import (
     v2_watermark_ready,
 )
 
-SLOT = datetime(2026, 10, 6, 0, 0, tzinfo=IST)
-NOW = datetime(2026, 10, 6, 4, 0, tzinfo=IST)
+SLOT = datetime(2026, 10, 6, 5, 30, tzinfo=IST)
+NOW = datetime(2026, 10, 6, 9, 0, tzinfo=IST)
 
 
 def _rows(run_id="cycle-1", slot=SLOT):
@@ -91,11 +91,11 @@ class DailySourceGateTests(unittest.TestCase):
         self.assertEqual(action, "skip", reason)
 
         # V1 done at 09:00, V2 done at 10:14. Checker at 10:15 starts now.
-        six = datetime(2026, 10, 6, 6, 0, tzinfo=IST)
+        six = datetime(2026, 10, 6, 11, 30, tzinfo=IST)
         cycle = _cycle(slot=six, run_id="six", hours=3)
-        self.assertEqual(cycle["finished_at"], datetime(2026, 10, 6, 9, 0, tzinfo=IST))
+        self.assertEqual(cycle["finished_at"], datetime(2026, 10, 6, 14, 30, tzinfo=IST))
         action, reason, slot = self._judge(
-            now=datetime(2026, 10, 6, 10, 15, tzinfo=IST),
+            now=datetime(2026, 10, 6, 15, 45, tzinfo=IST),
             cycle=cycle,
             entities=_rows(run_id="six", slot=six),
             v2_runs=[_v2(slot=six, minute=10)],
@@ -105,11 +105,11 @@ class DailySourceGateTests(unittest.TestCase):
         self.assertEqual(slot, six)
 
     def test_v1_finishing_first_waits_for_v2_and_the_reverse(self):
-        six = datetime(2026, 10, 6, 6, 0, tzinfo=IST)
+        six = datetime(2026, 10, 6, 11, 30, tzinfo=IST)
         cycle = _cycle(slot=six, run_id="six", hours=3)
         rows = _rows(run_id="six", slot=six)
         action, reason, _slot = self._judge(
-            now=datetime(2026, 10, 6, 9, 30, tzinfo=IST),
+            now=datetime(2026, 10, 6, 14, 45, tzinfo=IST),
             cycle=cycle,
             entities=rows,
             v2_runs=[_v2(slot=six, succeeded=False)],
@@ -119,7 +119,7 @@ class DailySourceGateTests(unittest.TestCase):
         self.assertIn("V2", reason)
 
         action, reason, slot = self._judge(
-            now=datetime(2026, 10, 6, 10, 15, tzinfo=IST),
+            now=datetime(2026, 10, 6, 15, 45, tzinfo=IST),
             cycle=cycle,
             entities=rows,
             v2_runs=[_v2(slot=six)],
@@ -130,7 +130,7 @@ class DailySourceGateTests(unittest.TestCase):
 
         late_v1 = _cycle(slot=six, run_id="six", hours=5)
         action, _reason, _slot = self._judge(
-            now=datetime(2026, 10, 6, 10, 0, tzinfo=IST),
+            now=datetime(2026, 10, 6, 15, 0, tzinfo=IST),
             cycle=_cycle(slot=six, run_id="six", status="running", hours=5),
             entities=rows,
             v2_runs=[_v2(slot=six)],
@@ -138,7 +138,7 @@ class DailySourceGateTests(unittest.TestCase):
         )
         self.assertEqual(action, "wait")
         action, reason, slot = self._judge(
-            now=datetime(2026, 10, 6, 11, 5, tzinfo=IST),
+            now=datetime(2026, 10, 6, 16, 40, tzinfo=IST),
             cycle=late_v1,
             entities=rows,
             v2_runs=[_v2(slot=six)],
@@ -161,9 +161,9 @@ class DailySourceGateTests(unittest.TestCase):
         action, _reason, _slot = self._judge(entities=entities)
         self.assertEqual(action, "wait")
 
-        six = datetime(2026, 10, 6, 6, 0, tzinfo=IST)
+        six = datetime(2026, 10, 6, 11, 30, tzinfo=IST)
         action, reason, _slot = self._judge(
-            now=datetime(2026, 10, 6, 10, 0, tzinfo=IST),
+            now=datetime(2026, 10, 6, 15, 0, tzinfo=IST),
             cycle=_cycle(slot=six, run_id="six"),
             entities=_rows(run_id="six", slot=six),
             v2_runs=[_v2(slot=SLOT)],
@@ -205,9 +205,8 @@ class DailySourceGateTests(unittest.TestCase):
         self.assertEqual(action, "wait", reason)
         self.assertIn("master_etl", reason)
 
-        six = datetime(2026, 10, 6, 6, 0, tzinfo=IST)
         action, reason, slot = self._judge(
-            now=datetime(2026, 10, 6, 6, 10, tzinfo=IST),
+            now=datetime(2026, 10, 6, 11, 40, tzinfo=IST),
             commands="airflow scheduler cctns_v1_daily_cycle run\n",
             etl3_successes=[],
         )
@@ -241,11 +240,11 @@ class DailySourceGateTests(unittest.TestCase):
         self.assertEqual(action, "run")
 
     def test_newer_failed_cycle_is_not_replaced_by_an_older_success(self):
-        six = datetime(2026, 10, 6, 6, 0, tzinfo=IST)
+        six = datetime(2026, 10, 6, 11, 30, tzinfo=IST)
         morning = _cycle(run_id="morning")
         failed = _cycle(status="failed", run_id="afternoon", slot=six, started_minute=40)
         action, reason, slot = self._judge(
-            now=datetime(2026, 10, 6, 9, 0, tzinfo=IST),
+            now=datetime(2026, 10, 6, 14, 0, tzinfo=IST),
             cycles=[morning, failed],
             entities_by_run_id={
                 "morning": _rows(run_id="morning"),
@@ -258,11 +257,11 @@ class DailySourceGateTests(unittest.TestCase):
         self.assertNotEqual(slot, SLOT)
 
     def test_unprocessed_previous_slot_runs_before_a_failed_newer_slot(self):
-        six = datetime(2026, 10, 6, 6, 0, tzinfo=IST)
+        six = datetime(2026, 10, 6, 11, 30, tzinfo=IST)
         morning = _cycle(run_id="morning")
         failed = _cycle(status="failed", run_id="afternoon", slot=six)
         action, reason, slot = self._judge(
-            now=datetime(2026, 10, 6, 9, 0, tzinfo=IST),
+            now=datetime(2026, 10, 6, 14, 0, tzinfo=IST),
             cycles=[morning, failed],
             entities_by_run_id={"morning": _rows(run_id="morning")},
             v2_runs=[_v2(slot=SLOT), _v2(slot=six, succeeded=False)],
@@ -271,9 +270,9 @@ class DailySourceGateTests(unittest.TestCase):
         self.assertEqual(slot, SLOT)
 
     def test_long_previous_slot_still_counts_and_two_slots_ago_does_not(self):
-        now = datetime(2026, 10, 6, 8, 0, tzinfo=IST)
+        now = datetime(2026, 10, 6, 12, 0, tzinfo=IST)
         cycle = _cycle(hours=8)
-        cycle["finished_at"] = datetime(2026, 10, 6, 8, 10, tzinfo=IST)
+        cycle["finished_at"] = datetime(2026, 10, 6, 12, 10, tzinfo=IST)
         action, reason, slot = self._judge(
             now=now,
             cycle=cycle,
@@ -294,13 +293,13 @@ class DailySourceGateTests(unittest.TestCase):
     def test_v2_log_discovery_requires_the_persist_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            ok_dir = root / "20261006_060200"
+            ok_dir = root / "20261006_053001"
             ok_dir.mkdir()
             (ok_dir / "master.log").write_text(
                 "All ETL processes finished successfully.\nLAST_RUN persisted: 2026-10-06\n",
                 encoding="utf-8",
             )
-            bad_dir = root / "20261006_120100"
+            bad_dir = root / "20261006_113001"
             bad_dir.mkdir()
             (bad_dir / "master.log").write_text(
                 "Master ETL execution stopped due to step failure.\n",
@@ -308,8 +307,17 @@ class DailySourceGateTests(unittest.TestCase):
             )
             runs = discover_v2_runs([root, Path(tmp) / "missing"])
         by_start = {run["started_at"]: run["succeeded"] for run in runs}
-        self.assertEqual(by_start[datetime(2026, 10, 6, 6, 2, tzinfo=IST)], True)
-        self.assertEqual(by_start[datetime(2026, 10, 6, 12, 1, tzinfo=IST)], False)
+        self.assertEqual(by_start[datetime(2026, 10, 6, 5, 30, 1, tzinfo=IST)], True)
+        self.assertEqual(by_start[datetime(2026, 10, 6, 11, 30, 1, tzinfo=IST)], False)
+
+    def test_live_v2_start_pairs_only_with_the_same_slot(self):
+        started = datetime(2026, 10, 6, 5, 30, 1, tzinfo=IST)
+        action, reason, slot = self._judge(v2_runs=[{"started_at": started, "succeeded": True}])
+        self.assertEqual(action, "run", reason)
+        self.assertEqual(slot, SLOT)
+        later = datetime(2026, 10, 6, 11, 30, 1, tzinfo=IST)
+        action, reason, _slot = self._judge(v2_runs=[{"started_at": later, "succeeded": True}])
+        self.assertEqual(action, "wait", reason)
 
     def test_gate_source_has_no_fixed_delay(self):
         text = Path(__file__).resolve().parent.parent.joinpath("source_readiness.py").read_text(
