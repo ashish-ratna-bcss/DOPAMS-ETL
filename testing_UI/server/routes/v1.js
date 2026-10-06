@@ -198,11 +198,35 @@ router.get('/media/pdf', async (req, res) => {
         }
         remoteRes.pipe(res);
       } else {
-        res.status(remoteRes.statusCode || 404).json({
-          error: `Document not found on Alfresco DMS server (HTTP ${remoteRes.statusCode})`,
-          path: cleanPath,
-          name: cleanName,
-        });
+        // Fallback: If blocked by FortiGuard/local firewall (HTTP 403) or not found, try proxying via dopams-182 server
+        const fallbackServer = process.env.V1_FALLBACK_SERVER || 'http://192.168.103.182:5001';
+        if (remoteRes.statusCode === 403 && !req.headers['x-forwarded-from-182']) {
+          const fallbackUrl = `${fallbackServer}/api/v1/media/pdf?path=${encodeURIComponent(cleanPath)}&name=${encodeURIComponent(cleanName)}`;
+          http.get(fallbackUrl, { timeout: 15000, headers: { 'x-forwarded-from-182': '1' } }, (fallbackRes) => {
+            if (fallbackRes.statusCode === 200) {
+              res.setHeader('Content-Type', contentType);
+              res.setHeader('Content-Disposition', `${disposition}; filename="${cleanName}"`);
+              return fallbackRes.pipe(res);
+            }
+            res.status(remoteRes.statusCode || 404).json({
+              error: `Document not found on Alfresco DMS server (HTTP ${remoteRes.statusCode})`,
+              path: cleanPath,
+              name: cleanName,
+            });
+          }).on('error', () => {
+            res.status(remoteRes.statusCode || 404).json({
+              error: `Document not found on Alfresco DMS server (HTTP ${remoteRes.statusCode})`,
+              path: cleanPath,
+              name: cleanName,
+            });
+          });
+        } else {
+          res.status(remoteRes.statusCode || 404).json({
+            error: `Document not found on Alfresco DMS server (HTTP ${remoteRes.statusCode})`,
+            path: cleanPath,
+            name: cleanName,
+          });
+        }
       }
     });
 
