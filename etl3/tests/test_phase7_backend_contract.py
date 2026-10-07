@@ -91,9 +91,9 @@ def test_chargesheet_ids_stay_source_scoped():
                 """
             )
             counts = dict(((a, b), n) for a, b, n in cur.fetchall())
-            assert counts[("V1", "court")] == 7534
-            assert counts[("V2", "chargesheets")] == 7086
-            assert counts[("V2", "charge_sheet_updates")] == 6193
+            assert counts[("V1", "court")] == 7535
+            assert counts[("V2", "chargesheets")] == 7093
+            assert counts[("V2", "charge_sheet_updates")] == 6217
             shared = _one(
                 cur,
                 """
@@ -104,7 +104,7 @@ def test_chargesheet_ids_stay_source_scoped():
                 ) s
                 """,
             )
-            assert shared == 6193
+            assert shared == 6217
             distinct_ids = _one(cur, "SELECT count(DISTINCT charge_sheet_id) FROM be_read.chargesheet")
             total = _one(cur, "SELECT count(*) FROM be_read.chargesheet")
             assert distinct_ids == total

@@ -317,6 +317,10 @@ def _consolidate(conn, run_id, progress):
            field_map_entry=field_maps.HIERARCHY["V2"], consolidation_run_id=run_id))
     conn.commit()
 
+    from etl3.enrichment.runner import run_enrichment
+    report("enrichment", run_enrichment(conn, run_id))
+    conn.commit()
+
     from etl3.merger.ps_enrichment import enrich_v1_ps_codes
     report("ps_code[V1]", enrich_v1_ps_codes(conn))
     conn.commit()

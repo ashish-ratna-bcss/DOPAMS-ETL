@@ -31,14 +31,10 @@ REQUIRED_TABLES = [
     "accused",
     "persons",
     "hierarchy",
-    "brief_facts_ai",
-    "etl_crime_processing_log",
 ]
 
-# Pure-CCTNS mode runs against cctns-v2_schema.sql's finalized 16-table
-# schema, which intentionally excludes brief_facts_ai and
-# etl_crime_processing_log (both AI/LLM-only -- see that schema file's own
-# header comment). Requiring them here would block every --pure-cctns run.
+# Both the daily config and --pure-cctns use the CCTNS tables only.
+# brief_facts_ai and etl_crime_processing_log are not part of this pipeline.
 PURE_CCTNS_REQUIRED_TABLES = [
     "crimes",
     "accused",
@@ -190,9 +186,7 @@ def validate_db_connection(db_env: Dict[str, str], pure_cctns: bool = False) -> 
 def validate_minimum_schema(connection, pure_cctns: bool = False) -> None:
     """Validate fresh DB has minimum core schema for ETL execution.
 
-    Pure-CCTNS mode checks against PURE_CCTNS_REQUIRED_TABLES (the
-    finalized cctns-v2_schema.sql set), which does not include the
-    AI-only brief_facts_ai / etl_crime_processing_log tables.
+    Pure and daily configs both check crimes, accused, persons, and hierarchy.
     """
     required_tables = PURE_CCTNS_REQUIRED_TABLES if pure_cctns else REQUIRED_TABLES
 
@@ -211,7 +205,7 @@ def validate_minimum_schema(connection, pure_cctns: bool = False) -> None:
         hint = (
             "Apply cctns-v2_schema.sql before running ETL."
             if pure_cctns
-            else "Apply DB-schema.sql and unified_brief_facts_etl.sql before running ETL."
+            else "Apply cctns-v2_schema.sql before running ETL."
         )
         raise PreflightError(
             "Database schema is incomplete. Missing required public tables: "

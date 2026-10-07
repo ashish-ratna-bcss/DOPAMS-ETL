@@ -12,6 +12,8 @@ from etl3.merger import field_maps
 from etl3.merger.ps_enrichment import (
     build_hierarchy_index,
     classify_station,
+    hierarchy_records,
+    match_v1_station,
     normalize_ps_name,
     normalize_district,
     preserve_derived_crime_json,
@@ -61,6 +63,69 @@ def test_ps_normalization_and_exact_district_match():
         {"ps_name": "Central Police Station", "district_name": "Hyderabad", "ps_code": "B"},
     ])
     assert classify_station("Central", "Hyderabad", ambiguous) == ("ambiguous", None)
+
+
+def _station_records():
+    return hierarchy_records([
+        {"ps_name": "Zahirabad Town PS", "dist_name": "Sangareddy", "ps_code": "SNG01", "dist_code": "2200"},
+        {"ps_name": "Kazipet PS", "dist_name": "Warangal", "ps_code": "WGL01", "dist_code": "2100"},
+        {"ps_name": "Khanapur PS", "dist_name": "Nirmal", "ps_code": "NRM01", "dist_code": "2300"},
+        {"ps_name": "Khanapur PS", "dist_name": "Warangal", "ps_code": "WGL02", "dist_code": "2100"},
+        {"ps_name": "RPS WARANGAL", "dist_name": "SRP GRP Secunderabad", "ps_code": "GRP01", "dist_code": "9001"},
+        {"ps_name": "RPS SECUNDERABAD", "dist_name": "SRP GRP Secunderabad", "ps_code": "GRP02", "dist_code": "9001"},
+        {"ps_name": "Nizamabad I Town PS", "dist_name": "Nizamabad CP", "ps_code": "NZB01", "dist_code": "2400"},
+        {"ps_name": "Nizamabad VI Town PS", "dist_name": "Nizamabad CP", "ps_code": "NZB06", "dist_code": "2400"},
+        {"ps_name": "Bhadrachalam Town PS", "dist_name": "Bhadradri Kothagudem", "ps_code": "BDH01", "dist_code": "2067500"},
+    ])
+
+
+def test_residual_station_rules():
+    records = _station_records()
+
+    status, code, unit, resolution = match_v1_station("Zaheerabad Town", "Sangareddy", records)
+    assert status == "district_unit_only", status
+    assert code is None
+    assert unit == "2200"
+    assert resolution["raw_ps_name"] == "Zaheerabad Town"
+    assert resolution["hierarchy_ps_code"] is None
+
+    # The district is known, so a near station name does not become a ps_code.
+    status, code, unit, resolution = match_v1_station("Bhadrachalam TN", "Bhadradri Kothagudem", records)
+    assert status == "district_unit_only", status
+    assert code is None
+    assert unit == "2067500"
+    assert resolution["raw_ps_name"] == "Bhadrachalam TN"
+
+    status, code, unit, resolution = match_v1_station("Kazipet", "GRP Secunderabad", records)
+    assert status == "station_name_unique", status
+    assert code == "WGL01"
+    assert unit == "2100"
+    assert resolution["raw_district"] == "GRP Secunderabad"
+    assert resolution["hierarchy_district"] == "Warangal"
+
+    status, code, unit, resolution = match_v1_station("Khanapur", "GRP Secunderabad", records)
+    assert status == "station_name_not_unique", status
+    assert code is None and unit is None
+    assert resolution["raw_ps_name"] == "Khanapur"
+    assert resolution["raw_district"] == "GRP Secunderabad"
+
+    status, code, unit, resolution = match_v1_station("Warangal", "GRP Secunderabad", records)
+    assert status == "fuzzy", status
+    assert code == "GRP01"
+    assert unit == "9001"
+    assert resolution["raw_ps_name"] == "Warangal"
+    assert resolution["raw_district"] == "GRP Secunderabad"
+    assert resolution["hierarchy_ps_name"] == "RPS WARANGAL"
+
+    status, code, unit, _resolution_body = match_v1_station("Nizamabad I TN", "Nizamabad", records)
+    assert status == "unresolved", status
+    assert code is None and unit is None
+
+    status, code, unit, resolution = match_v1_station("Kazipet", "Warangal", records)
+    assert status == "exact", status
+    assert code == "WGL01"
+    assert resolution["raw_district"] == "Warangal"
+    assert resolution["unit_code"] == "2100"
 
 
 def test_derived_ps_resolution_survives_source_replay():
@@ -206,6 +271,7 @@ def test_live_relationship_counts_match_the_rules():
 def main():
     check("FSL case property is excluded from the unified merge", test_fsl_is_excluded_from_unified_merge)
     check("PS normalization and district match", test_ps_normalization_and_exact_district_match)
+    check("residual V1 station rules", test_residual_station_rules)
     check("derived PS provenance survives a source replay", test_derived_ps_resolution_survives_source_replay)
     check("blank station names do not match", test_blank_station_names_do_not_match_each_other)
     check("V1 person and accused stay separate", test_v1_person_and_accused_stay_separate)

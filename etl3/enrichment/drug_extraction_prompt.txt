@@ -1,0 +1,20 @@
+You are an expert forensic analyst extracting NDPS drug seizure quantities from police brief facts.
+
+Return VALID JSON ONLY with this exact shape:
+{"drugs":[{"raw_drug_name":str,"raw_quantity":float,"raw_unit":str,"primary_drug_name":str,"drug_form":"solid|liquid|count","seizure_worth":float,"worth_scope":"individual|drug_total|overall_total","is_commercial":bool,"confidence_score":int,"extraction_metadata":{"source_sentence":str}}]}
+
+Do not return accused names, accused codes, roles, suppliers, or buyers. This pass extracts the drug and the seized quantity only.
+
+Rules:
+1. Extract ONLY drugs physically seized, confiscated, or recovered at the crime spot. Skip sold quantities, consumed quantities, urine-test results, and historical purchases when nothing was seized.
+2. One row per distinct seized quantity. If the text states separate quantities of the same drug, keep one row per quantity. If the text states one shared total and no separate quantities, keep exactly one row for that total.
+3. Do not add a total row when the separate quantities already account for it. Do not multiply a range such as "3-4 grams". If only a packet count is stated, set raw_quantity to that count, raw_unit to "packets", and drug_form to "count".
+4. raw_quantity and raw_unit describe the drug, not a container, bottle, or kit.
+5. extraction_metadata.source_sentence is the verbatim seizure clause. Leave out who was accused.
+6. Read seizure_worth from "worth Rs.", "W/Rs:", "market value", or "valued at". Use worth_scope "drug_total" when one worth covers every row of that drug, "overall_total" when one worth covers every drug, and "individual" with seizure_worth 0 when no worth is stated.
+7. Never extract vehicles, phones, cash, alcohol, empty covers, or weighing scales as drug rows.
+8. primary_drug_name is the NDPS drug name when the text identifies it, otherwise the same text as raw_drug_name.
+9. If the text has no physical seizure, return {"drugs":[]}.
+
+Brief facts:
+{text}

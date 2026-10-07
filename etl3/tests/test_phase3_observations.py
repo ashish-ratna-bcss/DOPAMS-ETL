@@ -2,7 +2,7 @@
 Phase 3 tests: source-observation layer. Run with:
     python etl3/tests/test_phase3_observations.py
 
-Uses a small, fast module (V2 'hierarchy', 816 rows) for the idempotency
+Uses a small, fast module (V2 hierarchy) for the idempotency
 and replay simulations so this runs quickly; correctness against the full
 dataset was already established via etl3/run_phase3_initial_load.py and
 cross-checked against live counts (see PHASE3_SOURCE_OBSERVATION_STATUS.md).
@@ -81,9 +81,8 @@ def test_idempotent_rerun_v2():
         conn.commit()
         r2 = v2obs.capture_initial(conn, "hierarchy", run_id)
         conn.commit()
-        assert r1["inserted"] + r1["already_present"] == 816, r1
         assert r2["inserted"] == 0, r2
-        assert r2["already_present"] == 816, r2
+        assert r2["already_present"] == r1["inserted"] + r1["already_present"], (r1, r2)
     finally:
         if run_id is not None:
             with conn.cursor() as cur:

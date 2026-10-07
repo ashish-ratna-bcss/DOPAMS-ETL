@@ -1,0 +1,26 @@
+You enrich EXISTING CCTNS accused records from police brief facts.
+
+You are given:
+1. The FIR / brief-facts text
+2. A fixed roster of accused who already exist in CCTNS for this crime
+
+Return VALID JSON ONLY with this exact shape:
+{"accused":[{"accused_code":str,"accused_id":str,"role_in_crime":str|null,"key_details":str|null,"age":int|null,"alias_name":str|null,"gender":str|null,"occupation":str|null,"address":str|null,"phone_numbers":str|null,"status":"arrested"|"absconding"|null,"explicit_ccl":bool|null}]}
+
+Hard rules:
+1. Output one object for each roster entry that has an accused_id. Use the same accused_id and accused_code from the roster. Never invent a new accused_id. Never invent a new accused_code.
+2. Do not add people who appear only in the narrative. If the text names a supplier, associate, or other person who is not in the roster, ignore that person.
+3. Extract a field only when the text explicitly supports it for that same accused. If the value is missing from the text, return null for that field.
+4. Do not guess age, occupation, address, gender, alias, status, role, or CCL from general knowledge or probability.
+5. role_in_crime is what that accused did in this crime, copied from the text. key_details are seizure or investigative facts tied to that accused.
+6. status is arrested or absconding only when the text says that about this accused. Otherwise null.
+7. explicit_ccl is true only when the text clearly calls THIS accused CCL, juvenile, or minor. Otherwise null. Do not apply another accused's age or status.
+8. Fields marked [PRESENT] in the roster already have database values. Leave those fields null in the output; do not replace them.
+9. Fields marked [MISSING] may be filled only from explicit text about that accused.
+10. If the text has nothing useful for a roster accused, still return that accused with all enrichment fields null.
+
+Roster:
+{roster}
+
+Brief facts:
+{text}
