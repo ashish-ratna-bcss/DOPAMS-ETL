@@ -114,19 +114,54 @@ def replace_provenance(conn, provenance, rows, columns, run_id):
     return stats
 
 
-def record_ai_attempt(conn, crime_id, input_hash, model, status, attempt_count, error_message):
+def record_ai_attempt(
+    conn,
+    crime_id,
+    input_hash,
+    model,
+    status,
+    attempt_count,
+    error_message,
+    source_system=None,
+    source_module=None,
+    raw_response=None,
+    parsed_response=None,
+    validation_status=None,
+    validation_errors=None,
+):
+    """Persist one AI attempt. Does not store full source text (use input_hash)."""
+    # Bound raw response to keep the audit table manageable.
+    if raw_response is not None:
+        raw_response = str(raw_response)
+        if len(raw_response) > 50000:
+            raw_response = raw_response[:50000] + "…[truncated]"
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO ai_extraction_attempts
-                (crime_id, input_hash, model, status, attempt_count, error_message)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (crime_id, input_hash, model, status, attempt_count, error_message,
+                 source_system, source_module, raw_response, parsed_response,
+                 validation_status, validation_errors)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (crime_id, input_hash, status) DO UPDATE SET
                 attempt_count = EXCLUDED.attempt_count,
                 error_message = EXCLUDED.error_message,
+                model = EXCLUDED.model,
+                source_system = COALESCE(EXCLUDED.source_system, ai_extraction_attempts.source_system),
+                source_module = COALESCE(EXCLUDED.source_module, ai_extraction_attempts.source_module),
+                raw_response = COALESCE(EXCLUDED.raw_response, ai_extraction_attempts.raw_response),
+                parsed_response = COALESCE(EXCLUDED.parsed_response, ai_extraction_attempts.parsed_response),
+                validation_status = COALESCE(EXCLUDED.validation_status, ai_extraction_attempts.validation_status),
+                validation_errors = COALESCE(EXCLUDED.validation_errors, ai_extraction_attempts.validation_errors),
                 created_at = now()
             """,
-            (crime_id, input_hash, model, status, attempt_count, error_message),
+            (
+                crime_id, input_hash, model, status, attempt_count, error_message,
+                source_system, source_module, raw_response,
+                Json(parsed_response) if parsed_response is not None else None,
+                validation_status,
+                Json(validation_errors) if validation_errors is not None else None,
+            ),
         )
 
 

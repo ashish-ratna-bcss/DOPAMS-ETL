@@ -4,8 +4,10 @@ database connection.
 
 Hard invariant (see dopams_cctns/schema/ETL3_MERGER_IMPLEMENTATION_PLAN.md
 section 13 and dopams_cctns/schema/ETL3_RISK_REGISTER.md R12): ETL-3 reads
-V1/V2 and writes only to dopams_cctns. This is enforced two independent ways,
-not just one, so a single mistake can't silently violate it:
+V1/V2 and writes only to the configured unified database
+(dopams_cctns or the parallel enhanced dopams_cctns_v2). This is enforced
+two independent ways, not just one, so a single mistake can't silently
+violate it:
 
   1. Every V1/V2 connection forces a read-only Postgres session
      (default_transaction_read_only=on + conn.set_session(readonly=True)) --
@@ -85,9 +87,10 @@ def get_v2_source_connection():
 
 def get_unified_connection(readonly=False):
     """
-    Read/write connection to dopams_cctns -- the ONLY database ETL-3 ever
-    writes to. `readonly=True` is available for reconciliation/reporting code
-    paths that should never write even though they're hitting the unified DB.
+    Read/write connection to the configured unified database
+    (settings.EXPECTED_UNIFIED_DBNAME: dopams_cctns or dopams_cctns_v2) --
+    the ONLY database ETL-3 ever writes to. `readonly=True` is available for
+    reconciliation/reporting code paths that should never write.
     """
     cfg = settings.UNIFIED_DB
     conn = psycopg2.connect(

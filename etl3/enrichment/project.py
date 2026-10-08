@@ -196,11 +196,54 @@ def accused_row(source_system, accused_id, payload, person_payload=None,
 
 
 def _drug_row(extraction_id, crime_id, source_system, provenance, source_record_id,
-              raw_name, quantity, unit, worth, kb_items, drug_form=None, source_sentence=""):
+              raw_name, quantity, unit, worth, kb_items, drug_form=None, source_sentence="",
+              drug_kb_obj=None, preferred_primary=None):
+    """Build one drug_extractions row.
+
+    Precedence for primary_drug_name:
+      1. KB exact / safe normalization of source-supported raw_name
+      2. preferred_primary only when already source-validated by caller
+         and KB did not resolve (never overrides a real KB hit)
+      3. unresolved (NULL) — never invent from a generic raw term
+
+    Generic/ignored raw terms return kb_match_tier=ignored_generic with
+    primary_drug_name NULL (row omitted when both name and quantity empty).
+    """
     if raw_name is None and _num(quantity) in (None, 0.0):
         return None
-    standard, tier = drug_kb.resolve_primary_name(raw_name, kb_items) if raw_name else (None, "none")
-    primary = standard or (_text(raw_name) if raw_name else None)
+    if drug_kb_obj is not None:
+        standard, tier = drug_kb.resolve_primary_name(
+            raw_name, drug_kb_obj.items, drug_kb=drug_kb_obj,
+        ) if raw_name else (None, "none")
+    else:
+        standard, tier = drug_kb.resolve_primary_name(raw_name, kb_items) if raw_name else (None, "none")
+
+    if tier == drug_kb.TIER_IGNORED_GENERIC:
+        # Do not persist a specific invented primary for generic descriptors.
+        # Drop the row entirely — quantity alone without a drug identity is
+        # not a valid etl3_ai enrichment signal.
+        return None
+
+    primary = standard
+    if primary is None and preferred_primary:
+        # preferred_primary must already be source-supported by the caller.
+        if drug_kb_obj is not None:
+            pref_std, pref_tier = drug_kb.resolve_primary_name(
+                preferred_primary, drug_kb_obj.items, drug_kb=drug_kb_obj,
+            )
+            if pref_tier == drug_kb.TIER_IGNORED_GENERIC:
+                primary = None
+            else:
+                primary = pref_std or _text(preferred_primary)
+                if pref_std:
+                    tier = pref_tier
+        else:
+            primary = _text(preferred_primary)
+
+    # Final guard: ignored primary (e.g. alcohol) drops the row.
+    if drug_kb_obj is not None and primary is not None and drug_kb_obj.is_ignored(primary):
+        return None
+
     measured = standardize_measurement(
         quantity, unit, drug_form=drug_form, raw_drug_name=raw_name,
         seizure_worth=worth or 0, source_sentence=source_sentence,
@@ -231,7 +274,8 @@ def _drug_row(extraction_id, crime_id, source_system, provenance, source_record_
     return body
 
 
-def drug_rows_from_sources(v1_accused_payloads, v2_property_payloads, kb_items, known_crime_ids):
+def drug_rows_from_sources(v1_accused_payloads, v2_property_payloads, kb_items, known_crime_ids,
+                           drug_kb_obj=None):
     """v1 items: (source_record_id, payload). v2 items: (property_id, payload)."""
     rows = []
     for record_id, payload in v1_accused_payloads:
@@ -249,7 +293,7 @@ def drug_rows_from_sources(v1_accused_payloads, v2_property_payloads, kb_items, 
             continue
         row = _drug_row(
             f"V1:dossier:{record_id}", crime_id, "V1", "v1_dossier", record_id,
-            name, qty, unit, None, kb_items,
+            name, qty, unit, None, kb_items, drug_kb_obj=drug_kb_obj,
         )
         if row:
             rows.append(row)
@@ -273,7 +317,7 @@ def drug_rows_from_sources(v1_accused_payloads, v2_property_payloads, kb_items, 
         worth = _num(payload.get("estimate_value"))
         row = _drug_row(
             f"V2:property:{property_id}", crime_id, "V2", "v2_property", property_id,
-            name, weight, unit, worth, kb_items,
+            name, weight, unit, worth, kb_items, drug_kb_obj=drug_kb_obj,
         )
         if row:
             rows.append(row)
@@ -283,30 +327,65 @@ def drug_rows_from_sources(v1_accused_payloads, v2_property_payloads, kb_items, 
     return rows
 
 
-def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items):
-    """Turn a validated model payload into drug rows. Empty input yields no rows."""
+class AiDrugRows(list):
+    """List of drug rows plus ``rejections`` audit records."""
+
+    def __init__(self, rows, rejections=None):
+        super().__init__(rows)
+        self.rejections = list(rejections or [])
+
+
+def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=None,
+                 source_text=None):
+    """Turn a validated model payload into drug rows.
+
+    Each AI drug must pass ignore-list + source-evidence validation before KB
+    normalization. Empty / fully rejected input yields no rows.
+
+    Returns AiDrugRows (list subclass) with ``.rejections`` for audit.
+    """
+    from etl3.enrichment.ai import validate_ai_drug_item
+
     rows = []
-    for ordinal, item in enumerate(parsed_drugs or []):
+    rejections = []
+    ordinal = 0
+    for item in parsed_drugs or []:
+        checked = validate_ai_drug_item(item, source_text, drug_kb_obj=drug_kb_obj)
+        if checked.get("reject_reason"):
+            rejections.append({
+                "raw_drug_name": checked.get("raw_drug_name"),
+                "reason": checked["reject_reason"],
+            })
+            continue
         row = _drug_row(
             f"{source_system}:ai:{crime_id}:{ordinal}",
             crime_id, source_system, "etl3_ai", crime_id,
-            item.get("raw_drug_name"), item.get("raw_quantity"), item.get("raw_unit"),
-            item.get("seizure_worth"), kb_items,
-            drug_form=item.get("drug_form"),
-            source_sentence=item.get("source_sentence") or "",
+            checked.get("raw_drug_name"), checked.get("raw_quantity"),
+            checked.get("raw_unit"), checked.get("seizure_worth"), kb_items,
+            drug_form=checked.get("drug_form"),
+            source_sentence=checked.get("source_sentence") or "",
+            drug_kb_obj=drug_kb_obj,
+            preferred_primary=checked.get("primary_drug_name"),
         )
-        if row:
-            if item.get("is_commercial"):
-                row["is_commercial"] = True
-            conf = _num(item.get("confidence_score"))
-            if conf is not None and conf >= 1:
-                conf = round(conf / 100.0, 4)
-            row["confidence_score"] = conf
-            rows.append(row)
+        if row is None:
+            rejections.append({
+                "raw_drug_name": checked.get("raw_drug_name"),
+                "reason": "GENERIC_IGNORED",
+            })
+            continue
+        if item.get("is_commercial") or checked.get("is_commercial"):
+            row["is_commercial"] = True
+        conf = _num(checked.get("confidence_score"))
+        if conf is not None and conf >= 1:
+            conf = round(conf / 100.0, 4)
+        row["confidence_score"] = conf
+        rows.append(row)
+        ordinal += 1
     apply_commercial_flags(rows)
     for row in rows:
         row["input_hash"] = _measurement_hash(row)
-    return rows
+    return AiDrugRows(rows, rejections)
+
 
 
 def _measurement_hash(row):

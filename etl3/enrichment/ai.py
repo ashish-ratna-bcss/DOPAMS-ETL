@@ -1,22 +1,42 @@
 """Bounded extraction clients for drugs and known-accused enrichment.
 
-Drug prompt: seizure and quantity only.
+Drug prompt: seizure and quantity only; explicit named substances only.
 Accused prompt: existing CCTNS accused_id roster only; no discovery of new names.
-Model defaults match core/llm_service.py get_llm('extraction'): temperature
-0, Ollama chat, one retry. Clients are not used unless ETL3_AI_ENABLED=1.
+Model defaults: temperature 0, Ollama chat, format=json, one retry.
+Clients are not used unless ETL3_AI_ENABLED=1.
 """
 import json
-import os
 import re
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+from etl3.enrichment.kb import compact
 
 PROMPT_PATH = Path(__file__).resolve().parent / "drug_extraction_prompt.txt"
 ACCUSED_PROMPT_PATH = Path(__file__).resolve().parent / "accused_extraction_prompt.txt"
 ALLOWED_FORMS = {"solid", "liquid", "count"}
 ALLOWED_SCOPES = {"individual", "drug_total", "overall_total"}
 ALLOWED_ACCUSED_STATUS = {"arrested", "absconding"}
+
+# Rejection reasons recorded on ai_extraction_attempts.validation_errors
+REASON_GENERIC_IGNORED = "GENERIC_IGNORED"
+REASON_SOURCE_UNSUPPORTED = "SOURCE_UNSUPPORTED"
+REASON_INVALID_SCHEMA = "INVALID_SCHEMA"
+REASON_EMPTY_RESPONSE = "EMPTY_RESPONSE"
+REASON_INVALID_QUANTITY = "INVALID_QUANTITY"
+REASON_INVALID_UNIT = "INVALID_UNIT"
+
+# Documented generics not always present on kb.drug_ignore_list. Used only as a
+# secondary code-level guard for AI validation; KB ignore list remains primary
+# for resolve_primary_name. Do not insert these into the database here.
+CODE_LEVEL_GENERIC_TERMS = frozenset({
+    "contraband",
+    "substance",
+    "material",
+    "narcotic",
+    "narcotic substance",
+})
 
 
 class AIExtractionError(Exception):
@@ -34,15 +54,14 @@ def load_accused_prompt():
 
 
 def ai_settings():
-    enabled = os.environ.get("ETL3_AI_ENABLED", "").strip().lower() in ("1", "true", "yes")
-    return {
-        "enabled": enabled,
-        "model": os.environ.get("LLM_MODEL_EXTRACTION", ""),
-        "host": os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/"),
-        "timeout": int(os.environ.get("LLM_TIMEOUT", "300")),
-        "limit": int(os.environ.get("ETL3_AI_LIMIT", "0")),
-        "max_retries": 1,
-    }
+    """Resolve Ollama settings from etl3.config.settings (environment only).
+
+    No hardcoded endpoint or model fallback. When AI is enabled,
+    OLLAMA_BASE_URL and OLLAMA_MODEL must be set or this raises RuntimeError.
+    """
+    from etl3.config.settings import resolve_ai_settings
+
+    return resolve_ai_settings()
 
 
 def _strip_fences(text: str) -> str:
@@ -58,6 +77,7 @@ def parse_drug_response(text: str) -> dict:
     """Validate model output. Raises AIExtractionError(status='invalid') on reject.
 
     An empty drugs list is valid and means the text had no seizure to store.
+    Entries with null/blank raw_drug_name are dropped (generic / unnamed).
     """
     if text is None or not str(text).strip():
         raise AIExtractionError("empty", "model returned an empty body")
@@ -77,8 +97,9 @@ def parse_drug_response(text: str) -> dict:
         if not isinstance(item, dict):
             raise AIExtractionError("invalid", "drug entry is not an object")
         name = item.get("raw_drug_name")
-        if not name or not str(name).strip():
-            raise AIExtractionError("invalid", "drug entry missing raw_drug_name")
+        if name is None or not str(name).strip() or str(name).strip().lower() in ("null", "none"):
+            # Explicit null / blank name: skip row (not a schema failure).
+            continue
         form = str(item.get("drug_form") or "solid").lower().strip()
         if form not in ALLOWED_FORMS:
             raise AIExtractionError("invalid", f"drug_form {form!r} is not allowed")
@@ -92,11 +113,14 @@ def parse_drug_response(text: str) -> dict:
             raise AIExtractionError("invalid", "quantity or worth is not numeric") from exc
         if qty < 0 or worth < 0:
             raise AIExtractionError("invalid", "negative quantity or worth")
+        primary = item.get("primary_drug_name")
+        if primary is not None and str(primary).strip().lower() in ("", "null", "none"):
+            primary = None
         cleaned.append({
             "raw_drug_name": str(name).strip(),
             "raw_quantity": qty,
             "raw_unit": item.get("raw_unit") or None,
-            "primary_drug_name": item.get("primary_drug_name") or None,
+            "primary_drug_name": (str(primary).strip() if primary else None) or None,
             "drug_form": form,
             "seizure_worth": worth,
             "worth_scope": scope,
@@ -107,10 +131,136 @@ def parse_drug_response(text: str) -> dict:
     return {"drugs": cleaned}
 
 
+def source_mentions_label(label, source_text) -> bool:
+    """True when label appears in source (case-insensitive or compacted)."""
+    if label is None or source_text is None:
+        return False
+    name = str(label).strip()
+    text = str(source_text)
+    if not name or not text.strip():
+        return False
+    if name.lower() in text.lower():
+        return True
+    nc = compact(name)
+    if len(nc) >= 3 and nc in compact(text):
+        return True
+    return False
+
+
+def source_mentions_quantity(quantity, source_text) -> bool:
+    """True when the numeric quantity is evidenced in the source text."""
+    if quantity is None or source_text is None:
+        return False
+    text = str(source_text)
+    try:
+        qty = float(quantity)
+    except (TypeError, ValueError):
+        return False
+    candidates = {str(quantity).strip(), str(qty), f"{qty:g}"}
+    if qty == int(qty):
+        candidates.add(str(int(qty)))
+    # Indian-style grouping for large worth-like numbers is handled separately;
+    # for quantities also accept comma forms of the integer part.
+    if qty == int(qty) and abs(qty) >= 1000:
+        n = int(qty)
+        candidates.add(f"{n:,}")
+        # 52,00,000 style is rare for grams; skip unless needed for worth.
+    return any(c and c in text for c in candidates)
+
+
+def is_code_level_generic(name) -> bool:
+    if name is None:
+        return False
+    text = str(name).lower().strip()
+    if text in CODE_LEVEL_GENERIC_TERMS:
+        return True
+    c = compact(text)
+    return c in {compact(t) for t in CODE_LEVEL_GENERIC_TERMS}
+
+
+def validate_ai_drug_item(item, source_text, drug_kb_obj=None):
+    """Validate one parsed AI drug against ignore list + source evidence.
+
+    Returns dict with either accepted fields or reject_reason.
+    KB matching is NOT evidence that the source contained the drug.
+    """
+    raw = (item or {}).get("raw_drug_name")
+    if raw is None or not str(raw).strip():
+        return {"reject_reason": REASON_EMPTY_RESPONSE, "raw_drug_name": raw}
+
+    raw_text = str(raw).strip()
+    if drug_kb_obj is not None and drug_kb_obj.is_ignored(raw_text):
+        return {"reject_reason": REASON_GENERIC_IGNORED, "raw_drug_name": raw_text}
+    if is_code_level_generic(raw_text):
+        return {"reject_reason": REASON_GENERIC_IGNORED, "raw_drug_name": raw_text}
+
+    if not source_mentions_label(raw_text, source_text):
+        return {"reject_reason": REASON_SOURCE_UNSUPPORTED, "raw_drug_name": raw_text}
+
+    primary = (item or {}).get("primary_drug_name")
+    if primary is not None and str(primary).strip():
+        p = str(primary).strip()
+        if (drug_kb_obj is not None and drug_kb_obj.is_ignored(p)) or is_code_level_generic(p):
+            primary = None
+        elif not source_mentions_label(p, source_text):
+            # Do not trust AI primary that is absent from source; keep raw only.
+            primary = None
+    else:
+        primary = None
+
+    qty = (item or {}).get("raw_quantity")
+    unit = (item or {}).get("raw_unit")
+    worth = (item or {}).get("seizure_worth")
+    out = {
+        "reject_reason": None,
+        "raw_drug_name": raw_text,
+        "primary_drug_name": primary,
+        "raw_quantity": qty,
+        "raw_unit": unit,
+        "seizure_worth": worth,
+        "drug_form": (item or {}).get("drug_form"),
+        "is_commercial": (item or {}).get("is_commercial"),
+        "confidence_score": (item or {}).get("confidence_score"),
+        "source_sentence": (item or {}).get("source_sentence") or "",
+        "worth_scope": (item or {}).get("worth_scope"),
+    }
+    if qty not in (None, "", 0, 0.0) and source_text and not source_mentions_quantity(qty, source_text):
+        out["raw_quantity"] = None
+        out["quantity_reject"] = REASON_INVALID_QUANTITY
+    if unit and source_text:
+        unit_s = str(unit).strip()
+        # Allow common unit abbreviations without forcing exact token presence
+        # when the expanded form appears (grams/gm/g).
+        unit_ok = source_mentions_label(unit_s, source_text)
+        if not unit_ok:
+            aliases = {
+                "grams": ("gram", "gms", "gm", "g"),
+                "gram": ("grams", "gms", "gm", "g"),
+                "gm": ("grams", "gram", "gms", "g"),
+                "kg": ("kilogram", "kilograms", "kgs"),
+                "packets": ("packet", "pkts", "pkt"),
+            }
+            for alt in aliases.get(unit_s.lower(), ()):
+                if source_mentions_label(alt, source_text):
+                    unit_ok = True
+                    break
+        if not unit_ok:
+            out["raw_unit"] = None
+            out["unit_reject"] = REASON_INVALID_UNIT
+    if worth not in (None, "", 0, 0.0) and source_text:
+        # Worth often appears as Rs. 52,000 / 52,00,000 — accept digit skeleton.
+        digits = re.sub(r"\D", "", str(int(float(worth))) if float(worth) == int(float(worth)) else str(worth))
+        text_digits = re.sub(r"\D", "", str(source_text))
+        if digits and digits not in text_digits:
+            out["seizure_worth"] = 0
+    return out
+
+
 def _ollama_chat(host, model, timeout, prompt: str) -> str:
     body = json.dumps({
         "model": model,
         "stream": False,
+        "format": "json",
         "messages": [{"role": "user", "content": prompt}],
         "options": {"temperature": 0},
     }).encode("utf-8")
@@ -134,8 +284,16 @@ def _ollama_chat(host, model, timeout, prompt: str) -> str:
 
 
 def _normalize_host_model(host, model, timeout):
+    if not host:
+        raise AIExtractionError(
+            "error",
+            "OLLAMA_BASE_URL is not set (required for AI clients)",
+        )
     if not model:
-        raise AIExtractionError("error", "LLM_MODEL_EXTRACTION is not set")
+        raise AIExtractionError(
+            "error",
+            "OLLAMA_MODEL is not set (required for AI clients)",
+        )
     host = host.rstrip("/")
     if host.endswith("/api"):
         host = host[:-4]
@@ -246,15 +404,16 @@ def parse_accused_response(text: str, allowed_accused_ids=None, allowed_codes=No
 def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
     """Call the drug client, validate, and retry timeout/invalid/error once.
 
-    Returns (parsed_dict, attempt_count). Does not write anywhere.
+    Returns (parsed_dict, attempt_count, raw_response).
     """
     last = None
     attempts = 0
+    raw = ""
     for _ in range(max_retries + 1):
         attempts += 1
         try:
             raw = client.complete(brief_facts)
-            return parse_drug_response(raw), attempts
+            return parse_drug_response(raw), attempts, raw
         except AIExtractionError as exc:
             last = exc
     raise last
@@ -262,9 +421,13 @@ def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
 
 def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
                                allowed_codes, max_retries: int = 1):
-    """Call the known-accused client and keep only roster members."""
+    """Call the known-accused client and keep only roster members.
+
+    Returns (parsed_dict, attempt_count, raw_response).
+    """
     last = None
     attempts = 0
+    raw = ""
     for _ in range(max_retries + 1):
         attempts += 1
         try:
@@ -273,7 +436,7 @@ def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
                 raw,
                 allowed_accused_ids=allowed_accused_ids,
                 allowed_codes=allowed_codes,
-            ), attempts
+            ), attempts, raw
         except AIExtractionError as exc:
             last = exc
     raise last

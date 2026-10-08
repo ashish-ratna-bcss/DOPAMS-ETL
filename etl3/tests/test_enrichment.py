@@ -270,11 +270,10 @@ def test_ai_validation():
         raise AssertionError("malformed should fail")
     except AIExtractionError as exc:
         assert exc.status == "invalid"
-    try:
-        parse_drug_response('{"drugs":[{"raw_quantity":1}]}')
-        raise AssertionError("missing name should fail")
-    except AIExtractionError as exc:
-        assert exc.status == "invalid"
+    # missing / null name is skipped (not a schema failure)
+    assert parse_drug_response(
+        '{"drugs":[{"raw_quantity":1,"raw_unit":"g","drug_form":"solid"}]}'
+    )["drugs"] == []
     try:
         parse_drug_response('{"note":"no drugs key"}')
         raise AssertionError("missing drugs key should fail")
@@ -285,9 +284,10 @@ def test_ai_validation():
 def test_ai_retry_and_success_does_not_invent_on_empty():
     timeout = AIExtractionError("timeout", "timed out")
     client = _ScriptedClient([timeout, '{"drugs":[]}'])
-    parsed, attempts = extract_with_retry(client, "brief facts", max_retries=1)
+    parsed, attempts, raw = extract_with_retry(client, "brief facts", max_retries=1)
     assert attempts == 2
     assert parsed["drugs"] == []
+    assert raw == '{"drugs":[]}'
     rows = ai_drug_rows("C1", "V2", parsed["drugs"], [("ganja", "Ganja")])
     assert rows == []
     failing = _ScriptedClient([AIExtractionError("invalid", "bad"), AIExtractionError("invalid", "bad")])
@@ -300,7 +300,10 @@ def test_ai_retry_and_success_does_not_invent_on_empty():
     good = parse_drug_response(
         '{"drugs":[{"raw_drug_name":"ganja","raw_quantity":20,"raw_unit":"kg","drug_form":"solid","is_commercial":false}]}'
     )
-    built = ai_drug_rows("C9", "V2", good["drugs"], [("ganja", "Ganja")])
+    built = ai_drug_rows(
+        "C9", "V2", good["drugs"], [("ganja", "Ganja")],
+        source_text="seized ganja 20 kg under panchanama",
+    )
     assert built[0]["is_commercial"] is True
     assert built[0]["provenance"] == "etl3_ai"
     assert built[0]["drug_category"] == "Cannabis"

@@ -70,7 +70,8 @@ def test_unified_connection():
         with conn.cursor() as cur:
             cur.execute("SELECT current_database(), current_user, version()")
             db, user, ver = cur.fetchone()
-            assert db == "dopams_cctns", db
+            assert db in ("dopams_cctns", "dopams_cctns_v2"), db
+            assert db == connections.settings.EXPECTED_UNIFIED_DBNAME, db
             print(f"       connected to {db!r} as {user!r}")
             print(f"       {ver.split(',')[0]}")
             cur.execute(
@@ -109,6 +110,6 @@ def test_safety_check_fires_on_mismatch():
 if __name__ == "__main__":
     check("V1 source connection is read-only and points at cctns_v1", test_v1_readonly)
     check("V2 source connection is read-only and points at cctns-v2", test_v2_readonly)
-    check("Unified connection points at dopams_cctns", test_unified_connection)
+    check("Unified connection points at configured unified DB", test_unified_connection)
     check("Database-mismatch safety check fires correctly", test_safety_check_fires_on_mismatch)
     print("\nAll Phase 0/1 connection checks passed.")

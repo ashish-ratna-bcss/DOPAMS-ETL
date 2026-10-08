@@ -415,25 +415,29 @@ def resolve_person_address(payload, kb: GeoKB):
     return resolved or None
 
 
-def load_geo_kb(conn) -> GeoKB:
-    """Read geo_reference and geo_countries. Missing or empty tables stay empty."""
+def load_geo_kb(conn, schema="kb") -> GeoKB:
+    """Read geo_reference and geo_countries from the local KB schema.
+
+    Runtime uses dopams_cctns_v2.kb.* only. Missing or empty tables stay empty.
+    """
     kb = GeoKB()
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = 'geo_reference'
-            """
+            WHERE table_schema = %s AND table_name = 'geo_reference'
+            """,
+            (schema,),
         )
         if cur.fetchone():
             cur.execute(
-                """
+                f"""
                 SELECT DISTINCT
                     TRIM(state_name),
                     TRIM(district_name),
                     TRIM(COALESCE(sub_district_name, '')),
                     TRIM(COALESCE(village_name_english, ''))
-                FROM geo_reference
+                FROM {schema}.geo_reference
                 WHERE state_name IS NOT NULL
                 """
             )
@@ -442,14 +446,15 @@ def load_geo_kb(conn) -> GeoKB:
         cur.execute(
             """
             SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = 'geo_countries'
-            """
+            WHERE table_schema = %s AND table_name = 'geo_countries'
+            """,
+            (schema,),
         )
         if cur.fetchone():
             cur.execute(
-                """
+                f"""
                 SELECT DISTINCT TRIM(country_name), TRIM(COALESCE(state_name, ''))
-                FROM geo_countries
+                FROM {schema}.geo_countries
                 WHERE country_name IS NOT NULL
                 """
             )

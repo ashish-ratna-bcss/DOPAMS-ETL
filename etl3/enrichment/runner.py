@@ -1,12 +1,12 @@
 """Enrichment driver.
 
-Reads *_source observations already stored in dopams_cctns. The geography
-lookup reads geo_reference and geo_countries from V2 through the read-only
-source connection. It does not update *_unified CCTNS columns.
+Reads *_source observations already stored in the unified write target
+(dopams_cctns_v2 for the enhanced build). Geography and drug KB lookups use
+local kb.* tables on that same database. It does not update *_unified CCTNS
+columns and never connects to dev-2 at runtime.
 """
 import json
 
-from etl3.db import connections
 from etl3.enrichment import kb as drug_kb
 from etl3.enrichment.address import load_geo_kb
 from etl3.enrichment.accused_facts import (
@@ -380,8 +380,9 @@ def _accused_enrichment(conn, run_id, accused_client=None, settings=None):
     rows = []
     ai_stats = {
         "processed": 0, "success": 0, "empty": 0, "failed": 0,
-        "skipped": 0, "no_accused": 0,
+        "skipped": 0, "no_accused": 0, "limit_reached": 0,
     }
+    ai_limit = settings.get("limit") or 0
     for crime_id, records in by_crime.items():
         extractions = []
         fact_entry = facts.get(crime_id)
@@ -392,39 +393,51 @@ def _accused_enrichment(conn, run_id, accused_client=None, settings=None):
             records = apply_v1_code_type_and_ccl_numbering(records, fir_text)
 
         if ai_on and fact_entry and accused_client is not None:
-            _source_system, text = fact_entry
-            roster = build_roster_for_prompt(records)
-            allowed_ids = [r["accused_id"] for r in records]
-            allowed_codes = [r.get("accused_code") for r in records if r.get("accused_code")]
-            digest = _hash({"kind": "accused", "brief_facts": text, "roster": roster})
-            if _ai_already_settled(conn, crime_id, digest):
-                ai_stats["skipped"] += 1
-                extractions = _load_stored_accused_extractions(conn, allowed_ids)
+            if ai_limit and ai_stats["processed"] >= ai_limit:
+                ai_stats["limit_reached"] += 1
             else:
-                ai_stats["processed"] += 1
-                try:
-                    parsed, attempts = extract_accused_with_retry(
-                        accused_client, text, roster, allowed_ids, allowed_codes,
-                        max_retries=settings.get("max_retries", 1),
-                    )
-                except AIExtractionError as exc:
-                    record_ai_attempt(
-                        conn, crime_id, digest, settings.get("model"),
-                        exc.status, 1, str(exc),
-                    )
-                    ai_stats["failed"] += 1
+                _source_system, text = fact_entry
+                roster = build_roster_for_prompt(records)
+                allowed_ids = [r["accused_id"] for r in records]
+                allowed_codes = [r.get("accused_code") for r in records if r.get("accused_code")]
+                digest = _hash({"kind": "accused", "brief_facts": text, "roster": roster})
+                if _ai_already_settled(conn, crime_id, digest):
+                    ai_stats["skipped"] += 1
                     extractions = _load_stored_accused_extractions(conn, allowed_ids)
                 else:
-                    extractions = parsed.get("accused") or []
-                    status = "empty" if not extractions else "success"
-                    record_ai_attempt(
-                        conn, crime_id, digest, settings.get("model"),
-                        status, attempts, None,
-                    )
-                    if extractions:
-                        ai_stats["success"] += 1
+                    ai_stats["processed"] += 1
+                    try:
+                        parsed, attempts, raw_response = extract_accused_with_retry(
+                            accused_client, text, roster, allowed_ids, allowed_codes,
+                            max_retries=settings.get("max_retries", 1),
+                        )
+                    except AIExtractionError as exc:
+                        record_ai_attempt(
+                            conn, crime_id, digest, settings.get("model"),
+                            exc.status, 1, str(exc),
+                            source_system=_source_system,
+                            source_module="fir" if _source_system == "V1" else "crimes",
+                            raw_response=None,
+                            validation_status="n/a",
+                        )
+                        ai_stats["failed"] += 1
+                        extractions = _load_stored_accused_extractions(conn, allowed_ids)
                     else:
-                        ai_stats["empty"] += 1
+                        extractions = parsed.get("accused") or []
+                        status = "empty" if not extractions else "success"
+                        record_ai_attempt(
+                            conn, crime_id, digest, settings.get("model"),
+                            status, attempts, None,
+                            source_system=_source_system,
+                            source_module="fir" if _source_system == "V1" else "crimes",
+                            raw_response=raw_response,
+                            parsed_response=parsed,
+                            validation_status="accepted" if extractions else "empty",
+                        )
+                        if extractions:
+                            ai_stats["success"] += 1
+                        else:
+                            ai_stats["empty"] += 1
 
         merged = enrich_existing_accused(records, extractions, fir_text=fir_text)
         rows.extend(merged["rows"])
@@ -587,11 +600,13 @@ def _disposal_enrichment(conn, run_id):
     )
 
 
-def _drug_enrichment(conn, run_id, kb_items):
+def _drug_enrichment(conn, run_id, kb_items, drug_kb_obj=None):
     known = {row[0] for row in _pairs(conn, "SELECT crime_id FROM crimes_unified")}
     v1 = _latest(conn, "accused_source", "V1")
     props = _latest(conn, "properties_source", "V2")
-    built = drug_rows_from_sources(v1, props, kb_items, known)
+    built = drug_rows_from_sources(
+        v1, props, kb_items, known, drug_kb_obj=drug_kb_obj,
+    )
     v1_rows = [row for row in built if row["provenance"] == "v1_dossier"]
     v2_rows = [row for row in built if row["provenance"] == "v2_property"]
     return {
@@ -628,10 +643,12 @@ def _ai_already_settled(conn, crime_id, digest):
     return timeout_tries >= 3
 
 
-def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None):
+def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_kb_obj=None):
     """Optional AI pass. Disabled unless ETL3_AI_ENABLED=1 or a client is injected.
 
-    A failed call records an attempt and does not delete existing drug rows.
+    A failed call records an attempt and does not delete existing deterministic
+    drug rows (v1_dossier / v2_property). Only provenance='etl3_ai' rows for the
+    crime are replaced after a successful model response.
     """
     settings = settings or ai_settings()
     if client is None and not settings["enabled"]:
@@ -642,6 +659,7 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None):
     facts = _brief_facts(conn)
     limit = settings.get("limit") or 0
     processed = success = empty = failed = skipped = 0
+    rejected = generic_rejected = unsupported = 0
     for crime_id, (source_system, text) in facts.items():
         if crime_id not in known:
             continue
@@ -652,28 +670,71 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None):
             skipped += 1
             continue
         processed += 1
+        source_module = "fir" if source_system == "V1" else "crimes"
         try:
-            parsed, attempts = extract_with_retry(client, text, max_retries=settings.get("max_retries", 1))
+            parsed, attempts, raw_response = extract_with_retry(
+                client, text, max_retries=settings.get("max_retries", 1),
+            )
         except AIExtractionError as exc:
-            record_ai_attempt(conn, crime_id, digest, settings.get("model"), exc.status, 1, str(exc))
+            record_ai_attempt(
+                conn, crime_id, digest, settings.get("model"), exc.status, 1, str(exc),
+                source_system=source_system, source_module=source_module,
+                validation_status="n/a",
+            )
             failed += 1
             continue
         drugs = parsed["drugs"]
-        status = "empty" if not drugs else "success"
-        record_ai_attempt(conn, crime_id, digest, settings.get("model"), status, attempts, None)
+        rows = ai_drug_rows(
+            crime_id, source_system, drugs, kb_items,
+            drug_kb_obj=drug_kb_obj, source_text=text,
+        )
+        rejections = getattr(rows, "rejections", []) or []
+        for rej in rejections:
+            rejected += 1
+            reason = rej.get("reason") or ""
+            if reason == "GENERIC_IGNORED":
+                generic_rejected += 1
+            elif reason == "SOURCE_UNSUPPORTED":
+                unsupported += 1
+        if rows:
+            validation_status = "partial" if rejections else "accepted"
+            status = "success"
+            success += 1
+        elif drugs:
+            validation_status = "rejected"
+            status = "empty"
+            empty += 1
+        else:
+            validation_status = "empty"
+            status = "empty"
+            empty += 1
+        record_ai_attempt(
+            conn, crime_id, digest, settings.get("model"), status, attempts, None,
+            source_system=source_system, source_module=source_module,
+            raw_response=raw_response, parsed_response=parsed,
+            validation_status=validation_status, validation_errors=rejections or None,
+        )
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM drug_extractions WHERE provenance = 'etl3_ai' AND crime_id = %s",
                 (crime_id,),
             )
-        if drugs:
-            rows = ai_drug_rows(crime_id, source_system, drugs, kb_items)
-            upsert_rows(conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS, run_id, "drug_extraction")
-            success += 1
-        else:
-            empty += 1
-    return {"status": "ran", "processed": processed, "success": success, "empty": empty,
-            "failed": failed, "skipped": skipped}
+        if rows:
+            upsert_rows(
+                conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS,
+                run_id, "drug_extraction",
+            )
+    return {
+        "status": "ran",
+        "processed": processed,
+        "success": success,
+        "empty": empty,
+        "failed": failed,
+        "skipped": skipped,
+        "rejected": rejected,
+        "generic_rejected": generic_rejected,
+        "unsupported": unsupported,
+    }
 
 
 def run_enrichment(conn, run_id, ai_client=None, accused_client=None):
@@ -693,12 +754,9 @@ def run_enrichment(conn, run_id, ai_client=None, accused_client=None):
             (run_id,),
         )
     conn.commit()
-    kb_items = drug_kb.load_kb()
-    v2 = connections.get_v2_source_connection()
-    try:
-        geo_kb = load_geo_kb(v2)
-    finally:
-        v2.close()
+    drug_kb_obj = drug_kb.load_drug_kb(conn)
+    kb_items = drug_kb_obj.items
+    geo_kb = load_geo_kb(conn, schema="kb")
     stats = {}
     try:
         steps = (
@@ -713,8 +771,12 @@ def run_enrichment(conn, run_id, ai_client=None, accused_client=None):
             ("properties", lambda: _property_enrichment(conn, run_id)),
             ("fsl", lambda: _fsl_enrichment(conn, run_id)),
             ("disposal", lambda: _disposal_enrichment(conn, run_id)),
-            ("drugs", lambda: _drug_enrichment(conn, run_id, kb_items)),
-            ("ai", lambda: run_ai_extraction(conn, run_id, kb_items, client=ai_client)),
+            ("drugs", lambda: _drug_enrichment(
+                conn, run_id, kb_items, drug_kb_obj=drug_kb_obj,
+            )),
+            ("ai", lambda: run_ai_extraction(
+                conn, run_id, kb_items, client=ai_client, drug_kb_obj=drug_kb_obj,
+            )),
         )
         for name, fn in steps:
             stats[name] = fn()

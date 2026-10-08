@@ -33,8 +33,8 @@ Implemented in `etl3/enrichment/ai.py`.
 
 | Item | Value |
 |---|---|
-| Model | `LLM_MODEL_EXTRACTION` (no default; the old extraction client also had no default) |
-| Host | `OLLAMA_HOST`, default `http://localhost:11434` |
+| Model | `OLLAMA_MODEL` (alias `LLM_MODEL_EXTRACTION`); required when AI enabled — no hardcoded default |
+| Host | `OLLAMA_BASE_URL` (alias `OLLAMA_HOST`); required when AI enabled — no hardcoded / localhost fallback |
 | Temperature | 0 |
 | Prompt | Production prompt from `brief_facts_ai/extractor_drugs.py`, stored at `etl3/enrichment/drug_extraction_prompt.txt` |
 | Input | Crime `brief_facts` (V2) or `fir_contents` (V1) |

@@ -1,8 +1,9 @@
 """
-Applies a migration SQL file to dopams_cctns, with explicit safety gates:
+Applies a migration SQL file to the configured unified database
+(dopams_cctns or dopams_cctns_v2), with explicit safety gates:
 
   1. Connects via db.connections.get_unified_connection(), which already
-     refuses to proceed if current_database() != 'dopams_cctns'.
+     refuses to proceed if current_database() != settings.EXPECTED_UNIFIED_DBNAME.
   2. Before running any DDL, additionally confirms the migration has not
      already been applied (checks for a _migrations tracking table and
      whether this filename is recorded there) and, for the very first
@@ -75,7 +76,7 @@ def apply_migration(filename):
                     "is meant for an empty database only."
                 )
 
-        print(f"Applying {filename} to dopams_cctns ...")
+        print(f"Applying {filename} to {connections.settings.EXPECTED_UNIFIED_DBNAME} ...")
         with conn.cursor() as cur:
             cur.execute(sql)
             cur.execute(
