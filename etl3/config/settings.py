@@ -87,11 +87,34 @@ def ollama_model() -> str:
     return _env_get("OLLAMA_MODEL", "LLM_MODEL_EXTRACTION")
 
 
+def ai_mode() -> str:
+    """AI workload mode: ``limited`` (diagnostic) or ``backfill`` (production).
+
+    ``limited`` honours ETL3_AI_LIMIT as a per-invocation cap (tests / diagnostics).
+    ``backfill`` ignores ETL3_AI_LIMIT and processes the full eligible backlog in
+    bounded batches (ETL3_AI_BATCH_SIZE). Default is ``backfill`` so production
+    is never silently capped by a leftover test limit.
+    """
+    raw = (_env_get("ETL3_AI_MODE") or "backfill").strip().lower()
+    if raw in ("limited", "limit", "test", "diagnostic"):
+        return "limited"
+    if raw in ("backfill", "full", "production", "prod"):
+        return "backfill"
+    raise RuntimeError(
+        f"ETL3_AI_MODE must be 'limited' or 'backfill', got {raw!r}"
+    )
+
+
 def resolve_ai_settings() -> dict:
     """Single source of truth for enrichment AI / Ollama settings.
 
     When ETL3_AI_ENABLED is on, OLLAMA_BASE_URL and OLLAMA_MODEL are required.
     When AI is off, Ollama values may be empty and no connection is attempted.
+
+    Limit semantics:
+      - mode=limited  → ETL3_AI_LIMIT caps new model calls per invocation (0=unlimited)
+      - mode=backfill → ETL3_AI_LIMIT is ignored; ETL3_AI_BATCH_SIZE bounds
+        commit/progress batches only
     """
     enabled = ai_enabled()
     host = ollama_base_url()
@@ -109,13 +132,22 @@ def resolve_ai_settings() -> dict:
             )
     timeout_raw = _env_get("LLM_TIMEOUT") or "300"
     limit_raw = _env_get("ETL3_AI_LIMIT") or "0"
+    batch_raw = _env_get("ETL3_AI_BATCH_SIZE") or "25"
+    retries_raw = _env_get("ETL3_AI_MAX_RETRIES") or "2"
+    mode = ai_mode()
+    limit = int(limit_raw)
+    if mode == "backfill":
+        # Production historical workload must not be capped by the test limit.
+        limit = 0
     return {
         "enabled": enabled,
         "host": host,
         "model": model,
         "timeout": int(timeout_raw),
-        "limit": int(limit_raw),
-        "max_retries": 1,
+        "mode": mode,
+        "limit": limit,
+        "batch_size": max(1, int(batch_raw)),
+        "max_retries": max(0, int(retries_raw)),
     }
 
 

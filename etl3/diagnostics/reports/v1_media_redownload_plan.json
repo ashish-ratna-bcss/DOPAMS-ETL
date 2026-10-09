@@ -1,0 +1,52 @@
+{
+  "recommendation": "controlled_redownload",
+  "reason": "Original V1 media tree /home/tganb/dopams/media_cctnsv1 is absent on dopams (192.168.103.182), empty/absent under /home/eagle/media_cctnsv1, not present under /mnt/shared-etl-files, and not found on dopams181. Bookkeeping still marks 6296 files DOWNLOADED with tganb paths; 0/50 and 0/100 sampled files exist on disk.",
+  "do_not_execute_until_approved": true,
+  "risks": [
+    "Re-download writes new local_path under MEDIA_BASE_DIR=/home/eagle/media_cctnsv1, changing paths from /home/tganb/dopams/media_cctnsv1/...",
+    "V1 source DB currently rejects writes (ReadOnlySqlTransaction); path/status updates in cctns.cctns_media_files require a temporary RW window or a writable bookkeeping mirror — must be approved before execution.",
+    "Default sync_media only selects PENDING/FAILED; DOWNLOADED-but-missing files need an explicit rematerialize mode that does not treat existing zero-byte targets as success.",
+    "overwrite=false skips non-empty cached files; zero-byte leftovers are re-fetched safely by alfresco.download_media_file."
+  ],
+  "destination": {
+    "MEDIA_BASE_DIR": "/home/eagle/media_cctnsv1",
+    "layout": "<MEDIA_BASE_DIR>/<attach_path>/<dms_file_name>",
+    "disk": {
+      "root_avail": "63G",
+      "bookkeeping_sum_size_bytes_downloaded": 7139122441,
+      "bookkeeping_sum_size_gib_approx": 6.65,
+      "headroom_ok": true
+    }
+  },
+  "downloader": {
+    "module": "cctns-v1/CCTNSV1_DAILY_ETL_RUN/sync_media.py + apis/alfresco.py",
+    "endpoint": "ALFRESCO_DOWNLOAD_API_URL=http://103.164.200.184/alfresco/download?path=&name=",
+    "concurrency": 5,
+    "timeout_secs": 60,
+    "http_retries": {"total": 3, "backoff_factor": 1.0, "status_forcelist": [429, 500, 502, 503, 504]},
+    "rate_limiting": "none beyond concurrency=5 and urllib3 Retry; keep concurrency<=5"
+  },
+  "selection_rules": {
+    "include": "status=DOWNLOADED AND local_path LIKE '/home/tganb/%' AND file missing or zero-byte at recorded and remapped paths",
+    "exclude_not_found": "status=NOT_FOUND with error 'Document not available on Alfresco DMS (0 bytes)' — do not mass-retry",
+    "path_update": "on success set local_path to new MEDIA_BASE_DIR path and refresh file_size_bytes; never invent attach_path/dms_file_name"
+  },
+  "zero_byte_http_200": "Treat as NOT_FOUND; delete .tmp; do not mark DOWNLOADED; retain explicit error_message",
+  "verification": [
+    "Sample >=100 successful downloads: exists, size>0, readable, PDF/image magic where applicable",
+    "Reconcile count(status=DOWNLOADED with file present) vs bookkeeping",
+    "Confirm original tganb bookkeeping history preserved where files remain unrestored",
+    "Confirm V1/V2 business tables unchanged"
+  ],
+  "rollback": [
+    "Keep DB dump /home/eagle/backups/dopams_cctns_v2/dopams_cctns_v2_pre_gap_remediation_20261009T074430Z.dump for unified target",
+    "For V1 media bookkeeping: snapshot cctns.cctns_media_files before RW updates",
+    "New files under /home/eagle/media_cctnsv1 can be removed by attach_path prefix if aborted; do not delete any recovered mount"
+  ],
+  "514_not_found": {
+    "count": 514,
+    "fir": 181,
+    "court": 333,
+    "action": "retain unresolved; stratified probes (60 then 99) all HTTP 200 with 0 bytes"
+  }
+}

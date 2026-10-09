@@ -40,6 +40,8 @@ def test_gap_classification_does_not_hide_unknown_types():
     assert classify_gap("v1_person_key_absent") == "KNOWN_SOURCE_LIMITATION"
     assert classify_gap("ora_06502_window") == "KNOWN_SOURCE_LIMITATION"
     assert classify_gap("unresolved_arrest_accused_link") == "UNRESOLVED_RELATIONSHIP"
+    assert classify_gap("ambiguous_v1_ps_code") == "UNRESOLVED_RELATIONSHIP"
+    assert classify_gap("ambiguous_v1_station_name") == "UNRESOLVED_RELATIONSHIP"
     assert classify_gap("address_unresolved") == "DATA_QUALITY"
     assert classify_gap("some_new_gap") == "ETL_DEFECT"
 

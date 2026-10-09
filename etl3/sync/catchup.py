@@ -59,7 +59,19 @@ def _choose_run_id(spec, row, modified, pairs, record_id):
     return revision_run_id(real, modified)
 
 
-def catch_up_module(conn, spec: dict, consolidation_run_id: str, batch_size: int = 500) -> dict:
+def catch_up_module(
+    conn,
+    spec: dict,
+    consolidation_run_id: str,
+    batch_size: int = 500,
+    commit_every_batches: int = 0,
+) -> dict:
+    """Capture missing/stale source rows into observation tables.
+
+    ``commit_every_batches`` > 0 commits after that many batches (used for
+    large media catch-up so a crash does not lose the whole module). Default
+    0 preserves the original single-transaction behaviour.
+    """
     adapter = adapter_for(spec["source_system"])
     stamps = adapter.list_record_stamps(spec["module"])
     latest, pairs = _observed(conn, spec)
@@ -77,7 +89,15 @@ def catch_up_module(conn, spec: dict, consolidation_run_id: str, batch_size: int
             needed.append(pk)
 
     inserted = replayed = 0
-    for start in range(0, len(needed), batch_size):
+    batches_since_commit = 0
+    total_batches = (len(needed) + batch_size - 1) // batch_size if needed else 0
+    for batch_idx, start in enumerate(range(0, len(needed), batch_size), 1):
+        if total_batches and (batch_idx == 1 or batch_idx % 10 == 0 or batch_idx == total_batches):
+            print(
+                f"  catchup {spec['source_system']}/{spec['module']} "
+                f"batch {batch_idx}/{total_batches} inserted={inserted}",
+                flush=True,
+            )
         rows = adapter.fetch_rows_by_pk(spec["module"], needed[start:start + batch_size])
         for row in rows:
             if spec["source_system"] == "V1":
@@ -86,7 +106,8 @@ def catch_up_module(conn, spec: dict, consolidation_run_id: str, batch_size: int
             else:
                 from etl3.sources.v2.adapter import MODULE_PK
                 record_id = str(row[MODULE_PK[spec["module"]]])
-                modified = row.get("date_modified")
+                # Media bookkeeping uses updated_at; business tables use date_modified.
+                modified = row.get("date_modified") or row.get("updated_at")
             run_id = _choose_run_id(spec, row, modified, pairs, record_id)
             if not run_id:
                 continue
@@ -99,6 +120,10 @@ def catch_up_module(conn, spec: dict, consolidation_run_id: str, batch_size: int
                 inserted += 1
             else:
                 replayed += 1
+        batches_since_commit += 1
+        if commit_every_batches and batches_since_commit >= commit_every_batches:
+            conn.commit()
+            batches_since_commit = 0
     if spec["module"] == "persons" and inserted:
         v2obs.record_placeholder_persons_gap(conn, inserted)
     return {

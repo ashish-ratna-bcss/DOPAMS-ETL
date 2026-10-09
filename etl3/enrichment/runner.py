@@ -381,8 +381,10 @@ def _accused_enrichment(conn, run_id, accused_client=None, settings=None):
     ai_stats = {
         "processed": 0, "success": 0, "empty": 0, "failed": 0,
         "skipped": 0, "no_accused": 0, "limit_reached": 0,
+        "pending": 0, "eligible": 0, "mode": settings.get("mode") or "backfill",
     }
     ai_limit = settings.get("limit") or 0
+    batch_size = settings.get("batch_size") or 25
     for crime_id, records in by_crime.items():
         extractions = []
         fact_entry = facts.get(crime_id)
@@ -393,51 +395,55 @@ def _accused_enrichment(conn, run_id, accused_client=None, settings=None):
             records = apply_v1_code_type_and_ccl_numbering(records, fir_text)
 
         if ai_on and fact_entry and accused_client is not None:
-            if ai_limit and ai_stats["processed"] >= ai_limit:
+            ai_stats["eligible"] += 1
+            _source_system, text = fact_entry
+            roster = build_roster_for_prompt(records)
+            allowed_ids = [r["accused_id"] for r in records]
+            allowed_codes = [r.get("accused_code") for r in records if r.get("accused_code")]
+            digest = _hash({"kind": "accused", "brief_facts": text, "roster": roster})
+            if _ai_already_settled(conn, crime_id, digest):
+                ai_stats["skipped"] += 1
+                extractions = _load_stored_accused_extractions(conn, allowed_ids)
+            elif ai_limit and ai_stats["processed"] >= ai_limit:
+                # limited/diagnostic mode only — backfill sets limit=0
                 ai_stats["limit_reached"] += 1
+                ai_stats["pending"] += 1
             else:
-                _source_system, text = fact_entry
-                roster = build_roster_for_prompt(records)
-                allowed_ids = [r["accused_id"] for r in records]
-                allowed_codes = [r.get("accused_code") for r in records if r.get("accused_code")]
-                digest = _hash({"kind": "accused", "brief_facts": text, "roster": roster})
-                if _ai_already_settled(conn, crime_id, digest):
-                    ai_stats["skipped"] += 1
+                ai_stats["processed"] += 1
+                try:
+                    parsed, attempts, raw_response = extract_accused_with_retry(
+                        accused_client, text, roster, allowed_ids, allowed_codes,
+                        max_retries=settings.get("max_retries", 1),
+                    )
+                except AIExtractionError as exc:
+                    record_ai_attempt(
+                        conn, crime_id, digest, settings.get("model"),
+                        exc.status, 1, str(exc),
+                        source_system=_source_system,
+                        source_module="fir" if _source_system == "V1" else "crimes",
+                        raw_response=None,
+                        validation_status="n/a",
+                    )
+                    ai_stats["failed"] += 1
                     extractions = _load_stored_accused_extractions(conn, allowed_ids)
                 else:
-                    ai_stats["processed"] += 1
-                    try:
-                        parsed, attempts, raw_response = extract_accused_with_retry(
-                            accused_client, text, roster, allowed_ids, allowed_codes,
-                            max_retries=settings.get("max_retries", 1),
-                        )
-                    except AIExtractionError as exc:
-                        record_ai_attempt(
-                            conn, crime_id, digest, settings.get("model"),
-                            exc.status, 1, str(exc),
-                            source_system=_source_system,
-                            source_module="fir" if _source_system == "V1" else "crimes",
-                            raw_response=None,
-                            validation_status="n/a",
-                        )
-                        ai_stats["failed"] += 1
-                        extractions = _load_stored_accused_extractions(conn, allowed_ids)
+                    extractions = parsed.get("accused") or []
+                    status = "empty" if not extractions else "success"
+                    record_ai_attempt(
+                        conn, crime_id, digest, settings.get("model"),
+                        status, attempts, None,
+                        source_system=_source_system,
+                        source_module="fir" if _source_system == "V1" else "crimes",
+                        raw_response=raw_response,
+                        parsed_response=parsed,
+                        validation_status="accepted" if extractions else "empty",
+                    )
+                    if extractions:
+                        ai_stats["success"] += 1
                     else:
-                        extractions = parsed.get("accused") or []
-                        status = "empty" if not extractions else "success"
-                        record_ai_attempt(
-                            conn, crime_id, digest, settings.get("model"),
-                            status, attempts, None,
-                            source_system=_source_system,
-                            source_module="fir" if _source_system == "V1" else "crimes",
-                            raw_response=raw_response,
-                            parsed_response=parsed,
-                            validation_status="accepted" if extractions else "empty",
-                        )
-                        if extractions:
-                            ai_stats["success"] += 1
-                        else:
-                            ai_stats["empty"] += 1
+                        ai_stats["empty"] += 1
+                if ai_stats["processed"] % batch_size == 0:
+                    conn.commit()
 
         merged = enrich_existing_accused(records, extractions, fir_text=fir_text)
         rows.extend(merged["rows"])
@@ -649,6 +655,10 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
     A failed call records an attempt and does not delete existing deterministic
     drug rows (v1_dossier / v2_property). Only provenance='etl3_ai' rows for the
     crime are replaced after a successful model response.
+
+    Modes (from resolve_ai_settings):
+      - limited: ETL3_AI_LIMIT caps new model calls this invocation
+      - backfill: no call cap; ETL3_AI_BATCH_SIZE commits progress periodically
     """
     settings = settings or ai_settings()
     if client is None and not settings["enabled"]:
@@ -658,16 +668,21 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
     known = {row[0] for row in _pairs(conn, "SELECT crime_id FROM crimes_unified")}
     facts = _brief_facts(conn)
     limit = settings.get("limit") or 0
+    batch_size = settings.get("batch_size") or 25
+    mode = settings.get("mode") or "backfill"
     processed = success = empty = failed = skipped = 0
     rejected = generic_rejected = unsupported = 0
+    pending = eligible = 0
     for crime_id, (source_system, text) in facts.items():
         if crime_id not in known:
             continue
-        if limit and processed >= limit:
-            break
+        eligible += 1
         digest = _hash({"brief_facts": text})
         if _ai_already_settled(conn, crime_id, digest):
             skipped += 1
+            continue
+        if limit and processed >= limit:
+            pending += 1
             continue
         processed += 1
         source_module = "fir" if source_system == "V1" else "crimes"
@@ -682,6 +697,8 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
                 validation_status="n/a",
             )
             failed += 1
+            if processed % batch_size == 0:
+                conn.commit()
             continue
         drugs = parsed["drugs"]
         rows = ai_drug_rows(
@@ -724,13 +741,23 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
                 conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS,
                 run_id, "drug_extraction",
             )
+        if processed % batch_size == 0:
+            conn.commit()
+            print(
+                f"[ai-drug] mode={mode} processed={processed} success={success} "
+                f"empty={empty} failed={failed} skipped={skipped} pending={pending}",
+                flush=True,
+            )
     return {
         "status": "ran",
+        "mode": mode,
+        "eligible": eligible,
         "processed": processed,
         "success": success,
         "empty": empty,
         "failed": failed,
         "skipped": skipped,
+        "pending": pending,
         "rejected": rejected,
         "generic_rejected": generic_rejected,
         "unsupported": unsupported,

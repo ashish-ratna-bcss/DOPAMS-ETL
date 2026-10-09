@@ -32,6 +32,10 @@ GAP_CLASS = {
     "unresolved_interrogation_person_link": "UNRESOLVED_RELATIONSHIP",
     "unresolved_v1_ps_code": "UNRESOLVED_RELATIONSHIP",
     "ambiguous_v1_ps_code": "UNRESOLVED_RELATIONSHIP",
+    # Same family as station_name_not_unique in ps_enrichment: multiple hierarchy
+    # rows share a station name, so no unique code can be assigned safely.
+    "ambiguous_v1_station_name": "UNRESOLVED_RELATIONSHIP",
+    "unresolved_media_parent": "UNRESOLVED_RELATIONSHIP",
 }
 
 

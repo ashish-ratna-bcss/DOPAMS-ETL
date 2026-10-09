@@ -16,10 +16,10 @@ runs" therefore means "group by etl_run_id, exclude ones already known" --
 never "id > last_known_id" the way V1's adapter can reason about its
 integer run_log.id.
 
-file_media_bookkeeping is deliberately NOT a supported module here -- it has
-no date_created/date_modified at all (confirmed in the compatibility
-matrix), and it is a media/file table, not a CCTNS business entity in the
-sense the other 12 are. It is explicitly out of scope for this phase.
+Media module `file_media_bookkeeping` is included for metadata consolidation.
+Live schema carries etl_run_id / fetched_at / created_at / updated_at (verified
+2026-10-09). It has no date_modified; list_record_stamps uses updated_at.
+Binary downloads remain owned by the V2 media server; ETL-3 never writes V2.
 """
 from typing import Optional
 
@@ -40,6 +40,7 @@ MODULE_PK = {
     "fsl_case_property": "case_property_id",
     "interrogation_reports": "interrogation_report_id",
     "hierarchy": "ps_code",
+    "file_media_bookkeeping": "id",
 }
 
 
@@ -171,17 +172,22 @@ class V2Adapter(SourceAdapter):
             conn.close()
 
     def list_record_stamps(self, module: str) -> list:
-        """(pk, date_modified, etl_run_id or None). A missing date_modified
-        column degrades to pk-only rather than dropping the module."""
+        """(pk, modified_at, etl_run_id or None).
+
+        Business tables use date_modified. file_media_bookkeeping uses
+        updated_at (no date_modified column — verified live). A missing
+        modified column degrades to pk-only rather than dropping the module.
+        """
         if module not in MODULE_PK:
             raise ValueError(f"Unsupported V2 module: {module!r}")
         pk_col = MODULE_PK[module]
+        modified_col = "updated_at" if module == "file_media_bookkeeping" else "date_modified"
         conn = connections.get_v2_source_connection()
         try:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        f"SELECT {pk_col}::text, date_modified, etl_run_id::text FROM {module}"
+                        f"SELECT {pk_col}::text, {modified_col}, etl_run_id::text FROM {module}"
                     )
                     return [(pk, modified, run_id) for pk, modified, run_id in cur.fetchall()]
             except Exception:

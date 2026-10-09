@@ -46,6 +46,9 @@ MODULE_TABLE = {
     "accused": ("cctns_accused", "accused_id"),
     "accused_details": ("cctns_accused_details", "accused_id"),
     "court": ("cctns_court", "court_id"),
+    # Media bookkeeping is maintained by sync_media.py, not cctns_v1_etl_run_log.
+    # discover_new_runs() returns [] for this module; catch-up uses updated_at.
+    "media": ("cctns_media_files", "media_id"),
 }
 
 
@@ -58,6 +61,10 @@ class V1Adapter(SourceAdapter):
     def discover_new_runs(self, module: str, known_run_ids: Optional[set] = None) -> list:
         if module not in MODULE_TABLE:
             raise ValueError(f"Unsupported V1 module: {module!r}")
+        # Media downloads are not logged on cctns_v1_etl_run_log.entity.
+        # Incremental capture for media is entirely catch-up on updated_at.
+        if module == "media":
+            return []
         known_run_ids = known_run_ids or set()
         conn = connections.get_v1_source_connection()
         try:
@@ -190,6 +197,11 @@ class V1Adapter(SourceAdapter):
                     cur.execute(
                         f"SELECT * FROM cctns.{table_name} WHERE natural_key = %s",
                         (record_id,),
+                    )
+                elif module == "media":
+                    cur.execute(
+                        f"SELECT * FROM cctns.{table_name} WHERE {pk_col}::text = %s",
+                        (str(record_id),),
                     )
                 else:  # fir
                     cur.execute(f"SELECT * FROM cctns.{table_name} WHERE {pk_col} = %s", (record_id,))

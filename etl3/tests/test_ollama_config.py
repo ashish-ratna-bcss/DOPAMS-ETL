@@ -164,6 +164,40 @@ def test_no_hardcoded_runtime_fallback_in_ai_source():
         assert needle not in text, f"ai.py still contains {needle!r}"
 
 
+def test_backfill_mode_ignores_ai_limit():
+    with mock.patch.dict(os.environ, {
+        "ETL3_AI_ENABLED": "1",
+        "OLLAMA_BASE_URL": "http://example-test-host:1234",
+        "OLLAMA_MODEL": "test-model",
+        "OLLAMA_HOST": "",
+        "LLM_MODEL_EXTRACTION": "",
+        "ETL3_AI_MODE": "backfill",
+        "ETL3_AI_LIMIT": "5",
+        "ETL3_AI_BATCH_SIZE": "10",
+    }, clear=False):
+        resolved = ai_settings()
+        assert resolved["mode"] == "backfill"
+        assert resolved["limit"] == 0
+        assert resolved["batch_size"] == 10
+
+
+def test_limited_mode_honours_ai_limit():
+    with mock.patch.dict(os.environ, {
+        "ETL3_AI_ENABLED": "1",
+        "OLLAMA_BASE_URL": "http://example-test-host:1234",
+        "OLLAMA_MODEL": "test-model",
+        "OLLAMA_HOST": "",
+        "LLM_MODEL_EXTRACTION": "",
+        "ETL3_AI_MODE": "limited",
+        "ETL3_AI_LIMIT": "5",
+        "ETL3_AI_BATCH_SIZE": "10",
+    }, clear=False):
+        resolved = ai_settings()
+        assert resolved["mode"] == "limited"
+        assert resolved["limit"] == 5
+        assert resolved["batch_size"] == 10
+
+
 def main():
     tests = [
         test_configured_endpoint_and_model,
@@ -174,6 +208,8 @@ def main():
         test_endpoint_change_without_code_change,
         test_no_hardcoded_runtime_fallback_in_settings_source,
         test_no_hardcoded_runtime_fallback_in_ai_source,
+        test_backfill_mode_ignores_ai_limit,
+        test_limited_mode_honours_ai_limit,
     ]
     failed = 0
     for fn in tests:

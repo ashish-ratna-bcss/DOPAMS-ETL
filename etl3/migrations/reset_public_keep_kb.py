@@ -31,6 +31,8 @@ MIGRATIONS = [
     "012_accused_brief_facts_enrichment.sql",
     "013_kb_schema.sql",
     "014_accused_status_width.sql",
+    "015_ai_extraction_audit.sql",
+    "016_media_metadata.sql",
 ]
 
 

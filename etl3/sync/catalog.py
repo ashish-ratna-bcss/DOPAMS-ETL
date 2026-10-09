@@ -48,6 +48,14 @@ MODULES = [
      "has_source_system": False, "collapse": False},
     {"source_system": "V2", "module": "hierarchy", "obs_table": "hierarchy_source", "source_table": "hierarchy",
      "unified_table": "hierarchy_unified", "has_source_system": False, "collapse": False},
+    # Media metadata — observations in media_source; consolidated by media_consolidate.
+    # source_table here is the observation source_table tag (module name for V1,
+    # physical table for V2), matching write_source_observation source_table=.
+    {"source_system": "V1", "module": "media", "obs_table": "media_source", "source_table": "media",
+     "unified_table": "media_unified", "has_source_system": True, "collapse": False},
+    {"source_system": "V2", "module": "file_media_bookkeeping", "obs_table": "media_source",
+     "source_table": "file_media_bookkeeping", "unified_table": "media_unified",
+     "has_source_system": True, "collapse": False},
 ]
 
 

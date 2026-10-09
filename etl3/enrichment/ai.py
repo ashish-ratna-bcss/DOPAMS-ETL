@@ -401,34 +401,53 @@ def parse_accused_response(text: str, allowed_accused_ids=None, allowed_codes=No
     return {"accused": cleaned, "rejected": rejected}
 
 
-def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
-    """Call the drug client, validate, and retry timeout/invalid/error once.
+def _retry_sleep(attempt_index: int) -> None:
+    """Bounded exponential backoff between transient AI failures."""
+    import time
 
+    # attempt_index is 0-based after the first failure: 1s, 2s, 4s (cap 30s)
+    delay = min(30.0, float(2 ** attempt_index))
+    time.sleep(delay)
+
+
+def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
+    """Call the drug client, validate, and retry transient failures.
+
+    Transient statuses (timeout/error) use bounded exponential backoff.
+    Permanent statuses (invalid/empty) are not retried.
     Returns (parsed_dict, attempt_count, raw_response).
     """
     last = None
     attempts = 0
     raw = ""
-    for _ in range(max_retries + 1):
+    transient_failures = 0
+    while True:
         attempts += 1
         try:
             raw = client.complete(brief_facts)
             return parse_drug_response(raw), attempts, raw
         except AIExtractionError as exc:
             last = exc
-    raise last
+            if exc.status in ("timeout", "error") and transient_failures < max_retries:
+                _retry_sleep(transient_failures)
+                transient_failures += 1
+                continue
+            raise last
 
 
 def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
                                allowed_codes, max_retries: int = 1):
     """Call the known-accused client and keep only roster members.
 
+    Transient statuses (timeout/error) use bounded exponential backoff.
+    Permanent statuses (invalid/empty) are not retried.
     Returns (parsed_dict, attempt_count, raw_response).
     """
     last = None
     attempts = 0
     raw = ""
-    for _ in range(max_retries + 1):
+    transient_failures = 0
+    while True:
         attempts += 1
         try:
             raw = client.complete(brief_facts, roster)
@@ -439,4 +458,8 @@ def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
             ), attempts, raw
         except AIExtractionError as exc:
             last = exc
-    raise last
+            if exc.status in ("timeout", "error") and transient_failures < max_retries:
+                _retry_sleep(transient_failures)
+                transient_failures += 1
+                continue
+            raise last

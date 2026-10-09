@@ -317,6 +317,11 @@ def _consolidate(conn, run_id, progress):
            field_map_entry=field_maps.HIERARCHY["V2"], consolidation_run_id=run_id))
     conn.commit()
 
+    # --- media metadata (V1 + V2 bookkeeping; filesystem availability re-checked) ---
+    from etl3.merger.media_consolidate import run_media_consolidation
+    report("media[V1+V2]", run_media_consolidation(conn, run_id))
+    conn.commit()
+
     from etl3.enrichment.runner import run_enrichment
     report("enrichment", run_enrichment(conn, run_id))
     conn.commit()

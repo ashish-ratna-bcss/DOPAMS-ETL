@@ -25,6 +25,7 @@ MODULE_DEST_TABLE = {
     "accused": "accused_source",
     "accused_details": "arrests_source",
     "court": "chargesheets_source",
+    "media": "media_source",
 }
 
 # best-effort per-module field names for source_created_at/source_modified_at
@@ -35,6 +36,7 @@ _TS_FIELDS = {
     "accused": ("created_at", "updated_at"),
     "accused_details": ("created_at", "updated_at"),
     "court": ("created_at", "updated_at"),
+    "media": ("created_at", "updated_at"),
 }
 
 
@@ -47,6 +49,8 @@ def _record_id_for(module: str, row: dict) -> str:
         return str(row["accused_id"])
     if module == "court":
         return str(row["court_id"])
+    if module == "media":
+        return str(row["media_id"])
     raise ValueError(module)
 
 

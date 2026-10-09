@@ -39,11 +39,53 @@ MODULE_DEST_TABLE = {
     "fsl_case_property": "fsl_source",
     "interrogation_reports": "interrogation_source",
     "hierarchy": "hierarchy_source",
+    "file_media_bookkeeping": "media_source",
 }
+
+
+# Bookkeeping columns needed for media consolidation. Omitting media_payload /
+# URL blobs keeps observations small; identifiers, paths and status are kept.
+_MEDIA_PAYLOAD_KEYS = (
+    "id",
+    "source_type",
+    "source_field",
+    "parent_id",
+    "file_id",
+    "file_index",
+    "file_path",
+    "media_name",
+    "identity_type",
+    "identity_number",
+    "has_field",
+    "is_empty",
+    "notes",
+    "is_downloaded",
+    "downloaded_at",
+    "download_error",
+    "download_attempts",
+    "source_system",
+    "source_endpoint",
+    "fetched_at",
+    "etl_run_id",
+    "created_at",
+    "updated_at",
+)
+
+
+def _media_payload(row: dict) -> dict:
+    return {k: row.get(k) for k in _MEDIA_PAYLOAD_KEYS if k in row}
 
 
 def _write_row(unified_conn, module: str, row: dict, source_run_id: str, consolidation_run_id: str) -> bool:
     pk_col = MODULE_PK[module]
+    if module == "file_media_bookkeeping":
+        created = row.get("created_at") or row.get("fetched_at")
+        modified = row.get("updated_at") or row.get("downloaded_at") or row.get("fetched_at")
+        payload = _media_payload(row)
+    else:
+        created = row.get("date_created")
+        modified = row.get("date_modified")
+        payload = row
     return write_source_observation(
         unified_conn,
         MODULE_DEST_TABLE[module],
@@ -51,10 +93,10 @@ def _write_row(unified_conn, module: str, row: dict, source_run_id: str, consoli
         source_table=module,
         source_record_id=str(row[pk_col]),
         source_run_id=source_run_id,
-        source_created_at=row.get("date_created"),
-        source_modified_at=row.get("date_modified"),
+        source_created_at=created,
+        source_modified_at=modified,
         source_fetched_at=row.get("fetched_at"),
-        payload=row,
+        payload=payload,
         consolidation_run_id=consolidation_run_id,
     )
 
