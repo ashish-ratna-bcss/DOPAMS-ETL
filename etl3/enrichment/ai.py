@@ -256,31 +256,103 @@ def validate_ai_drug_item(item, source_text, drug_kb_obj=None):
     return out
 
 
+def _ollama_think_enabled() -> bool:
+    """Qwen3 defaults to chain-of-thought; extraction needs JSON only.
+
+    Set OLLAMA_THINK=1 to allow thinking. Default off so historical backfill
+    does not stall on long reasoning traces under a hard HTTP timeout.
+    """
+    import os
+
+    raw = (os.environ.get("OLLAMA_THINK") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _is_oom_error(message: str) -> bool:
+    text = (message or "").lower()
+    if "out of memory" in text or "cuda out of memory" in text:
+        return True
+    if "insufficient memory" in text or "failed to allocate" in text:
+        return True
+    # Match OOM as a token, not substrings like "room" / "bloom".
+    return bool(re.search(r"(^|[^a-z])oom([^a-z]|$)", text))
+
+
+# Single-flight guard: never issue concurrent Ollama generations from one process.
+_OLLAMA_LOCK = __import__("threading").Lock()
+_THINK_FLAG_LOGGED = False
+_LAST_LATENCY_SEC = None
+
+
+def last_inference_latency_sec():
+    return _LAST_LATENCY_SEC
+
+
 def _ollama_chat(host, model, timeout, prompt: str) -> str:
-    body = json.dumps({
+    global _THINK_FLAG_LOGGED, _LAST_LATENCY_SEC
+    import time
+
+    payload = {
         "model": model,
         "stream": False,
         "format": "json",
         "messages": [{"role": "user", "content": prompt}],
         "options": {"temperature": 0},
-    }).encode("utf-8")
+    }
+    # Ollama qwen3 accepts top-level think=false to skip reasoning tokens.
+    think_on = _ollama_think_enabled()
+    if not think_on:
+        payload["think"] = False
+    if not _THINK_FLAG_LOGGED:
+        print(
+            f"[ollama] model={model!r} think={think_on} "
+            f"payload_think_key={payload.get('think', '<absent>')} "
+            f"timeout_s={timeout}",
+            flush=True,
+        )
+        _THINK_FLAG_LOGGED = True
+    body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         f"{host}/api/chat",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except TimeoutError as exc:
-        raise AIExtractionError("timeout", str(exc)) from exc
-    except urllib.error.URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        if isinstance(reason, TimeoutError):
+    # Serialize all generations in-process (one request at a time).
+    with _OLLAMA_LOCK:
+        t0 = time.monotonic()
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            _LAST_LATENCY_SEC = time.monotonic() - t0
             raise AIExtractionError("timeout", str(exc)) from exc
-        raise AIExtractionError("error", str(exc)) from exc
-    return (payload.get("message") or {}).get("content") or payload.get("response") or ""
+        except urllib.error.HTTPError as exc:
+            _LAST_LATENCY_SEC = time.monotonic() - t0
+            body_text = ""
+            try:
+                body_text = exc.read().decode("utf-8", "replace")[:500]
+            except Exception:
+                pass
+            msg = f"HTTP {exc.code}: {body_text or exc.reason}"
+            if _is_oom_error(msg):
+                raise AIExtractionError("error", f"oom_non_retryable: {msg}") from exc
+            raise AIExtractionError("error", msg) from exc
+        except urllib.error.URLError as exc:
+            _LAST_LATENCY_SEC = time.monotonic() - t0
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise AIExtractionError("timeout", str(exc)) from exc
+            msg = str(exc)
+            if _is_oom_error(msg):
+                raise AIExtractionError("error", f"oom_non_retryable: {msg}") from exc
+            raise AIExtractionError("error", msg) from exc
+        _LAST_LATENCY_SEC = time.monotonic() - t0
+    return (
+        (response_payload.get("message") or {}).get("content")
+        or response_payload.get("response")
+        or ""
+    )
 
 
 def _normalize_host_model(host, model, timeout):
@@ -402,19 +474,21 @@ def parse_accused_response(text: str, allowed_accused_ids=None, allowed_codes=No
 
 
 def _retry_sleep(attempt_index: int) -> None:
-    """Bounded exponential backoff between transient AI failures."""
+    """Bounded exponential backoff + jitter between transient AI failures."""
+    import random
     import time
 
-    # attempt_index is 0-based after the first failure: 1s, 2s, 4s (cap 30s)
-    delay = min(30.0, float(2 ** attempt_index))
-    time.sleep(delay)
+    # attempt_index is 0-based after the first failure: ~1s, ~2s, ~4s (cap 30s)
+    base = min(30.0, float(2 ** attempt_index))
+    jitter = random.uniform(0.0, base * 0.5)
+    time.sleep(base + jitter)
 
 
 def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
     """Call the drug client, validate, and retry transient failures.
 
-    Transient statuses (timeout/error) use bounded exponential backoff.
-    Permanent statuses (invalid/empty) are not retried.
+    Transient statuses (timeout/error) use bounded exponential backoff + jitter.
+    Permanent statuses (invalid/empty) and GPU OOM are not retried.
     Returns (parsed_dict, attempt_count, raw_response).
     """
     last = None
@@ -428,6 +502,9 @@ def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
             return parse_drug_response(raw), attempts, raw
         except AIExtractionError as exc:
             last = exc
+            if _is_oom_error(str(exc)):
+                # Do not burn the GPU with immediate retries on OOM.
+                raise AIExtractionError("error", f"oom_non_retryable: {exc}") from exc
             if exc.status in ("timeout", "error") and transient_failures < max_retries:
                 _retry_sleep(transient_failures)
                 transient_failures += 1
@@ -439,8 +516,8 @@ def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
                                allowed_codes, max_retries: int = 1):
     """Call the known-accused client and keep only roster members.
 
-    Transient statuses (timeout/error) use bounded exponential backoff.
-    Permanent statuses (invalid/empty) are not retried.
+    Transient statuses (timeout/error) use bounded exponential backoff + jitter.
+    Permanent statuses (invalid/empty) and GPU OOM are not retried.
     Returns (parsed_dict, attempt_count, raw_response).
     """
     last = None
@@ -458,6 +535,8 @@ def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
             ), attempts, raw
         except AIExtractionError as exc:
             last = exc
+            if _is_oom_error(str(exc)):
+                raise AIExtractionError("error", f"oom_non_retryable: {exc}") from exc
             if exc.status in ("timeout", "error") and transient_failures < max_retries:
                 _retry_sleep(transient_failures)
                 transient_failures += 1

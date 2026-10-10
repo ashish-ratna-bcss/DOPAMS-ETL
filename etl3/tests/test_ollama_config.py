@@ -173,12 +173,18 @@ def test_backfill_mode_ignores_ai_limit():
         "LLM_MODEL_EXTRACTION": "",
         "ETL3_AI_MODE": "backfill",
         "ETL3_AI_LIMIT": "5",
-        "ETL3_AI_BATCH_SIZE": "10",
+        "ETL3_AI_BATCH_SIZE": "5",
+        "ETL3_AI_REQUEST_DELAY_SEC": "3",
+        "ETL3_AI_HEALTH_COOLDOWN_SEC": "60",
+        "LLM_TIMEOUT": "180",
     }, clear=False):
         resolved = ai_settings()
         assert resolved["mode"] == "backfill"
         assert resolved["limit"] == 0
-        assert resolved["batch_size"] == 10
+        assert resolved["batch_size"] == 5
+        assert resolved["request_delay_sec"] == 3.0
+        assert resolved["health_cooldown_sec"] == 60.0
+        assert resolved["timeout"] == 180
 
 
 def test_limited_mode_honours_ai_limit():

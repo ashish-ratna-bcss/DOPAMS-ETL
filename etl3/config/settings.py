@@ -130,10 +130,13 @@ def resolve_ai_settings() -> dict:
                 "OLLAMA_MODEL is required when ETL3_AI_ENABLED=1 "
                 "(no hardcoded model fallback)"
             )
-    timeout_raw = _env_get("LLM_TIMEOUT") or "300"
+    timeout_raw = _env_get("LLM_TIMEOUT") or "180"
     limit_raw = _env_get("ETL3_AI_LIMIT") or "0"
-    batch_raw = _env_get("ETL3_AI_BATCH_SIZE") or "25"
+    # Small batches keep DB checkpoints frequent on long overnight runs.
+    batch_raw = _env_get("ETL3_AI_BATCH_SIZE") or "5"
     retries_raw = _env_get("ETL3_AI_MAX_RETRIES") or "2"
+    delay_raw = _env_get("ETL3_AI_REQUEST_DELAY_SEC") or "3"
+    cooldown_raw = _env_get("ETL3_AI_HEALTH_COOLDOWN_SEC") or "60"
     mode = ai_mode()
     limit = int(limit_raw)
     if mode == "backfill":
@@ -148,6 +151,9 @@ def resolve_ai_settings() -> dict:
         "limit": limit,
         "batch_size": max(1, int(batch_raw)),
         "max_retries": max(0, int(retries_raw)),
+        # Pace Ollama generations on 8 GB GPUs (sequential + inter-request delay).
+        "request_delay_sec": max(0.0, float(delay_raw)),
+        "health_cooldown_sec": max(5.0, float(cooldown_raw)),
     }
 
 

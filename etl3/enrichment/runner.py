@@ -6,6 +6,9 @@ local kb.* tables on that same database. It does not update *_unified CCTNS
 columns and never connects to dev-2 at runtime.
 """
 import json
+import time
+import urllib.error
+import urllib.request
 
 from etl3.enrichment import kb as drug_kb
 from etl3.enrichment.address import load_geo_kb
@@ -23,6 +26,7 @@ from etl3.enrichment.ai import (
     ai_settings,
     extract_accused_with_retry,
     extract_with_retry,
+    last_inference_latency_sec,
 )
 from etl3.enrichment.persist import as_json, record_ai_attempt, replace_provenance, upsert_rows
 from etl3.enrichment.project import (
@@ -335,41 +339,7 @@ def _accused_enrichment(conn, run_id, accused_client=None, settings=None):
     from narrative names and never invents a synthetic accused_id.
     """
     settings = settings or ai_settings()
-    unified = {}
-    for accused_id, source_system, source_record_id, crime_id, person_id, accused_code, accused_status, is_ccl in _pairs(
-        conn,
-        """
-        SELECT accused_id, source_system, source_record_id, crime_id, person_id,
-               accused_code, accused_status, is_ccl
-        FROM accused_unified
-        """,
-    ):
-        unified[(source_system, source_record_id)] = {
-            "accused_id": accused_id,
-            "crime_id": crime_id,
-            "person_id": person_id,
-            "accused_code": accused_code,
-            "accused_status": accused_status,
-            "is_ccl": is_ccl,
-        }
-
-    persons = _person_payloads(conn)
-    by_crime = {}
-    for source_system in ("V1", "V2"):
-        for record_id, payload in _latest(conn, "accused_source", source_system):
-            meta = unified.get((source_system, record_id))
-            if not meta or not meta.get("accused_id"):
-                continue
-            person_id = meta.get("person_id") or payload.get("person_id")
-            person_payload = persons.get((source_system, person_id)) if person_id else None
-            record = _compose_existing_accused_record(
-                source_system, meta["accused_id"], payload, meta, person_payload,
-            )
-            crime_id = record.get("crime_id")
-            if not crime_id:
-                continue
-            by_crime.setdefault(crime_id, []).append(record)
-
+    by_crime = _load_accused_by_crime(conn)
     facts = _brief_facts(conn)
     ai_on = accused_client is not None or settings.get("enabled")
     if ai_on and accused_client is None:
@@ -378,75 +348,75 @@ def _accused_enrichment(conn, run_id, accused_client=None, settings=None):
         )
 
     rows = []
-    ai_stats = {
-        "processed": 0, "success": 0, "empty": 0, "failed": 0,
-        "skipped": 0, "no_accused": 0, "limit_reached": 0,
-        "pending": 0, "eligible": 0, "mode": settings.get("mode") or "backfill",
-    }
+    ai_stats = _empty_accused_ai_stats(settings.get("mode") or "backfill")
     ai_limit = settings.get("limit") or 0
-    batch_size = settings.get("batch_size") or 25
+    batch_size = settings.get("batch_size") or 5
+    accused_latencies: list[float] = []
     for crime_id, records in by_crime.items():
-        extractions = []
         fact_entry = facts.get(crime_id)
         fir_text = fact_entry[1] if fact_entry else None
-
-        # V1: derive A-codes from FIR and age-based Accused/CCL before AI roster.
-        if records and (records[0].get("source_system") == "V1"):
-            records = apply_v1_code_type_and_ccl_numbering(records, fir_text)
 
         if ai_on and fact_entry and accused_client is not None:
             ai_stats["eligible"] += 1
             _source_system, text = fact_entry
-            roster = build_roster_for_prompt(records)
-            allowed_ids = [r["accused_id"] for r in records]
-            allowed_codes = [r.get("accused_code") for r in records if r.get("accused_code")]
-            digest = _hash({"kind": "accused", "brief_facts": text, "roster": roster})
+            peek = list(records)
+            if peek and peek[0].get("source_system") == "V1":
+                peek = apply_v1_code_type_and_ccl_numbering(peek, fir_text)
+            roster = build_roster_for_prompt(peek)
+            digest = _accused_input_digest(text, roster)
             if _ai_already_settled(conn, crime_id, digest):
                 ai_stats["skipped"] += 1
-                extractions = _load_stored_accused_extractions(conn, allowed_ids)
-            elif ai_limit and ai_stats["processed"] >= ai_limit:
-                # limited/diagnostic mode only — backfill sets limit=0
+                result = process_accused_ai_for_crime(
+                    conn, crime_id, records, fact_entry,
+                    accused_client, settings, accused_latencies,
+                )
+                rows.extend(result["rows"])
+                continue
+            if ai_limit and ai_stats["processed"] >= ai_limit:
                 ai_stats["limit_reached"] += 1
                 ai_stats["pending"] += 1
-            else:
+                # Still project rule-based enrichment without a new model call.
+                result = process_accused_ai_for_crime(
+                    conn, crime_id, records, None, None, settings, accused_latencies,
+                )
+                rows.extend(result["rows"])
+                continue
+            result = process_accused_ai_for_crime(
+                conn, crime_id, records, fact_entry,
+                accused_client, settings, accused_latencies,
+            )
+            outcome = result["outcome"]
+            if outcome == "paused_ollama":
+                conn.commit()
+                ai_stats["pending"] += 1
+                rows.extend(result["rows"])
+                break
+            if outcome != "skipped":
                 ai_stats["processed"] += 1
-                try:
-                    parsed, attempts, raw_response = extract_accused_with_retry(
-                        accused_client, text, roster, allowed_ids, allowed_codes,
-                        max_retries=settings.get("max_retries", 1),
-                    )
-                except AIExtractionError as exc:
-                    record_ai_attempt(
-                        conn, crime_id, digest, settings.get("model"),
-                        exc.status, 1, str(exc),
-                        source_system=_source_system,
-                        source_module="fir" if _source_system == "V1" else "crimes",
-                        raw_response=None,
-                        validation_status="n/a",
-                    )
-                    ai_stats["failed"] += 1
-                    extractions = _load_stored_accused_extractions(conn, allowed_ids)
-                else:
-                    extractions = parsed.get("accused") or []
-                    status = "empty" if not extractions else "success"
-                    record_ai_attempt(
-                        conn, crime_id, digest, settings.get("model"),
-                        status, attempts, None,
-                        source_system=_source_system,
-                        source_module="fir" if _source_system == "V1" else "crimes",
-                        raw_response=raw_response,
-                        parsed_response=parsed,
-                        validation_status="accepted" if extractions else "empty",
-                    )
-                    if extractions:
-                        ai_stats["success"] += 1
-                    else:
-                        ai_stats["empty"] += 1
-                if ai_stats["processed"] % batch_size == 0:
-                    conn.commit()
-
-        merged = enrich_existing_accused(records, extractions, fir_text=fir_text)
-        rows.extend(merged["rows"])
+            if outcome == "success":
+                ai_stats["success"] += 1
+            elif outcome == "empty":
+                ai_stats["empty"] += 1
+            elif outcome == "failed":
+                ai_stats["failed"] += 1
+            elif outcome == "skipped":
+                ai_stats["skipped"] += 1
+            rows.extend(result["rows"])
+            if ai_stats["processed"] and ai_stats["processed"] % batch_size == 0:
+                conn.commit()
+                print(
+                    f"[ai-accused] processed={ai_stats['processed']} "
+                    f"success={ai_stats['success']} empty={ai_stats['empty']} "
+                    f"failed={ai_stats['failed']} "
+                    f"{_latency_summary(accused_latencies[-batch_size:])}",
+                    flush=True,
+                )
+        else:
+            result = process_accused_ai_for_crime(
+                conn, crime_id, records, fact_entry if ai_on else None,
+                accused_client if ai_on else None, settings, accused_latencies,
+            )
+            rows.extend(result["rows"])
 
     for crime_id in facts:
         if crime_id not in by_crime:
@@ -649,6 +619,602 @@ def _ai_already_settled(conn, crime_id, digest):
     return timeout_tries >= 3
 
 
+def _ollama_tags_healthy(host: str, timeout: float = 10.0) -> bool:
+    if not host:
+        return False
+    try:
+        with urllib.request.urlopen(host.rstrip("/") + "/api/tags", timeout=timeout) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def _wait_for_ollama(host: str, cooldown_sec: float, *, label: str = "ai") -> bool:
+    """Pause until Ollama answers /api/tags. Returns False if still unhealthy after waits."""
+    if _ollama_tags_healthy(host):
+        return True
+    # Bounded recovery attempts — never a tight restart loop.
+    for attempt in range(1, 4):
+        print(
+            f"[{label}] ollama unhealthy; cooldown={cooldown_sec:.0f}s "
+            f"attempt={attempt}/3",
+            flush=True,
+        )
+        time.sleep(cooldown_sec)
+        if _ollama_tags_healthy(host):
+            print(f"[{label}] ollama healthy again; resuming", flush=True)
+            return True
+    print(f"[{label}] ollama still unhealthy after cooldowns; pausing input", flush=True)
+    return False
+
+
+def _pace_after_request(settings: dict, latencies: list) -> None:
+    delay = float(settings.get("request_delay_sec") or 0)
+    lat = last_inference_latency_sec()
+    if lat is not None:
+        latencies.append(float(lat))
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _latency_summary(latencies: list) -> str:
+    if not latencies:
+        return "latency_s=n/a"
+    ordered = sorted(latencies)
+    p95 = ordered[max(0, int(len(ordered) * 0.95) - 1)]
+    avg = sum(ordered) / len(ordered)
+    return f"latency_avg_s={avg:.1f} latency_p95_s={p95:.1f} latency_last_s={ordered[-1]:.1f}"
+
+
+def _drug_input_digest(text: str) -> str:
+    return _hash({"brief_facts": text})
+
+
+def _accused_input_digest(text: str, roster) -> str:
+    return _hash({"kind": "accused", "brief_facts": text, "roster": roster})
+
+
+def _conn_usable(conn) -> bool:
+    """True when the DB connection can still accept work after an error."""
+    try:
+        if getattr(conn, "closed", 0):
+            return False
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return True
+    except Exception:
+        return False
+
+
+def _load_accused_by_crime(conn) -> dict:
+    """Map crime_id -> list of existing CCTNS accused records for AI enrichment."""
+    unified = {}
+    for accused_id, source_system, source_record_id, crime_id, person_id, accused_code, accused_status, is_ccl in _pairs(
+        conn,
+        """
+        SELECT accused_id, source_system, source_record_id, crime_id, person_id,
+               accused_code, accused_status, is_ccl
+        FROM accused_unified
+        """,
+    ):
+        unified[(source_system, source_record_id)] = {
+            "accused_id": accused_id,
+            "crime_id": crime_id,
+            "person_id": person_id,
+            "accused_code": accused_code,
+            "accused_status": accused_status,
+            "is_ccl": is_ccl,
+        }
+
+    persons = _person_payloads(conn)
+    by_crime = {}
+    for source_system in ("V1", "V2"):
+        for record_id, payload in _latest(conn, "accused_source", source_system):
+            meta = unified.get((source_system, record_id))
+            if not meta or not meta.get("accused_id"):
+                continue
+            person_id = meta.get("person_id") or payload.get("person_id")
+            person_payload = persons.get((source_system, person_id)) if person_id else None
+            record = _compose_existing_accused_record(
+                source_system, meta["accused_id"], payload, meta, person_payload,
+            )
+            crime_id = record.get("crime_id")
+            if not crime_id:
+                continue
+            by_crime.setdefault(crime_id, []).append(record)
+    return by_crime
+
+
+def _empty_drug_stats(mode: str = "backfill") -> dict:
+    return {
+        "status": "ran",
+        "mode": mode,
+        "eligible": 0,
+        "processed": 0,
+        "success": 0,
+        "empty": 0,
+        "failed": 0,
+        "skipped": 0,
+        "pending": 0,
+        "rejected": 0,
+        "generic_rejected": 0,
+        "unsupported": 0,
+        "latency_samples": 0,
+        "latency_avg_s": None,
+    }
+
+
+def _empty_accused_ai_stats(mode: str = "backfill") -> dict:
+    return {
+        "processed": 0,
+        "success": 0,
+        "empty": 0,
+        "failed": 0,
+        "skipped": 0,
+        "no_accused": 0,
+        "limit_reached": 0,
+        "pending": 0,
+        "eligible": 0,
+        "mode": mode,
+    }
+
+
+def _bump(stats: dict, key: str, n: int = 1) -> None:
+    stats[key] = stats.get(key, 0) + n
+
+
+def process_drug_for_crime(
+    conn,
+    run_id,
+    crime_id,
+    source_system,
+    text,
+    client,
+    kb_items,
+    settings,
+    latencies,
+    *,
+    drug_kb_obj=None,
+):
+    """One FIR drug AI pass. Caller owns settlement pre-check and commit.
+
+    Returns outcome in
+    {skipped, success, empty, failed, paused_ollama}.
+    Preserves prompts, hashes, audit rows, and retry policy of run_ai_extraction.
+    """
+    digest = _drug_input_digest(text)
+    if _ai_already_settled(conn, crime_id, digest):
+        return {"outcome": "skipped", "digest": digest}
+    cooldown = float(settings.get("health_cooldown_sec") or 60)
+    if not _wait_for_ollama(settings["host"], cooldown, label="ai-drug"):
+        return {"outcome": "paused_ollama", "digest": digest}
+    source_module = "fir" if source_system == "V1" else "crimes"
+    try:
+        parsed, attempts, raw_response = extract_with_retry(
+            client, text, max_retries=settings.get("max_retries", 1),
+        )
+    except AIExtractionError as exc:
+        record_ai_attempt(
+            conn, crime_id, digest, settings.get("model"), exc.status, 1, str(exc),
+            source_system=source_system, source_module=source_module,
+            validation_status="n/a",
+        )
+        _pace_after_request(settings, latencies)
+        oom = "oom_non_retryable" in str(exc).lower()
+        if oom:
+            print(
+                f"[ai-drug] GPU/OOM failure recorded for {crime_id}; "
+                f"cooldown {cooldown:.0f}s",
+                flush=True,
+            )
+            time.sleep(cooldown)
+            if not _wait_for_ollama(settings["host"], cooldown, label="ai-drug"):
+                return {"outcome": "failed", "digest": digest, "paused_after_oom": True}
+        return {"outcome": "failed", "digest": digest, "paused_after_oom": False}
+
+    drugs = parsed["drugs"]
+    rows = ai_drug_rows(
+        crime_id, source_system, drugs, kb_items,
+        drug_kb_obj=drug_kb_obj, source_text=text,
+    )
+    rejections = getattr(rows, "rejections", []) or []
+    generic_rejected = unsupported = 0
+    for rej in rejections:
+        reason = rej.get("reason") or ""
+        if reason == "GENERIC_IGNORED":
+            generic_rejected += 1
+        elif reason == "SOURCE_UNSUPPORTED":
+            unsupported += 1
+    if rows:
+        validation_status = "partial" if rejections else "accepted"
+        status = "success"
+        outcome = "success"
+    elif drugs:
+        validation_status = "rejected"
+        status = "empty"
+        outcome = "empty"
+    else:
+        validation_status = "empty"
+        status = "empty"
+        outcome = "empty"
+    record_ai_attempt(
+        conn, crime_id, digest, settings.get("model"), status, attempts, None,
+        source_system=source_system, source_module=source_module,
+        raw_response=raw_response, parsed_response=parsed,
+        validation_status=validation_status, validation_errors=rejections or None,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM drug_extractions WHERE provenance = 'etl3_ai' AND crime_id = %s",
+            (crime_id,),
+        )
+    if rows:
+        upsert_rows(
+            conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS,
+            run_id, "drug_extraction",
+        )
+    _pace_after_request(settings, latencies)
+    return {
+        "outcome": outcome,
+        "digest": digest,
+        "rejected": len(rejections),
+        "generic_rejected": generic_rejected,
+        "unsupported": unsupported,
+    }
+
+
+def process_accused_ai_for_crime(
+    conn,
+    crime_id,
+    records,
+    fact_entry,
+    accused_client,
+    settings,
+    latencies,
+):
+    """One FIR accused AI pass over the full roster. Caller commits.
+
+    Multiple accused on one FIR share a single model call. Settlement uses the
+    accused digest (kind + brief_facts + roster).
+    """
+    fir_text = fact_entry[1] if fact_entry else None
+    work = list(records)
+    if work and work[0].get("source_system") == "V1":
+        work = apply_v1_code_type_and_ccl_numbering(work, fir_text)
+
+    extractions = []
+    outcome = "no_facts"
+    if fact_entry and accused_client is not None:
+        _source_system, text = fact_entry
+        roster = build_roster_for_prompt(work)
+        allowed_ids = [r["accused_id"] for r in work]
+        allowed_codes = [r.get("accused_code") for r in work if r.get("accused_code")]
+        digest = _accused_input_digest(text, roster)
+        if _ai_already_settled(conn, crime_id, digest):
+            outcome = "skipped"
+            extractions = _load_stored_accused_extractions(conn, allowed_ids)
+        else:
+            cooldown = float(settings.get("health_cooldown_sec") or 60)
+            if not _wait_for_ollama(settings["host"], cooldown, label="ai-accused"):
+                return {
+                    "outcome": "paused_ollama",
+                    "digest": digest,
+                    "rows": [],
+                    "records": work,
+                }
+            try:
+                parsed, attempts, raw_response = extract_accused_with_retry(
+                    accused_client, text, roster, allowed_ids, allowed_codes,
+                    max_retries=settings.get("max_retries", 1),
+                )
+            except AIExtractionError as exc:
+                record_ai_attempt(
+                    conn, crime_id, digest, settings.get("model"),
+                    exc.status, 1, str(exc),
+                    source_system=_source_system,
+                    source_module="fir" if _source_system == "V1" else "crimes",
+                    raw_response=None,
+                    validation_status="n/a",
+                )
+                outcome = "failed"
+                extractions = _load_stored_accused_extractions(conn, allowed_ids)
+                _pace_after_request(settings, latencies)
+            else:
+                extractions = parsed.get("accused") or []
+                status = "empty" if not extractions else "success"
+                record_ai_attempt(
+                    conn, crime_id, digest, settings.get("model"),
+                    status, attempts, None,
+                    source_system=_source_system,
+                    source_module="fir" if _source_system == "V1" else "crimes",
+                    raw_response=raw_response,
+                    parsed_response=parsed,
+                    validation_status="accepted" if extractions else "empty",
+                )
+                outcome = "success" if extractions else "empty"
+                _pace_after_request(settings, latencies)
+    merged = enrich_existing_accused(work, extractions, fir_text=fir_text)
+    return {
+        "outcome": outcome,
+        "rows": merged["rows"],
+        "records": work,
+    }
+
+
+def run_per_fir_ai_backfill(
+    conn,
+    run_id,
+    kb_items,
+    *,
+    drug_client=None,
+    accused_client=None,
+    settings=None,
+    drug_kb_obj=None,
+    do_drugs: bool = True,
+    do_accused: bool = True,
+    stop_check=None,
+):
+    """Per-FIR scheduler: drug then accused for each crime, sequential Ollama.
+
+    Each enrichment type has its own settlement check and commit. A failure in
+    one type does not skip the other while the database connection remains
+    usable. stop_check() -> True ends after the current enrichment type.
+    """
+    settings = settings or ai_settings()
+    mode = settings.get("mode") or "backfill"
+    limit = settings.get("limit") or 0
+    batch_size = settings.get("batch_size") or 5
+
+    if do_drugs and drug_client is None and settings.get("enabled"):
+        drug_client = OllamaDrugClient(
+            settings["host"], settings["model"], settings["timeout"],
+        )
+    if do_accused and accused_client is None and settings.get("enabled"):
+        accused_client = OllamaAccusedClient(
+            settings["host"], settings["model"], settings["timeout"],
+        )
+    if do_drugs and drug_client is None and not settings.get("enabled"):
+        return {
+            "status": "disabled",
+            "drugs": _empty_drug_stats(mode),
+            "accused": _empty_accused_ai_stats(mode),
+        }
+
+    known = {row[0] for row in _pairs(conn, "SELECT crime_id FROM crimes_unified")}
+    facts = _brief_facts(conn)
+    by_crime = _load_accused_by_crime(conn) if do_accused else {}
+
+    drug_stats = _empty_drug_stats(mode)
+    accused_stats = _empty_accused_ai_stats(mode)
+    drug_latencies: list[float] = []
+    accused_latencies: list[float] = []
+    drug_calls = 0
+    accused_calls = 0
+    stopped = False
+    paused = False
+
+    crime_ids = []
+    seen = set()
+    for crime_id in facts:
+        if crime_id in seen:
+            continue
+        need_drug = do_drugs and crime_id in known
+        need_accused = do_accused and crime_id in by_crime
+        if not need_drug and not need_accused:
+            continue
+        seen.add(crime_id)
+        crime_ids.append(crime_id)
+
+    for crime_id in facts:
+        if do_accused and crime_id not in by_crime:
+            accused_stats["no_accused"] += 1
+
+    print(
+        f"[ai-per-fir] start mode={mode} crimes={len(crime_ids)} "
+        f"do_drugs={do_drugs} do_accused={do_accused} "
+        f"batch_size={batch_size} request_delay_sec={settings.get('request_delay_sec')} "
+        f"timeout_s={settings.get('timeout')} max_retries={settings.get('max_retries')}",
+        flush=True,
+    )
+
+    for crime_id in crime_ids:
+        if stop_check and stop_check():
+            stopped = True
+            break
+        if paused:
+            break
+
+        fact_entry = facts.get(crime_id)
+
+        if do_drugs and crime_id in known and fact_entry is not None:
+            drug_stats["eligible"] += 1
+            source_system, text = fact_entry
+            digest = _drug_input_digest(text)
+            if _ai_already_settled(conn, crime_id, digest):
+                drug_stats["skipped"] += 1
+            elif limit and drug_calls >= limit:
+                drug_stats["pending"] += 1
+            else:
+                try:
+                    result = process_drug_for_crime(
+                        conn, run_id, crime_id, source_system, text,
+                        drug_client, kb_items, settings, drug_latencies,
+                        drug_kb_obj=drug_kb_obj,
+                    )
+                    outcome = result["outcome"]
+                    if outcome == "skipped":
+                        drug_stats["skipped"] += 1
+                    elif outcome == "paused_ollama":
+                        drug_stats["pending"] += 1
+                        conn.commit()
+                        paused = True
+                        print(
+                            f"[ai-per-fir] drug paused (ollama) crime_id={crime_id}",
+                            flush=True,
+                        )
+                    else:
+                        drug_calls += 1
+                        drug_stats["processed"] += 1
+                        if outcome == "success":
+                            drug_stats["success"] += 1
+                        elif outcome == "empty":
+                            drug_stats["empty"] += 1
+                        elif outcome == "failed":
+                            drug_stats["failed"] += 1
+                        _bump(drug_stats, "rejected", result.get("rejected") or 0)
+                        _bump(
+                            drug_stats,
+                            "generic_rejected",
+                            result.get("generic_rejected") or 0,
+                        )
+                        _bump(
+                            drug_stats,
+                            "unsupported",
+                            result.get("unsupported") or 0,
+                        )
+                        conn.commit()
+                        if result.get("paused_after_oom"):
+                            paused = True
+                        if drug_calls % batch_size == 0:
+                            print(
+                                f"[ai-per-fir] drug processed={drug_stats['processed']} "
+                                f"success={drug_stats['success']} "
+                                f"empty={drug_stats['empty']} "
+                                f"failed={drug_stats['failed']} "
+                                f"{_latency_summary(drug_latencies[-batch_size:])}",
+                                flush=True,
+                            )
+                except Exception as exc:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    drug_stats["failed"] += 1
+                    print(
+                        f"[ai-per-fir] drug error crime_id={crime_id}: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    if not _conn_usable(conn):
+                        raise
+
+        if stop_check and stop_check():
+            stopped = True
+            break
+        if paused:
+            break
+
+        if do_accused and crime_id in by_crime:
+            records = by_crime[crime_id]
+            if fact_entry is not None and accused_client is not None:
+                accused_stats["eligible"] += 1
+                _source_system, text = fact_entry
+                peek = list(records)
+                if peek and peek[0].get("source_system") == "V1":
+                    peek = apply_v1_code_type_and_ccl_numbering(peek, text)
+                roster = build_roster_for_prompt(peek)
+                digest = _accused_input_digest(text, roster)
+                if _ai_already_settled(conn, crime_id, digest):
+                    accused_stats["skipped"] += 1
+                elif limit and accused_calls >= limit:
+                    accused_stats["limit_reached"] += 1
+                    accused_stats["pending"] += 1
+                else:
+                    try:
+                        result = process_accused_ai_for_crime(
+                            conn, crime_id, records, fact_entry,
+                            accused_client, settings, accused_latencies,
+                        )
+                        outcome = result["outcome"]
+                        if outcome == "paused_ollama":
+                            accused_stats["pending"] += 1
+                            conn.commit()
+                            paused = True
+                            print(
+                                f"[ai-per-fir] accused paused (ollama) "
+                                f"crime_id={crime_id}",
+                                flush=True,
+                            )
+                        else:
+                            if outcome != "skipped":
+                                accused_calls += 1
+                                accused_stats["processed"] += 1
+                            if outcome == "success":
+                                accused_stats["success"] += 1
+                            elif outcome == "empty":
+                                accused_stats["empty"] += 1
+                            elif outcome == "failed":
+                                accused_stats["failed"] += 1
+                            elif outcome == "skipped":
+                                accused_stats["skipped"] += 1
+                            if result["rows"]:
+                                upsert_rows(
+                                    conn, "accused_enrichment", "accused_id",
+                                    result["rows"], ACCUSED_COLUMNS,
+                                    run_id, "accused_enrichment",
+                                )
+                            conn.commit()
+                            if accused_calls and accused_calls % batch_size == 0:
+                                print(
+                                    f"[ai-per-fir] accused processed="
+                                    f"{accused_stats['processed']} "
+                                    f"success={accused_stats['success']} "
+                                    f"empty={accused_stats['empty']} "
+                                    f"failed={accused_stats['failed']} "
+                                    f"{_latency_summary(accused_latencies[-batch_size:])}",
+                                    flush=True,
+                                )
+                    except Exception as exc:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        accused_stats["failed"] += 1
+                        print(
+                            f"[ai-per-fir] accused error crime_id={crime_id}: "
+                            f"{type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                        if not _conn_usable(conn):
+                            raise
+            elif fact_entry is None:
+                try:
+                    result = process_accused_ai_for_crime(
+                        conn, crime_id, records, None, None, settings, accused_latencies,
+                    )
+                    if result["rows"]:
+                        upsert_rows(
+                            conn, "accused_enrichment", "accused_id",
+                            result["rows"], ACCUSED_COLUMNS,
+                            run_id, "accused_enrichment",
+                        )
+                    conn.commit()
+                except Exception as exc:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    print(
+                        f"[ai-per-fir] accused rule-only error crime_id={crime_id}: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    if not _conn_usable(conn):
+                        raise
+
+    drug_stats["latency_samples"] = len(drug_latencies)
+    drug_stats["latency_avg_s"] = (
+        (sum(drug_latencies) / len(drug_latencies)) if drug_latencies else None
+    )
+    return {
+        "status": "paused" if paused else ("stopped" if stopped else "ran"),
+        "drugs": drug_stats,
+        "accused": accused_stats,
+        "crimes_visited": len(crime_ids),
+    }
+
+
 def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_kb_obj=None):
     """Optional AI pass. Disabled unless ETL3_AI_ENABLED=1 or a client is injected.
 
@@ -668,11 +1234,19 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
     known = {row[0] for row in _pairs(conn, "SELECT crime_id FROM crimes_unified")}
     facts = _brief_facts(conn)
     limit = settings.get("limit") or 0
-    batch_size = settings.get("batch_size") or 25
+    batch_size = settings.get("batch_size") or 5
     mode = settings.get("mode") or "backfill"
+    cooldown = float(settings.get("health_cooldown_sec") or 60)
     processed = success = empty = failed = skipped = 0
     rejected = generic_rejected = unsupported = 0
     pending = eligible = 0
+    latencies: list[float] = []
+    print(
+        f"[ai-drug] start mode={mode} batch_size={batch_size} "
+        f"request_delay_sec={settings.get('request_delay_sec')} "
+        f"timeout_s={settings.get('timeout')} max_retries={settings.get('max_retries')}",
+        flush=True,
+    )
     for crime_id, (source_system, text) in facts.items():
         if crime_id not in known:
             continue
@@ -684,6 +1258,16 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
         if limit and processed >= limit:
             pending += 1
             continue
+        if not _wait_for_ollama(settings["host"], cooldown, label="ai-drug"):
+            # Preserve resumability: commit what we have and stop new work.
+            conn.commit()
+            pending += 1
+            print(
+                f"[ai-drug] paused after unhealthy Ollama; "
+                f"processed={processed} pending_remaining_estimate={eligible - skipped - processed}",
+                flush=True,
+            )
+            break
         processed += 1
         source_module = "fir" if source_system == "V1" else "crimes"
         try:
@@ -697,8 +1281,25 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
                 validation_status="n/a",
             )
             failed += 1
+            _pace_after_request(settings, latencies)
+            if "oom_non_retryable" in str(exc).lower():
+                conn.commit()
+                print(
+                    f"[ai-drug] GPU/OOM failure recorded; pausing for cooldown "
+                    f"{cooldown:.0f}s before health re-check",
+                    flush=True,
+                )
+                time.sleep(cooldown)
+                if not _wait_for_ollama(settings["host"], cooldown, label="ai-drug"):
+                    break
             if processed % batch_size == 0:
                 conn.commit()
+                print(
+                    f"[ai-drug] mode={mode} processed={processed} success={success} "
+                    f"empty={empty} failed={failed} skipped={skipped} pending={pending} "
+                    f"{_latency_summary(latencies[-batch_size:])}",
+                    flush=True,
+                )
             continue
         drugs = parsed["drugs"]
         rows = ai_drug_rows(
@@ -741,11 +1342,13 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
                 conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS,
                 run_id, "drug_extraction",
             )
+        _pace_after_request(settings, latencies)
         if processed % batch_size == 0:
             conn.commit()
             print(
                 f"[ai-drug] mode={mode} processed={processed} success={success} "
-                f"empty={empty} failed={failed} skipped={skipped} pending={pending}",
+                f"empty={empty} failed={failed} skipped={skipped} pending={pending} "
+                f"{_latency_summary(latencies[-batch_size:])}",
                 flush=True,
             )
     return {
@@ -761,6 +1364,8 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
         "rejected": rejected,
         "generic_rejected": generic_rejected,
         "unsupported": unsupported,
+        "latency_samples": len(latencies),
+        "latency_avg_s": (sum(latencies) / len(latencies)) if latencies else None,
     }
 
 
