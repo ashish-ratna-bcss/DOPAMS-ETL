@@ -270,7 +270,7 @@ export default function V1FirDetailModal({ fir_reg_num, isOpen, onClose }) {
                         {data.fir.attach_path && (
                           <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-muted)', background: 'var(--bg-elevated)', padding: '6px 8px', borderRadius: '6px', wordBreak: 'break-all' }}>
                             <div><strong>Server:</strong> dopams-new (192.168.103.106)</div>
-                            <div><strong>Disk Path:</strong> /home/tganb/dopams/media_cctnsv1/{data.fir.attach_path}/{data.fir.dms_file_name}</div>
+                            <div><strong>Disk Path:</strong> /data-drive/etl-files/{data.fir.attach_path}/{data.fir.dms_file_name}</div>
                           </div>
                         )}
                       </div>

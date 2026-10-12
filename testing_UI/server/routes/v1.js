@@ -172,7 +172,8 @@ router.get('/media/pdf', async (req, res) => {
     const cleanName = dms_file_name.trim().replace(/^[\/\\]+/, '');
 
     // 1. Check server disk path
-    const baseDir = process.env.V1_MEDIA_BASE_DIR || '/home/tganb/dopams/media_cctnsv1';
+    // Shared Tomcat root (same as V2): http://192.168.103.106:8080/files/
+    const baseDir = process.env.V1_MEDIA_BASE_DIR || '/data-drive/etl-files';
     const fullDiskPath = path.join(baseDir, cleanPath, cleanName);
 
     const isPdf = cleanName.toLowerCase().endsWith('.pdf');
@@ -266,7 +267,7 @@ router.get('/media/stream', async (req, res) => {
 
     const cleanPath = attach_path.trim().replace(/^[\/\\]+/, '');
     const cleanName = dms_file_name.trim().replace(/^[\/\\]+/, '');
-    const baseDir = process.env.V1_MEDIA_BASE_DIR || '/home/tganb/dopams/media_cctnsv1';
+    const baseDir = process.env.V1_MEDIA_BASE_DIR || '/data-drive/etl-files';
     const fullDiskPath = `${baseDir}/${cleanPath}/${cleanName}`;
 
     // 1. Check if media status is in cctns.cctns_media_files
