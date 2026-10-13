@@ -140,11 +140,21 @@ def resolve_ai_settings() -> dict:
     # Concurrent in-flight Ollama chats from this process. Match to GPU count
     # when each model copy fits one card (e.g. 2× T1000 8GB → 2). Default 1.
     parallel_raw = _env_get("ETL3_AI_PARALLEL") or "1"
+    # Completion token cap. Empty/0 = unlimited. Do NOT set a low value
+    # (e.g. 512): multi-accused JSON regularly exceeds that and truncates.
+    num_predict_raw = _env_get("ETL3_AI_NUM_PREDICT")
     mode = ai_mode()
     limit = int(limit_raw)
     if mode == "backfill":
         # Production historical workload must not be capped by the test limit.
         limit = 0
+    num_predict = None
+    if num_predict_raw.strip():
+        try:
+            n = int(num_predict_raw)
+            num_predict = n if n > 0 else None
+        except ValueError:
+            num_predict = None
     return {
         "enabled": enabled,
         "host": host,
@@ -158,6 +168,7 @@ def resolve_ai_settings() -> dict:
         "request_delay_sec": max(0.0, float(delay_raw)),
         "health_cooldown_sec": max(5.0, float(cooldown_raw)),
         "parallel": max(1, int(parallel_raw)),
+        "num_predict": num_predict,
     }
 
 

@@ -802,6 +802,7 @@ def process_drug_for_crime(
         record_ai_attempt(
             conn, crime_id, digest, settings.get("model"), exc.status, 1, str(exc),
             source_system=source_system, source_module=source_module,
+            raw_response=getattr(exc, "raw_response", None),
             validation_status="n/a",
         )
         _pace_after_request(settings, latencies)
@@ -918,7 +919,7 @@ def process_accused_ai_for_crime(
                     exc.status, 1, str(exc),
                     source_system=_source_system,
                     source_module="fir" if _source_system == "V1" else "crimes",
-                    raw_response=None,
+                    raw_response=getattr(exc, "raw_response", None),
                     validation_status="n/a",
                 )
                 outcome = "failed"

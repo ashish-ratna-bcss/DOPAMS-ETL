@@ -12,12 +12,14 @@ Usage (repo root):
     python etl3/run_ai_backfill.py --drugs-only
     python etl3/run_ai_backfill.py --accused-only
     python etl3/run_ai_backfill.py --status
+    python etl3/run_ai_backfill.py --limited 10   # diagnostic smoke (not full backfill)
     python etl3/run_ai_backfill.py --legacy-phases   # old drugs-then-accused
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 import uuid
@@ -153,12 +155,27 @@ def print_status(conn) -> dict:
 
 def _ensure_backfill_mode():
     """Force production backfill semantics for this process."""
-    import os
-
     os.environ["ETL3_AI_MODE"] = "backfill"
     os.environ["ETL3_AI_ENABLED"] = "1"
     # Clear any leftover diagnostic cap for this process.
     os.environ["ETL3_AI_LIMIT"] = "0"
+
+
+def _ensure_limited_mode(limit: int) -> None:
+    """Diagnostic smoke: hard-cap new model calls; never full backfill.
+
+    Caps are per enrichment type (drug calls and accused calls separately),
+    matching resolve_ai_settings limited-mode semantics. PARALLEL forced to 1.
+    Explicitly clears ETL3_AI_NUM_PREDICT so a low truncation cap cannot apply.
+    """
+    if limit < 1 or limit > 50:
+        raise SystemExit(f"--limited must be 1..50, got {limit}")
+    os.environ["ETL3_AI_MODE"] = "limited"
+    os.environ["ETL3_AI_ENABLED"] = "1"
+    os.environ["ETL3_AI_LIMIT"] = str(limit)
+    os.environ["ETL3_AI_PARALLEL"] = "1"
+    # Empty string wins over .env via _env_get; removes truncation trap.
+    os.environ["ETL3_AI_NUM_PREDICT"] = ""
 
 
 def run_backfill(
@@ -166,22 +183,42 @@ def run_backfill(
     accused: bool = True,
     *,
     legacy_phases: bool = False,
+    limited: int | None = None,
 ) -> dict:
     global _STOP
-    _ensure_backfill_mode()
+    if limited is not None:
+        _ensure_limited_mode(limited)
+    else:
+        _ensure_backfill_mode()
     ai = ai_settings()
     if not ai["enabled"]:
         raise SystemExit("ETL3_AI_ENABLED must be on for backfill")
     if not ai["host"] or not ai["model"]:
         raise SystemExit("OLLAMA_BASE_URL and OLLAMA_MODEL are required for backfill")
-    if ai["mode"] != "backfill":
+    if limited is not None:
+        if ai["mode"] != "limited":
+            raise SystemExit(f"Expected mode=limited for smoke, got {ai['mode']!r}")
+        if ai["limit"] != limited:
+            raise SystemExit(
+                f"Expected limit={limited} for smoke, got {ai['limit']!r}"
+            )
+        if ai.get("parallel", 1) != 1:
+            raise SystemExit(f"Expected parallel=1 for smoke, got {ai.get('parallel')!r}")
+        if ai.get("num_predict"):
+            raise SystemExit(
+                f"Refusing smoke with num_predict={ai.get('num_predict')!r} "
+                "(truncation risk)"
+            )
+    elif ai["mode"] != "backfill":
         raise SystemExit(f"Expected mode=backfill, got {ai['mode']!r}")
     if cfg.EXPECTED_UNIFIED_DBNAME != "dopams_cctns_v2":
         raise SystemExit(f"Refusing target {cfg.EXPECTED_UNIFIED_DBNAME!r}")
     schedule = "legacy-phases" if legacy_phases else "per-fir"
     print(
-        f"[ai-backfill] schedule={schedule} host={ai['host']} model={ai['model']} "
-        f"batch_size={ai['batch_size']} limit={ai['limit']}",
+        f"[ai-backfill] schedule={schedule} mode={ai['mode']} "
+        f"host={ai['host']} model={ai['model']} "
+        f"batch_size={ai['batch_size']} limit={ai['limit']} "
+        f"parallel={ai.get('parallel')} num_predict={ai.get('num_predict') or 'unlimited'}",
         flush=True,
     )
 
@@ -273,6 +310,14 @@ def main():
         action="store_true",
         help="Use old all-drugs-then-all-accused schedule (not recommended)",
     )
+    parser.add_argument(
+        "--limited",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Diagnostic smoke: mode=limited, limit=N (1..50), parallel=1. "
+        "Does NOT force backfill. Caps new model calls per enrichment type.",
+    )
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -286,11 +331,19 @@ def main():
             conn.close()
         return
 
+    if args.limited is not None and args.legacy_phases:
+        raise SystemExit("--limited cannot be combined with --legacy-phases")
+
     drugs = not args.accused_only
     accused = not args.drugs_only
     if args.drugs_only and args.accused_only:
         drugs = accused = True
-    run_backfill(drugs=drugs, accused=accused, legacy_phases=args.legacy_phases)
+    run_backfill(
+        drugs=drugs,
+        accused=accused,
+        legacy_phases=args.legacy_phases,
+        limited=args.limited,
+    )
 
 
 if __name__ == "__main__":

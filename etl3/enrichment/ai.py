@@ -2,10 +2,13 @@
 
 Drug prompt: seizure and quantity only; explicit named substances only.
 Accused prompt: existing CCTNS accused_id roster only; no discovery of new names.
-Model defaults: temperature 0, Ollama chat, format=json, one retry.
+Model defaults: temperature 0, Ollama chat, format=JSON-schema, bounded retries.
 Clients are not used unless ETL3_AI_ENABLED=1.
 """
+from __future__ import annotations
+
 import json
+import os
 import re
 import threading
 import urllib.error
@@ -41,9 +44,103 @@ CODE_LEVEL_GENERIC_TERMS = frozenset({
 
 
 class AIExtractionError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, *, raw_response: str | None = None):
         super().__init__(message)
         self.status = status
+        # Preserve model body for audit when parse/validate fails.
+        self.raw_response = raw_response
+
+
+# Ollama ``format`` JSON Schemas (structured outputs). Kept in sync with
+# parse_drug_response / parse_accused_response contracts.
+DRUG_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "drugs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "raw_drug_name": {"type": ["string", "null"]},
+                    "raw_quantity": {"type": "number"},
+                    "raw_unit": {"type": ["string", "null"]},
+                    "primary_drug_name": {"type": ["string", "null"]},
+                    "drug_form": {"type": "string", "enum": ["solid", "liquid", "count"]},
+                    "seizure_worth": {"type": "number"},
+                    "worth_scope": {
+                        "type": "string",
+                        "enum": ["individual", "drug_total", "overall_total"],
+                    },
+                    "is_commercial": {"type": "boolean"},
+                    "confidence_score": {"type": ["integer", "null"]},
+                    "extraction_metadata": {
+                        "type": "object",
+                        "properties": {
+                            "source_sentence": {"type": "string"},
+                        },
+                        "required": ["source_sentence"],
+                    },
+                },
+                "required": [
+                    "raw_drug_name",
+                    "raw_quantity",
+                    "raw_unit",
+                    "primary_drug_name",
+                    "drug_form",
+                    "seizure_worth",
+                    "worth_scope",
+                    "is_commercial",
+                    "confidence_score",
+                    "extraction_metadata",
+                ],
+            },
+        }
+    },
+    "required": ["drugs"],
+}
+
+ACCUSED_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "accused": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "accused_code": {"type": ["string", "null"]},
+                    "accused_id": {"type": ["string", "null"]},
+                    "role_in_crime": {"type": ["string", "null"]},
+                    "key_details": {"type": ["string", "null"]},
+                    "age": {"type": ["integer", "null"]},
+                    "alias_name": {"type": ["string", "null"]},
+                    "gender": {"type": ["string", "null"]},
+                    "occupation": {"type": ["string", "null"]},
+                    "address": {"type": ["string", "null"]},
+                    "phone_numbers": {"type": ["string", "null"]},
+                    # Parser accepts only arrested|absconding|null; keep schema
+                    # loose so Ollama JSON-schema engines accept null cleanly.
+                    "status": {"type": ["string", "null"]},
+                    "explicit_ccl": {"type": ["boolean", "null"]},
+                },
+                "required": [
+                    "accused_code",
+                    "accused_id",
+                    "role_in_crime",
+                    "key_details",
+                    "age",
+                    "alias_name",
+                    "gender",
+                    "occupation",
+                    "address",
+                    "phone_numbers",
+                    "status",
+                    "explicit_ccl",
+                ],
+            },
+        }
+    },
+    "required": ["accused"],
+}
 
 
 def load_prompt():
@@ -74,46 +171,65 @@ def _strip_fences(text: str) -> str:
     return cleaned
 
 
+def _is_malformed_json_error(exc: AIExtractionError) -> bool:
+    return exc.status == "invalid" and str(exc).lower().startswith("malformed json")
+
+
 def parse_drug_response(text: str) -> dict:
     """Validate model output. Raises AIExtractionError(status='invalid') on reject.
 
     An empty drugs list is valid and means the text had no seizure to store.
     Entries with null/blank raw_drug_name are dropped (generic / unnamed).
     """
-    if text is None or not str(text).strip():
-        raise AIExtractionError("empty", "model returned an empty body")
+    raw = "" if text is None else str(text)
+    if not raw.strip():
+        raise AIExtractionError("empty", "model returned an empty body", raw_response=raw)
     try:
-        payload = json.loads(_strip_fences(str(text)))
+        payload = json.loads(_strip_fences(raw))
     except json.JSONDecodeError as exc:
-        raise AIExtractionError("invalid", f"malformed json: {exc}") from exc
+        raise AIExtractionError(
+            "invalid", f"malformed json: {exc}", raw_response=raw,
+        ) from exc
     if not isinstance(payload, dict) or "drugs" not in payload:
-        raise AIExtractionError("invalid", "response is not an object with drugs")
+        raise AIExtractionError(
+            "invalid", "response is not an object with drugs", raw_response=raw,
+        )
     drugs = payload["drugs"]
     if drugs is None:
         drugs = []
     if not isinstance(drugs, list):
-        raise AIExtractionError("invalid", "drugs is not a list")
+        raise AIExtractionError("invalid", "drugs is not a list", raw_response=raw)
     cleaned = []
     for item in drugs:
         if not isinstance(item, dict):
-            raise AIExtractionError("invalid", "drug entry is not an object")
+            raise AIExtractionError(
+                "invalid", "drug entry is not an object", raw_response=raw,
+            )
         name = item.get("raw_drug_name")
         if name is None or not str(name).strip() or str(name).strip().lower() in ("null", "none"):
             # Explicit null / blank name: skip row (not a schema failure).
             continue
         form = str(item.get("drug_form") or "solid").lower().strip()
         if form not in ALLOWED_FORMS:
-            raise AIExtractionError("invalid", f"drug_form {form!r} is not allowed")
+            raise AIExtractionError(
+                "invalid", f"drug_form {form!r} is not allowed", raw_response=raw,
+            )
         scope = str(item.get("worth_scope") or "individual").lower().strip()
         if scope not in ALLOWED_SCOPES:
-            raise AIExtractionError("invalid", f"worth_scope {scope!r} is not allowed")
+            raise AIExtractionError(
+                "invalid", f"worth_scope {scope!r} is not allowed", raw_response=raw,
+            )
         try:
             qty = float(item.get("raw_quantity") or 0)
             worth = float(item.get("seizure_worth") or 0)
         except (TypeError, ValueError) as exc:
-            raise AIExtractionError("invalid", "quantity or worth is not numeric") from exc
+            raise AIExtractionError(
+                "invalid", "quantity or worth is not numeric", raw_response=raw,
+            ) from exc
         if qty < 0 or worth < 0:
-            raise AIExtractionError("invalid", "negative quantity or worth")
+            raise AIExtractionError(
+                "invalid", "negative quantity or worth", raw_response=raw,
+            )
         primary = item.get("primary_drug_name")
         if primary is not None and str(primary).strip().lower() in ("", "null", "none"):
             primary = None
@@ -324,25 +440,52 @@ def last_inference_latency_sec():
         return _LAST_LATENCY_SEC
 
 
-def _ollama_chat(host, model, timeout, prompt: str) -> str:
+def _num_predict_limit() -> int | None:
+    """Optional completion token cap from ETL3_AI_NUM_PREDICT.
+
+    Unset / empty / 0 → no cap (required for multi-accused JSON). A low cap
+    like 512 truncates accused payloads mid-string and causes malformed JSON.
+    """
+    raw = (os.environ.get("ETL3_AI_NUM_PREDICT") or "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def _ollama_chat(host, model, timeout, prompt: str, *, response_format=None) -> str:
     global _THINK_FLAG_LOGGED, _LAST_LATENCY_SEC
     import time
 
+    fmt = response_format if response_format is not None else "json"
+    options = {"temperature": 0}
+    num_predict = _num_predict_limit()
+    if num_predict is not None:
+        options["num_predict"] = num_predict
     payload = {
         "model": model,
         "stream": False,
-        "format": "json",
+        "format": fmt,
         "messages": [{"role": "user", "content": prompt}],
-        "options": {"temperature": 0},
+        "options": options,
     }
     # Ollama qwen3 accepts top-level think=false to skip reasoning tokens.
     think_on = _ollama_think_enabled()
     if not think_on:
         payload["think"] = False
     if not _THINK_FLAG_LOGGED:
+        fmt_kind = (
+            "json_schema"
+            if isinstance(fmt, dict)
+            else ("json" if fmt == "json" else type(fmt).__name__)
+        )
         print(
             f"[ollama] model={model!r} think={think_on} "
             f"payload_think_key={payload.get('think', '<absent>')} "
+            f"format={fmt_kind} num_predict={num_predict or 'unlimited'} "
             f"timeout_s={timeout}",
             flush=True,
         )
@@ -421,7 +564,10 @@ class OllamaDrugClient:
 
     def complete(self, brief_facts: str) -> str:
         prompt = load_prompt().replace("{text}", brief_facts or "")
-        return _ollama_chat(self.host, self.model, self.timeout, prompt)
+        return _ollama_chat(
+            self.host, self.model, self.timeout, prompt,
+            response_format=DRUG_RESPONSE_SCHEMA,
+        )
 
 
 class OllamaAccusedClient:
@@ -434,7 +580,10 @@ class OllamaAccusedClient:
             .replace("{roster}", roster or "")
             .replace("{text}", brief_facts or "")
         )
-        return _ollama_chat(self.host, self.model, self.timeout, prompt)
+        return _ollama_chat(
+            self.host, self.model, self.timeout, prompt,
+            response_format=ACCUSED_RESPONSE_SCHEMA,
+        )
 
 
 def parse_accused_response(text: str, allowed_accused_ids=None, allowed_codes=None) -> dict:
@@ -443,19 +592,24 @@ def parse_accused_response(text: str, allowed_accused_ids=None, allowed_codes=No
     Entries whose accused_id/code are outside the CCTNS roster are dropped.
     Empty accused list is valid when the roster was empty or the text added nothing.
     """
-    if text is None or not str(text).strip():
-        raise AIExtractionError("empty", "model returned an empty body")
+    raw = "" if text is None else str(text)
+    if not raw.strip():
+        raise AIExtractionError("empty", "model returned an empty body", raw_response=raw)
     try:
-        payload = json.loads(_strip_fences(str(text)))
+        payload = json.loads(_strip_fences(raw))
     except json.JSONDecodeError as exc:
-        raise AIExtractionError("invalid", f"malformed json: {exc}") from exc
+        raise AIExtractionError(
+            "invalid", f"malformed json: {exc}", raw_response=raw,
+        ) from exc
     if not isinstance(payload, dict) or "accused" not in payload:
-        raise AIExtractionError("invalid", "response is not an object with accused")
+        raise AIExtractionError(
+            "invalid", "response is not an object with accused", raw_response=raw,
+        )
     items = payload["accused"]
     if items is None:
         items = []
     if not isinstance(items, list):
-        raise AIExtractionError("invalid", "accused is not a list")
+        raise AIExtractionError("invalid", "accused is not a list", raw_response=raw)
 
     allowed_ids = set(allowed_accused_ids or [])
     allowed_codes = {
@@ -465,7 +619,9 @@ def parse_accused_response(text: str, allowed_accused_ids=None, allowed_codes=No
     rejected = []
     for item in items:
         if not isinstance(item, dict):
-            raise AIExtractionError("invalid", "accused entry is not an object")
+            raise AIExtractionError(
+                "invalid", "accused entry is not an object", raw_response=raw,
+            )
         accused_id = (item.get("accused_id") or "").strip() or None
         raw_code = (item.get("accused_code") or "").strip() or None
         code_norm = None
@@ -491,9 +647,13 @@ def parse_accused_response(text: str, allowed_accused_ids=None, allowed_codes=No
             try:
                 age = int(age)
             except (TypeError, ValueError) as exc:
-                raise AIExtractionError("invalid", "age is not an integer") from exc
+                raise AIExtractionError(
+                    "invalid", "age is not an integer", raw_response=raw,
+                ) from exc
             if age < 0 or age > 120:
-                raise AIExtractionError("invalid", "age out of range")
+                raise AIExtractionError(
+                    "invalid", "age out of range", raw_response=raw,
+                )
         else:
             age = None
         explicit_ccl = item.get("explicit_ccl")
@@ -528,10 +688,10 @@ def _retry_sleep(attempt_index: int) -> None:
 
 
 def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
-    """Call the drug client, validate, and retry transient failures.
+    """Call the drug client, validate, and retry transient / truncated JSON.
 
-    Transient statuses (timeout/error) use bounded exponential backoff + jitter.
-    Permanent statuses (invalid/empty) and GPU OOM are not retried.
+    Retried (bounded): timeout, transport error, malformed JSON.
+    Not retried: empty body, schema/field validation failures, GPU OOM.
     Returns (parsed_dict, attempt_count, raw_response).
     """
     last = None
@@ -544,11 +704,16 @@ def extract_with_retry(client, brief_facts: str, max_retries: int = 1):
             raw = client.complete(brief_facts)
             return parse_drug_response(raw), attempts, raw
         except AIExtractionError as exc:
+            if getattr(exc, "raw_response", None) is None and raw:
+                exc.raw_response = raw
             last = exc
             if _is_oom_error(str(exc)):
                 # Do not burn the GPU with immediate retries on OOM.
-                raise AIExtractionError("error", f"oom_non_retryable: {exc}") from exc
-            if exc.status in ("timeout", "error") and transient_failures < max_retries:
+                raise AIExtractionError(
+                    "error", f"oom_non_retryable: {exc}", raw_response=exc.raw_response,
+                ) from exc
+            retryable = exc.status in ("timeout", "error") or _is_malformed_json_error(exc)
+            if retryable and transient_failures < max_retries:
                 _retry_sleep(transient_failures)
                 transient_failures += 1
                 continue
@@ -559,8 +724,8 @@ def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
                                allowed_codes, max_retries: int = 1):
     """Call the known-accused client and keep only roster members.
 
-    Transient statuses (timeout/error) use bounded exponential backoff + jitter.
-    Permanent statuses (invalid/empty) and GPU OOM are not retried.
+    Retried (bounded): timeout, transport error, malformed JSON.
+    Not retried: empty body, schema/field validation failures, GPU OOM.
     Returns (parsed_dict, attempt_count, raw_response).
     """
     last = None
@@ -577,10 +742,15 @@ def extract_accused_with_retry(client, brief_facts, roster, allowed_accused_ids,
                 allowed_codes=allowed_codes,
             ), attempts, raw
         except AIExtractionError as exc:
+            if getattr(exc, "raw_response", None) is None and raw:
+                exc.raw_response = raw
             last = exc
             if _is_oom_error(str(exc)):
-                raise AIExtractionError("error", f"oom_non_retryable: {exc}") from exc
-            if exc.status in ("timeout", "error") and transient_failures < max_retries:
+                raise AIExtractionError(
+                    "error", f"oom_non_retryable: {exc}", raw_response=exc.raw_response,
+                ) from exc
+            retryable = exc.status in ("timeout", "error") or _is_malformed_json_error(exc)
+            if retryable and transient_failures < max_retries:
                 _retry_sleep(transient_failures)
                 transient_failures += 1
                 continue
