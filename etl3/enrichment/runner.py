@@ -768,6 +768,48 @@ def _bump(stats: dict, key: str, n: int = 1) -> None:
     stats[key] = stats.get(key, 0) + n
 
 
+class CallBudget:
+    """Atomic per-type cap on newly initiated model calls.
+
+    ``limit <= 0`` means unlimited (production backfill). Reservations are
+    taken before an Ollama request starts; release when a reserved slot was
+    never used (settled skip / health pause). Failed reservations must not
+    send a request.
+    """
+
+    def __init__(self, limit: int = 0):
+        self._limit = max(0, int(limit or 0))
+        self._lock = threading.Lock()
+        self._used = 0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    def try_reserve(self) -> bool:
+        """Reserve one call slot. True if unlimited or a free slot remained."""
+        if not self._limit:
+            return True
+        with self._lock:
+            if self._used >= self._limit:
+                return False
+            self._used += 1
+            return True
+
+    def release(self) -> None:
+        """Return a reserved slot that never started a model request."""
+        if not self._limit:
+            return
+        with self._lock:
+            if self._used > 0:
+                self._used -= 1
+
+
 def process_drug_for_crime(
     conn,
     run_id,
@@ -1029,10 +1071,10 @@ def _process_one_crime_ai(
     settings,
     drug_latencies,
     accused_latencies,
-    allow_drug_call,
-    allow_accused_call,
+    drug_budget: CallBudget,
+    accused_budget: CallBudget,
 ):
-    """Drug then accused for one FIR. Caller owns limit accounting and stop flags."""
+    """Drug then accused for one FIR. Caller owns stop flags; budgets gate calls."""
     batch_size = settings.get("batch_size") or 5
     drug_delta = _empty_drug_stats(settings.get("mode") or "backfill")
     accused_delta = _empty_accused_ai_stats(settings.get("mode") or "backfill")
@@ -1047,9 +1089,10 @@ def _process_one_crime_ai(
         digest = _drug_input_digest(text)
         if _ai_already_settled(conn, crime_id, digest):
             drug_delta["skipped"] += 1
-        elif not allow_drug_call:
+        elif not drug_budget.try_reserve():
             drug_delta["pending"] += 1
         else:
+            reserved = True
             try:
                 result = process_drug_for_crime(
                     conn, run_id, crime_id, source_system, text,
@@ -1058,6 +1101,10 @@ def _process_one_crime_ai(
                 )
                 flags = _apply_drug_outcome(drug_delta, result, drug_latencies, batch_size)
                 drug_called = flags["called"]
+                # Release if reserved but no model request was started.
+                if reserved and not drug_called:
+                    drug_budget.release()
+                    reserved = False
                 if flags["outcome"] == "paused_ollama":
                     conn.commit()
                     paused = True
@@ -1067,11 +1114,14 @@ def _process_one_crime_ai(
                         conn.commit()
                     paused = flags["paused"]
             except Exception as exc:
+                # Keep reservation: call may have started or failed mid-flight.
                 try:
                     conn.rollback()
                 except Exception:
                     pass
                 drug_delta["failed"] += 1
+                # Count exception after reserve as an initiated attempt for cap.
+                drug_called = True
                 print(
                     f"[ai-per-fir] drug error crime_id={crime_id}: "
                     f"{type(exc).__name__}: {exc}",
@@ -1091,10 +1141,11 @@ def _process_one_crime_ai(
             digest = _accused_input_digest(text, roster)
             if _ai_already_settled(conn, crime_id, digest):
                 accused_delta["skipped"] += 1
-            elif not allow_accused_call:
+            elif not accused_budget.try_reserve():
                 accused_delta["limit_reached"] += 1
                 accused_delta["pending"] += 1
             else:
+                reserved = True
                 try:
                     result = process_accused_ai_for_crime(
                         conn, crime_id, records, fact_entry,
@@ -1104,6 +1155,9 @@ def _process_one_crime_ai(
                         accused_delta, result, accused_latencies, batch_size,
                     )
                     accused_called = flags["called"]
+                    if reserved and not accused_called:
+                        accused_budget.release()
+                        reserved = False
                     if flags["outcome"] == "paused_ollama":
                         conn.commit()
                         paused = True
@@ -1126,6 +1180,7 @@ def _process_one_crime_ai(
                     except Exception:
                         pass
                     accused_delta["failed"] += 1
+                    accused_called = True
                     print(
                         f"[ai-per-fir] accused error crime_id={crime_id}: "
                         f"{type(exc).__name__}: {exc}",
@@ -1226,8 +1281,8 @@ def run_per_fir_ai_backfill(
     drug_latencies: list[float] = []
     accused_latencies: list[float] = []
     stats_lock = threading.Lock()
-    drug_calls = 0
-    accused_calls = 0
+    drug_budget = CallBudget(limit)
+    accused_budget = CallBudget(limit)
     stopped = False
     paused = False
 
@@ -1250,20 +1305,25 @@ def run_per_fir_ai_backfill(
     print(
         f"[ai-per-fir] start mode={mode} crimes={len(crime_ids)} "
         f"do_drugs={do_drugs} do_accused={do_accused} parallel={parallel} "
+        f"limit={limit or 'unlimited'} "
         f"batch_size={batch_size} request_delay_sec={settings.get('request_delay_sec')} "
         f"timeout_s={settings.get('timeout')} max_retries={settings.get('max_retries')}",
         flush=True,
     )
 
+    def _budgets_exhausted() -> bool:
+        if not limit:
+            return False
+        return (
+            (not do_drugs or drug_budget.used >= limit)
+            and (not do_accused or accused_budget.used >= limit)
+        )
+
     def _handle_result(result):
-        nonlocal drug_calls, accused_calls, paused
+        nonlocal paused
         with stats_lock:
             _merge_stat_block(drug_stats, result["drug"])
             _merge_stat_block(accused_stats, result["accused"])
-            if result["drug_called"]:
-                drug_calls += 1
-            if result["accused_called"]:
-                accused_calls += 1
             if result["paused"]:
                 paused = True
         return result["db_dead"]
@@ -1275,9 +1335,8 @@ def run_per_fir_ai_backfill(
                 break
             if paused:
                 break
-            with stats_lock:
-                allow_drug = not (limit and drug_calls >= limit)
-                allow_accused = not (limit and accused_calls >= limit)
+            if _budgets_exhausted():
+                break
             result = _process_one_crime_ai(
                 conn, run_id, crime_id,
                 fact_entry=facts.get(crime_id),
@@ -1292,8 +1351,8 @@ def run_per_fir_ai_backfill(
                 settings=settings,
                 drug_latencies=drug_latencies,
                 accused_latencies=accused_latencies,
-                allow_drug_call=allow_drug,
-                allow_accused_call=allow_accused,
+                drug_budget=drug_budget,
+                accused_budget=accused_budget,
             )
             if _handle_result(result):
                 raise RuntimeError(f"database unusable after crime_id={crime_id}")
@@ -1301,15 +1360,13 @@ def run_per_fir_ai_backfill(
         # Parallel FIR workers: each opens its own write connection.
         # Sliding window: at most ``parallel`` FIRs in flight; pause/stop
         # stops scheduling new work (in-flight FIRs finish).
+        # Call caps are enforced by shared CallBudget.try_reserve (atomic).
         lat_lock = threading.Lock()
         halt = threading.Event()
 
         def _worker(crime_id):
             if halt.is_set() or (stop_check and stop_check()):
                 return {"crime_id": crime_id, "skipped_stop": True}
-            with stats_lock:
-                allow_drug = not (limit and drug_calls >= limit)
-                allow_accused = not (limit and accused_calls >= limit)
             local_drug_lat: list[float] = []
             local_accused_lat: list[float] = []
             worker_conn = connections.get_unified_connection()
@@ -1328,8 +1385,8 @@ def run_per_fir_ai_backfill(
                     settings=settings,
                     drug_latencies=local_drug_lat,
                     accused_latencies=local_accused_lat,
-                    allow_drug_call=allow_drug,
-                    allow_accused_call=allow_accused,
+                    drug_budget=drug_budget,
+                    accused_budget=accused_budget,
                 )
                 with lat_lock:
                     drug_latencies.extend(local_drug_lat)
@@ -1347,6 +1404,8 @@ def run_per_fir_ai_backfill(
                     return False
                 if stop_check and stop_check():
                     halt.set()
+                    return False
+                if _budgets_exhausted():
                     return False
                 try:
                     cid = next(crime_iter)
@@ -1383,12 +1442,17 @@ def run_per_fir_ai_backfill(
     drug_stats["latency_avg_s"] = (
         (sum(drug_latencies) / len(drug_latencies)) if drug_latencies else None
     )
+    drug_stats["model_calls"] = drug_budget.used
+    accused_stats["model_calls"] = accused_budget.used
     return {
         "status": "paused" if paused else ("stopped" if stopped else "ran"),
         "drugs": drug_stats,
         "accused": accused_stats,
         "crimes_visited": len(crime_ids),
         "parallel": parallel,
+        "drug_model_calls": drug_budget.used,
+        "accused_model_calls": accused_budget.used,
+        "limit": limit,
     }
 
 

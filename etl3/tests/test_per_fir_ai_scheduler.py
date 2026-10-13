@@ -43,6 +43,9 @@ class FakeConn:
     def rollback(self):
         self.rollbacks += 1
 
+    def close(self):
+        self.closed += 1
+
     def cursor(self):
         cur = mock.MagicMock()
         cur.__enter__ = mock.MagicMock(return_value=cur)

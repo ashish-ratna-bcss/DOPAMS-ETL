@@ -165,15 +165,26 @@ def _ensure_limited_mode(limit: int) -> None:
     """Diagnostic smoke: hard-cap new model calls; never full backfill.
 
     Caps are per enrichment type (drug calls and accused calls separately),
-    matching resolve_ai_settings limited-mode semantics. PARALLEL forced to 1.
-    Explicitly clears ETL3_AI_NUM_PREDICT so a low truncation cap cannot apply.
+    matching resolve_ai_settings limited-mode semantics.
+
+    Parallelism: honour ETL3_AI_PARALLEL when already set (clamped to 1..4);
+    default remains 1 for safe smoke runs. Explicitly clears
+    ETL3_AI_NUM_PREDICT so a low truncation cap cannot apply.
     """
     if limit < 1 or limit > 50:
         raise SystemExit(f"--limited must be 1..50, got {limit}")
     os.environ["ETL3_AI_MODE"] = "limited"
     os.environ["ETL3_AI_ENABLED"] = "1"
     os.environ["ETL3_AI_LIMIT"] = str(limit)
-    os.environ["ETL3_AI_PARALLEL"] = "1"
+    raw_par = (os.environ.get("ETL3_AI_PARALLEL") or "").strip()
+    if raw_par:
+        try:
+            par = max(1, min(4, int(raw_par)))
+        except ValueError:
+            par = 1
+        os.environ["ETL3_AI_PARALLEL"] = str(par)
+    else:
+        os.environ["ETL3_AI_PARALLEL"] = "1"
     # Empty string wins over .env via _env_get; removes truncation trap.
     os.environ["ETL3_AI_NUM_PREDICT"] = ""
 
@@ -202,8 +213,9 @@ def run_backfill(
             raise SystemExit(
                 f"Expected limit={limited} for smoke, got {ai['limit']!r}"
             )
-        if ai.get("parallel", 1) != 1:
-            raise SystemExit(f"Expected parallel=1 for smoke, got {ai.get('parallel')!r}")
+        par = int(ai.get("parallel") or 1)
+        if par < 1 or par > 4:
+            raise SystemExit(f"Expected parallel in 1..4 for limited run, got {par!r}")
         if ai.get("num_predict"):
             raise SystemExit(
                 f"Refusing smoke with num_predict={ai.get('num_predict')!r} "
@@ -315,7 +327,8 @@ def main():
         type=int,
         metavar="N",
         default=None,
-        help="Diagnostic smoke: mode=limited, limit=N (1..50), parallel=1. "
+        help="Diagnostic smoke: mode=limited, limit=N (1..50). "
+        "Honours ETL3_AI_PARALLEL (default 1, max 4). "
         "Does NOT force backfill. Caps new model calls per enrichment type.",
     )
     args = parser.parse_args()
