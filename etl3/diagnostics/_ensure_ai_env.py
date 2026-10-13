@@ -14,6 +14,8 @@ UPDATES = {
     "ETL3_AI_MAX_RETRIES": "2",
     "ETL3_AI_REQUEST_DELAY_SEC": "3",
     "ETL3_AI_HEALTH_COOLDOWN_SEC": "60",
+    # Match GPU count when model fits one card (2× T1000 → 2). Change here/.env only.
+    "ETL3_AI_PARALLEL": "2",
     "OLLAMA_THINK": "0",
     "LLM_TIMEOUT": "180",
     "UNIFIED_PG_DATABASE": "dopams_cctns_v2",

@@ -9,7 +9,12 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from etl3.config import settings as cfg
-from etl3.enrichment.ai import OllamaAccusedClient, OllamaDrugClient, ai_settings
+from etl3.enrichment.ai import (
+    OllamaAccusedClient,
+    OllamaDrugClient,
+    ai_settings,
+    configure_ollama_parallel,
+)
 
 
 def _clear_ollama_env():
@@ -204,6 +209,56 @@ def test_limited_mode_honours_ai_limit():
         assert resolved["batch_size"] == 10
 
 
+def test_parallel_from_env_default_one():
+    with mock.patch.dict(os.environ, {
+        "ETL3_AI_ENABLED": "0",
+        "OLLAMA_BASE_URL": "",
+        "OLLAMA_HOST": "",
+        "OLLAMA_MODEL": "",
+        "LLM_MODEL_EXTRACTION": "",
+        "ETL3_AI_PARALLEL": "",
+    }, clear=False):
+        resolved = ai_settings()
+        assert resolved["parallel"] == 1
+
+
+def test_parallel_from_env_honours_gpu_count():
+    with mock.patch.dict(os.environ, {
+        "ETL3_AI_ENABLED": "1",
+        "OLLAMA_BASE_URL": "http://example-test-host:1234",
+        "OLLAMA_MODEL": "test-model",
+        "OLLAMA_HOST": "",
+        "LLM_MODEL_EXTRACTION": "",
+        "ETL3_AI_PARALLEL": "2",
+    }, clear=False):
+        resolved = ai_settings()
+        assert resolved["parallel"] == 2
+        assert configure_ollama_parallel(resolved["parallel"]) == 2
+
+
+def test_parallel_change_without_code_change():
+    with mock.patch.dict(os.environ, {
+        "ETL3_AI_ENABLED": "1",
+        "OLLAMA_BASE_URL": "http://example-test-host:1234",
+        "OLLAMA_MODEL": "test-model",
+        "OLLAMA_HOST": "",
+        "LLM_MODEL_EXTRACTION": "",
+        "ETL3_AI_PARALLEL": "1",
+    }, clear=False):
+        one = ai_settings()["parallel"]
+    with mock.patch.dict(os.environ, {
+        "ETL3_AI_ENABLED": "1",
+        "OLLAMA_BASE_URL": "http://example-test-host:1234",
+        "OLLAMA_MODEL": "test-model",
+        "OLLAMA_HOST": "",
+        "LLM_MODEL_EXTRACTION": "",
+        "ETL3_AI_PARALLEL": "4",
+    }, clear=False):
+        four = ai_settings()["parallel"]
+    assert one == 1
+    assert four == 4
+
+
 def main():
     tests = [
         test_configured_endpoint_and_model,
@@ -216,6 +271,9 @@ def main():
         test_no_hardcoded_runtime_fallback_in_ai_source,
         test_backfill_mode_ignores_ai_limit,
         test_limited_mode_honours_ai_limit,
+        test_parallel_from_env_default_one,
+        test_parallel_from_env_honours_gpu_count,
+        test_parallel_change_without_code_change,
     ]
     failed = 0
     for fn in tests:

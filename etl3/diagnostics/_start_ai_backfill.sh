@@ -24,6 +24,9 @@ if pgrep -f 'run_ai_backfill.py' >/dev/null 2>&1; then
 fi
 LOG="logs/ai_backfill_$(date -u +%Y%m%dT%H%M%SZ).log"
 ln -sfn "$(basename "$LOG")" logs/ai_backfill_latest.log
+# ETL3_AI_PARALLEL: concurrent Ollama chats from this process. Match GPU
+# count when the model fits one card (2× T1000 → 2). Change .env / this
+# export only when GPU count changes — no code edit needed.
 nohup env \
   ETL3_AI_ENABLED=1 \
   ETL3_AI_MODE=backfill \
@@ -32,6 +35,7 @@ nohup env \
   ETL3_AI_MAX_RETRIES=2 \
   ETL3_AI_REQUEST_DELAY_SEC=3 \
   ETL3_AI_HEALTH_COOLDOWN_SEC=60 \
+  ETL3_AI_PARALLEL=2 \
   OLLAMA_THINK=0 \
   LLM_TIMEOUT=180 \
   OLLAMA_BASE_URL=http://10.12.1.124:11434 \

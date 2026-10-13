@@ -6,10 +6,13 @@ local kb.* tables on that same database. It does not update *_unified CCTNS
 columns and never connects to dev-2 at runtime.
 """
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from etl3.db import connections
 from etl3.enrichment import kb as drug_kb
 from etl3.enrichment.address import load_geo_kb
 from etl3.enrichment.accused_facts import (
@@ -24,6 +27,7 @@ from etl3.enrichment.ai import (
     OllamaAccusedClient,
     OllamaDrugClient,
     ai_settings,
+    configure_ollama_parallel,
     extract_accused_with_retry,
     extract_with_retry,
     last_inference_latency_sec,
@@ -942,6 +946,236 @@ def process_accused_ai_for_crime(
     }
 
 
+def _apply_drug_outcome(drug_stats, result, latencies, batch_size):
+    """Update drug counters from one process_drug_for_crime result. Returns flags."""
+    outcome = result["outcome"]
+    paused = False
+    called = False
+    if outcome == "skipped":
+        drug_stats["skipped"] += 1
+    elif outcome == "paused_ollama":
+        drug_stats["pending"] += 1
+        paused = True
+    else:
+        called = True
+        drug_stats["processed"] += 1
+        if outcome == "success":
+            drug_stats["success"] += 1
+        elif outcome == "empty":
+            drug_stats["empty"] += 1
+        elif outcome == "failed":
+            drug_stats["failed"] += 1
+        _bump(drug_stats, "rejected", result.get("rejected") or 0)
+        _bump(drug_stats, "generic_rejected", result.get("generic_rejected") or 0)
+        _bump(drug_stats, "unsupported", result.get("unsupported") or 0)
+        if result.get("paused_after_oom"):
+            paused = True
+        if drug_stats["processed"] % batch_size == 0:
+            print(
+                f"[ai-per-fir] drug processed={drug_stats['processed']} "
+                f"success={drug_stats['success']} empty={drug_stats['empty']} "
+                f"failed={drug_stats['failed']} "
+                f"{_latency_summary(latencies[-batch_size:])}",
+                flush=True,
+            )
+    return {"paused": paused, "called": called, "outcome": outcome}
+
+
+def _apply_accused_outcome(accused_stats, result, latencies, batch_size):
+    outcome = result["outcome"]
+    paused = False
+    called = False
+    if outcome == "paused_ollama":
+        accused_stats["pending"] += 1
+        paused = True
+    else:
+        if outcome != "skipped":
+            called = True
+            accused_stats["processed"] += 1
+        if outcome == "success":
+            accused_stats["success"] += 1
+        elif outcome == "empty":
+            accused_stats["empty"] += 1
+        elif outcome == "failed":
+            accused_stats["failed"] += 1
+        elif outcome == "skipped":
+            accused_stats["skipped"] += 1
+        if called and accused_stats["processed"] % batch_size == 0:
+            print(
+                f"[ai-per-fir] accused processed={accused_stats['processed']} "
+                f"success={accused_stats['success']} empty={accused_stats['empty']} "
+                f"failed={accused_stats['failed']} "
+                f"{_latency_summary(latencies[-batch_size:])}",
+                flush=True,
+            )
+    return {"paused": paused, "called": called, "outcome": outcome, "rows": result.get("rows") or []}
+
+
+def _process_one_crime_ai(
+    conn,
+    run_id,
+    crime_id,
+    *,
+    fact_entry,
+    records,
+    known,
+    do_drugs,
+    do_accused,
+    drug_client,
+    accused_client,
+    kb_items,
+    drug_kb_obj,
+    settings,
+    drug_latencies,
+    accused_latencies,
+    allow_drug_call,
+    allow_accused_call,
+):
+    """Drug then accused for one FIR. Caller owns limit accounting and stop flags."""
+    batch_size = settings.get("batch_size") or 5
+    drug_delta = _empty_drug_stats(settings.get("mode") or "backfill")
+    accused_delta = _empty_accused_ai_stats(settings.get("mode") or "backfill")
+    paused = False
+    drug_called = False
+    accused_called = False
+    db_dead = False
+
+    if do_drugs and crime_id in known and fact_entry is not None:
+        drug_delta["eligible"] += 1
+        source_system, text = fact_entry
+        digest = _drug_input_digest(text)
+        if _ai_already_settled(conn, crime_id, digest):
+            drug_delta["skipped"] += 1
+        elif not allow_drug_call:
+            drug_delta["pending"] += 1
+        else:
+            try:
+                result = process_drug_for_crime(
+                    conn, run_id, crime_id, source_system, text,
+                    drug_client, kb_items, settings, drug_latencies,
+                    drug_kb_obj=drug_kb_obj,
+                )
+                flags = _apply_drug_outcome(drug_delta, result, drug_latencies, batch_size)
+                drug_called = flags["called"]
+                if flags["outcome"] == "paused_ollama":
+                    conn.commit()
+                    paused = True
+                    print(f"[ai-per-fir] drug paused (ollama) crime_id={crime_id}", flush=True)
+                else:
+                    if flags["called"] or flags["outcome"] == "skipped":
+                        conn.commit()
+                    paused = flags["paused"]
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                drug_delta["failed"] += 1
+                print(
+                    f"[ai-per-fir] drug error crime_id={crime_id}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                if not _conn_usable(conn):
+                    db_dead = True
+
+    if not paused and not db_dead and do_accused and records:
+        if fact_entry is not None and accused_client is not None:
+            accused_delta["eligible"] += 1
+            _source_system, text = fact_entry
+            peek = list(records)
+            if peek and peek[0].get("source_system") == "V1":
+                peek = apply_v1_code_type_and_ccl_numbering(peek, text)
+            roster = build_roster_for_prompt(peek)
+            digest = _accused_input_digest(text, roster)
+            if _ai_already_settled(conn, crime_id, digest):
+                accused_delta["skipped"] += 1
+            elif not allow_accused_call:
+                accused_delta["limit_reached"] += 1
+                accused_delta["pending"] += 1
+            else:
+                try:
+                    result = process_accused_ai_for_crime(
+                        conn, crime_id, records, fact_entry,
+                        accused_client, settings, accused_latencies,
+                    )
+                    flags = _apply_accused_outcome(
+                        accused_delta, result, accused_latencies, batch_size,
+                    )
+                    accused_called = flags["called"]
+                    if flags["outcome"] == "paused_ollama":
+                        conn.commit()
+                        paused = True
+                        print(
+                            f"[ai-per-fir] accused paused (ollama) crime_id={crime_id}",
+                            flush=True,
+                        )
+                    else:
+                        if flags["rows"]:
+                            upsert_rows(
+                                conn, "accused_enrichment", "accused_id",
+                                flags["rows"], ACCUSED_COLUMNS,
+                                run_id, "accused_enrichment",
+                            )
+                        conn.commit()
+                        paused = flags["paused"]
+                except Exception as exc:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    accused_delta["failed"] += 1
+                    print(
+                        f"[ai-per-fir] accused error crime_id={crime_id}: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    if not _conn_usable(conn):
+                        db_dead = True
+        elif fact_entry is None:
+            try:
+                result = process_accused_ai_for_crime(
+                    conn, crime_id, records, None, None, settings, accused_latencies,
+                )
+                if result["rows"]:
+                    upsert_rows(
+                        conn, "accused_enrichment", "accused_id",
+                        result["rows"], ACCUSED_COLUMNS,
+                        run_id, "accused_enrichment",
+                    )
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                print(
+                    f"[ai-per-fir] accused rule-only error crime_id={crime_id}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                if not _conn_usable(conn):
+                    db_dead = True
+
+    return {
+        "crime_id": crime_id,
+        "drug": drug_delta,
+        "accused": accused_delta,
+        "paused": paused,
+        "db_dead": db_dead,
+        "drug_called": drug_called,
+        "accused_called": accused_called,
+    }
+
+
+def _merge_stat_block(dst: dict, src: dict) -> None:
+    for key, value in src.items():
+        if key in ("status", "mode", "latency_avg_s"):
+            continue
+        if isinstance(value, (int, float)):
+            dst[key] = dst.get(key, 0) + value
+
+
 def run_per_fir_ai_backfill(
     conn,
     run_id,
@@ -955,16 +1189,17 @@ def run_per_fir_ai_backfill(
     do_accused: bool = True,
     stop_check=None,
 ):
-    """Per-FIR scheduler: drug then accused for each crime, sequential Ollama.
+    """Per-FIR scheduler: drug then accused for each crime.
 
-    Each enrichment type has its own settlement check and commit. A failure in
-    one type does not skip the other while the database connection remains
-    usable. stop_check() -> True ends after the current enrichment type.
+    ``ETL3_AI_PARALLEL`` controls how many FIRs may call Ollama at once (each
+    worker uses its own DB connection). Settlement checks and commits stay
+    per enrichment type. stop_check() -> True stops scheduling new FIRs.
     """
     settings = settings or ai_settings()
     mode = settings.get("mode") or "backfill"
     limit = settings.get("limit") or 0
     batch_size = settings.get("batch_size") or 5
+    parallel = configure_ollama_parallel(settings.get("parallel") or 1)
 
     if do_drugs and drug_client is None and settings.get("enabled"):
         drug_client = OllamaDrugClient(
@@ -989,6 +1224,7 @@ def run_per_fir_ai_backfill(
     accused_stats = _empty_accused_ai_stats(mode)
     drug_latencies: list[float] = []
     accused_latencies: list[float] = []
+    stats_lock = threading.Lock()
     drug_calls = 0
     accused_calls = 0
     stopped = False
@@ -1012,196 +1248,135 @@ def run_per_fir_ai_backfill(
 
     print(
         f"[ai-per-fir] start mode={mode} crimes={len(crime_ids)} "
-        f"do_drugs={do_drugs} do_accused={do_accused} "
+        f"do_drugs={do_drugs} do_accused={do_accused} parallel={parallel} "
         f"batch_size={batch_size} request_delay_sec={settings.get('request_delay_sec')} "
         f"timeout_s={settings.get('timeout')} max_retries={settings.get('max_retries')}",
         flush=True,
     )
 
-    for crime_id in crime_ids:
-        if stop_check and stop_check():
-            stopped = True
-            break
-        if paused:
-            break
+    def _handle_result(result):
+        nonlocal drug_calls, accused_calls, paused
+        with stats_lock:
+            _merge_stat_block(drug_stats, result["drug"])
+            _merge_stat_block(accused_stats, result["accused"])
+            if result["drug_called"]:
+                drug_calls += 1
+            if result["accused_called"]:
+                accused_calls += 1
+            if result["paused"]:
+                paused = True
+        return result["db_dead"]
 
-        fact_entry = facts.get(crime_id)
+    if parallel <= 1:
+        for crime_id in crime_ids:
+            if stop_check and stop_check():
+                stopped = True
+                break
+            if paused:
+                break
+            with stats_lock:
+                allow_drug = not (limit and drug_calls >= limit)
+                allow_accused = not (limit and accused_calls >= limit)
+            result = _process_one_crime_ai(
+                conn, run_id, crime_id,
+                fact_entry=facts.get(crime_id),
+                records=by_crime.get(crime_id) or [],
+                known=known,
+                do_drugs=do_drugs,
+                do_accused=do_accused,
+                drug_client=drug_client,
+                accused_client=accused_client,
+                kb_items=kb_items,
+                drug_kb_obj=drug_kb_obj,
+                settings=settings,
+                drug_latencies=drug_latencies,
+                accused_latencies=accused_latencies,
+                allow_drug_call=allow_drug,
+                allow_accused_call=allow_accused,
+            )
+            if _handle_result(result):
+                raise RuntimeError(f"database unusable after crime_id={crime_id}")
+    else:
+        # Parallel FIR workers: each opens its own write connection.
+        # Sliding window: at most ``parallel`` FIRs in flight; pause/stop
+        # stops scheduling new work (in-flight FIRs finish).
+        lat_lock = threading.Lock()
+        halt = threading.Event()
 
-        if do_drugs and crime_id in known and fact_entry is not None:
-            drug_stats["eligible"] += 1
-            source_system, text = fact_entry
-            digest = _drug_input_digest(text)
-            if _ai_already_settled(conn, crime_id, digest):
-                drug_stats["skipped"] += 1
-            elif limit and drug_calls >= limit:
-                drug_stats["pending"] += 1
-            else:
+        def _worker(crime_id):
+            if halt.is_set() or (stop_check and stop_check()):
+                return {"crime_id": crime_id, "skipped_stop": True}
+            with stats_lock:
+                allow_drug = not (limit and drug_calls >= limit)
+                allow_accused = not (limit and accused_calls >= limit)
+            local_drug_lat: list[float] = []
+            local_accused_lat: list[float] = []
+            worker_conn = connections.get_unified_connection()
+            try:
+                result = _process_one_crime_ai(
+                    worker_conn, run_id, crime_id,
+                    fact_entry=facts.get(crime_id),
+                    records=by_crime.get(crime_id) or [],
+                    known=known,
+                    do_drugs=do_drugs,
+                    do_accused=do_accused,
+                    drug_client=drug_client,
+                    accused_client=accused_client,
+                    kb_items=kb_items,
+                    drug_kb_obj=drug_kb_obj,
+                    settings=settings,
+                    drug_latencies=local_drug_lat,
+                    accused_latencies=local_accused_lat,
+                    allow_drug_call=allow_drug,
+                    allow_accused_call=allow_accused,
+                )
+                with lat_lock:
+                    drug_latencies.extend(local_drug_lat)
+                    accused_latencies.extend(local_accused_lat)
+                return result
+            finally:
+                worker_conn.close()
+
+        with ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="ai-fir") as pool:
+            pending = set()
+            crime_iter = iter(crime_ids)
+
+            def _submit_next():
+                if halt.is_set():
+                    return False
+                if stop_check and stop_check():
+                    halt.set()
+                    return False
                 try:
-                    result = process_drug_for_crime(
-                        conn, run_id, crime_id, source_system, text,
-                        drug_client, kb_items, settings, drug_latencies,
-                        drug_kb_obj=drug_kb_obj,
-                    )
-                    outcome = result["outcome"]
-                    if outcome == "skipped":
-                        drug_stats["skipped"] += 1
-                    elif outcome == "paused_ollama":
-                        drug_stats["pending"] += 1
-                        conn.commit()
-                        paused = True
-                        print(
-                            f"[ai-per-fir] drug paused (ollama) crime_id={crime_id}",
-                            flush=True,
-                        )
-                    else:
-                        drug_calls += 1
-                        drug_stats["processed"] += 1
-                        if outcome == "success":
-                            drug_stats["success"] += 1
-                        elif outcome == "empty":
-                            drug_stats["empty"] += 1
-                        elif outcome == "failed":
-                            drug_stats["failed"] += 1
-                        _bump(drug_stats, "rejected", result.get("rejected") or 0)
-                        _bump(
-                            drug_stats,
-                            "generic_rejected",
-                            result.get("generic_rejected") or 0,
-                        )
-                        _bump(
-                            drug_stats,
-                            "unsupported",
-                            result.get("unsupported") or 0,
-                        )
-                        conn.commit()
-                        if result.get("paused_after_oom"):
-                            paused = True
-                        if drug_calls % batch_size == 0:
-                            print(
-                                f"[ai-per-fir] drug processed={drug_stats['processed']} "
-                                f"success={drug_stats['success']} "
-                                f"empty={drug_stats['empty']} "
-                                f"failed={drug_stats['failed']} "
-                                f"{_latency_summary(drug_latencies[-batch_size:])}",
-                                flush=True,
-                            )
-                except Exception as exc:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    drug_stats["failed"] += 1
-                    print(
-                        f"[ai-per-fir] drug error crime_id={crime_id}: "
-                        f"{type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-                    if not _conn_usable(conn):
-                        raise
+                    cid = next(crime_iter)
+                except StopIteration:
+                    return False
+                pending.add(pool.submit(_worker, cid))
+                return True
 
-        if stop_check and stop_check():
-            stopped = True
-            break
-        if paused:
-            break
+            for _ in range(parallel):
+                if not _submit_next():
+                    break
 
-        if do_accused and crime_id in by_crime:
-            records = by_crime[crime_id]
-            if fact_entry is not None and accused_client is not None:
-                accused_stats["eligible"] += 1
-                _source_system, text = fact_entry
-                peek = list(records)
-                if peek and peek[0].get("source_system") == "V1":
-                    peek = apply_v1_code_type_and_ccl_numbering(peek, text)
-                roster = build_roster_for_prompt(peek)
-                digest = _accused_input_digest(text, roster)
-                if _ai_already_settled(conn, crime_id, digest):
-                    accused_stats["skipped"] += 1
-                elif limit and accused_calls >= limit:
-                    accused_stats["limit_reached"] += 1
-                    accused_stats["pending"] += 1
-                else:
-                    try:
-                        result = process_accused_ai_for_crime(
-                            conn, crime_id, records, fact_entry,
-                            accused_client, settings, accused_latencies,
-                        )
-                        outcome = result["outcome"]
-                        if outcome == "paused_ollama":
-                            accused_stats["pending"] += 1
-                            conn.commit()
-                            paused = True
-                            print(
-                                f"[ai-per-fir] accused paused (ollama) "
-                                f"crime_id={crime_id}",
-                                flush=True,
-                            )
-                        else:
-                            if outcome != "skipped":
-                                accused_calls += 1
-                                accused_stats["processed"] += 1
-                            if outcome == "success":
-                                accused_stats["success"] += 1
-                            elif outcome == "empty":
-                                accused_stats["empty"] += 1
-                            elif outcome == "failed":
-                                accused_stats["failed"] += 1
-                            elif outcome == "skipped":
-                                accused_stats["skipped"] += 1
-                            if result["rows"]:
-                                upsert_rows(
-                                    conn, "accused_enrichment", "accused_id",
-                                    result["rows"], ACCUSED_COLUMNS,
-                                    run_id, "accused_enrichment",
-                                )
-                            conn.commit()
-                            if accused_calls and accused_calls % batch_size == 0:
-                                print(
-                                    f"[ai-per-fir] accused processed="
-                                    f"{accused_stats['processed']} "
-                                    f"success={accused_stats['success']} "
-                                    f"empty={accused_stats['empty']} "
-                                    f"failed={accused_stats['failed']} "
-                                    f"{_latency_summary(accused_latencies[-batch_size:])}",
-                                    flush=True,
-                                )
-                    except Exception as exc:
-                        try:
-                            conn.rollback()
-                        except Exception:
-                            pass
-                        accused_stats["failed"] += 1
-                        print(
-                            f"[ai-per-fir] accused error crime_id={crime_id}: "
-                            f"{type(exc).__name__}: {exc}",
-                            flush=True,
-                        )
-                        if not _conn_usable(conn):
-                            raise
-            elif fact_entry is None:
-                try:
-                    result = process_accused_ai_for_crime(
-                        conn, crime_id, records, None, None, settings, accused_latencies,
-                    )
-                    if result["rows"]:
-                        upsert_rows(
-                            conn, "accused_enrichment", "accused_id",
-                            result["rows"], ACCUSED_COLUMNS,
-                            run_id, "accused_enrichment",
-                        )
-                    conn.commit()
-                except Exception as exc:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    print(
-                        f"[ai-per-fir] accused rule-only error crime_id={crime_id}: "
-                        f"{type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-                    if not _conn_usable(conn):
-                        raise
+            while pending:
+                done = next(as_completed(pending))
+                pending.remove(done)
+                result = done.result()
+                if result.get("skipped_stop"):
+                    stopped = True
+                    halt.set()
+                    continue
+                if _handle_result(result):
+                    paused = True
+                    halt.set()
+                    continue
+                if paused:
+                    halt.set()
+                    continue
+                _submit_next()
+
+            if halt.is_set() and stop_check and stop_check():
+                stopped = True
 
     drug_stats["latency_samples"] = len(drug_latencies)
     drug_stats["latency_avg_s"] = (
@@ -1212,6 +1387,7 @@ def run_per_fir_ai_backfill(
         "drugs": drug_stats,
         "accused": accused_stats,
         "crimes_visited": len(crime_ids),
+        "parallel": parallel,
     }
 
 

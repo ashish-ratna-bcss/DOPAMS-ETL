@@ -7,6 +7,7 @@ Clients are not used unless ETL3_AI_ENABLED=1.
 """
 import json
 import re
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -278,14 +279,49 @@ def _is_oom_error(message: str) -> bool:
     return bool(re.search(r"(^|[^a-z])oom([^a-z]|$)", text))
 
 
-# Single-flight guard: never issue concurrent Ollama generations from one process.
-_OLLAMA_LOCK = __import__("threading").Lock()
+# Bound in-flight Ollama chats. Size comes from ETL3_AI_PARALLEL (default 1).
+_OLLAMA_GATE = None
+_OLLAMA_GATE_N = None
+_OLLAMA_GATE_LOCK = threading.Lock()
 _THINK_FLAG_LOGGED = False
 _LAST_LATENCY_SEC = None
+_LAST_LATENCY_LOCK = threading.Lock()
+
+
+def configure_ollama_parallel(n: int) -> int:
+    """Set max concurrent /api/chat calls from this process (env-driven)."""
+    global _OLLAMA_GATE, _OLLAMA_GATE_N
+    slots = max(1, int(n))
+    with _OLLAMA_GATE_LOCK:
+        if _OLLAMA_GATE is None or _OLLAMA_GATE_N != slots:
+            _OLLAMA_GATE = threading.BoundedSemaphore(slots)
+            _OLLAMA_GATE_N = slots
+            print(f"[ollama] client_parallel={slots}", flush=True)
+        return slots
+
+
+def _ollama_gate():
+    """Return the shared semaphore; lazy-init from env if not configured yet."""
+    global _OLLAMA_GATE, _OLLAMA_GATE_N
+    with _OLLAMA_GATE_LOCK:
+        if _OLLAMA_GATE is not None:
+            return _OLLAMA_GATE
+        try:
+            from etl3.config.settings import resolve_ai_settings
+
+            slots = int(resolve_ai_settings().get("parallel") or 1)
+        except Exception:
+            slots = 1
+        slots = max(1, int(slots))
+        _OLLAMA_GATE = threading.BoundedSemaphore(slots)
+        _OLLAMA_GATE_N = slots
+        print(f"[ollama] client_parallel={slots}", flush=True)
+        return _OLLAMA_GATE
 
 
 def last_inference_latency_sec():
-    return _LAST_LATENCY_SEC
+    with _LAST_LATENCY_LOCK:
+        return _LAST_LATENCY_SEC
 
 
 def _ollama_chat(host, model, timeout, prompt: str) -> str:
@@ -318,17 +354,20 @@ def _ollama_chat(host, model, timeout, prompt: str) -> str:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    # Serialize all generations in-process (one request at a time).
-    with _OLLAMA_LOCK:
+    gate = _ollama_gate()
+    gate.acquire()
+    try:
         t0 = time.monotonic()
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_payload = json.loads(response.read().decode("utf-8"))
         except TimeoutError as exc:
-            _LAST_LATENCY_SEC = time.monotonic() - t0
+            with _LAST_LATENCY_LOCK:
+                _LAST_LATENCY_SEC = time.monotonic() - t0
             raise AIExtractionError("timeout", str(exc)) from exc
         except urllib.error.HTTPError as exc:
-            _LAST_LATENCY_SEC = time.monotonic() - t0
+            with _LAST_LATENCY_LOCK:
+                _LAST_LATENCY_SEC = time.monotonic() - t0
             body_text = ""
             try:
                 body_text = exc.read().decode("utf-8", "replace")[:500]
@@ -339,7 +378,8 @@ def _ollama_chat(host, model, timeout, prompt: str) -> str:
                 raise AIExtractionError("error", f"oom_non_retryable: {msg}") from exc
             raise AIExtractionError("error", msg) from exc
         except urllib.error.URLError as exc:
-            _LAST_LATENCY_SEC = time.monotonic() - t0
+            with _LAST_LATENCY_LOCK:
+                _LAST_LATENCY_SEC = time.monotonic() - t0
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, TimeoutError):
                 raise AIExtractionError("timeout", str(exc)) from exc
@@ -347,7 +387,10 @@ def _ollama_chat(host, model, timeout, prompt: str) -> str:
             if _is_oom_error(msg):
                 raise AIExtractionError("error", f"oom_non_retryable: {msg}") from exc
             raise AIExtractionError("error", msg) from exc
-        _LAST_LATENCY_SEC = time.monotonic() - t0
+        with _LAST_LATENCY_LOCK:
+            _LAST_LATENCY_SEC = time.monotonic() - t0
+    finally:
+        gate.release()
     return (
         (response_payload.get("message") or {}).get("content")
         or response_payload.get("response")

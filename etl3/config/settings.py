@@ -137,6 +137,9 @@ def resolve_ai_settings() -> dict:
     retries_raw = _env_get("ETL3_AI_MAX_RETRIES") or "2"
     delay_raw = _env_get("ETL3_AI_REQUEST_DELAY_SEC") or "3"
     cooldown_raw = _env_get("ETL3_AI_HEALTH_COOLDOWN_SEC") or "60"
+    # Concurrent in-flight Ollama chats from this process. Match to GPU count
+    # when each model copy fits one card (e.g. 2× T1000 8GB → 2). Default 1.
+    parallel_raw = _env_get("ETL3_AI_PARALLEL") or "1"
     mode = ai_mode()
     limit = int(limit_raw)
     if mode == "backfill":
@@ -154,6 +157,7 @@ def resolve_ai_settings() -> dict:
         # Pace Ollama generations on 8 GB GPUs (sequential + inter-request delay).
         "request_delay_sec": max(0.0, float(delay_raw)),
         "health_cooldown_sec": max(5.0, float(cooldown_raw)),
+        "parallel": max(1, int(parallel_raw)),
     }
 
 
