@@ -1,0 +1,30 @@
+# NOT ENABLED. Provided for review only -- do not `systemctl enable` or
+# `systemctl start` this unit (or its companion .timer) until:
+#   1. python etl3/run_daily_pipeline.py --gate-check reports ready=true, AND
+#   2. the activation checklist in etl3/docs/DAILY_PIPELINE_ROLLOUT.md is
+#      explicitly signed off.
+#
+# WorkingDirectory/ExecStart paths below assume the documented checkout at
+# /home/eagle/dopams-cctns-ai with a "venv" virtualenv in its root -- VERIFY
+# both against the actual host before this file is ever installed; neither
+# has been confirmed from outside that host.
+#
+# ExecStartPre re-runs the same read-only activation gate immediately before
+# every scheduled fire, so a backfill that was complete at install time but
+# regresses later (e.g. a fresh large AI-eligible batch lands) still blocks
+# that day's run instead of silently proceeding.
+
+[Unit]
+Description=ETL-3 daily deterministic + AI-settled enrichment pass (cctns-ai checkout)
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/eagle/dopams-cctns-ai
+User=eagle
+ExecStartPre=/home/eagle/dopams-cctns-ai/venv/bin/python etl3/run_daily_pipeline.py --gate-check
+ExecStart=/home/eagle/dopams-cctns-ai/venv/bin/python etl3/run_daily_pipeline.py --etl3-only
+# A failed gate-check (non-zero exit) stops ExecStart from ever running;
+# systemd marks the unit failed, which is the desired outcome, not a crash.
+TimeoutStartSec=3600

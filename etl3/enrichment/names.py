@@ -15,6 +15,41 @@ The source name is kept. Cleaned values are returned beside it.
 import re
 
 
+def collapse_exact_repetition(text):
+    """Collapse a name field that is the SAME word sequence repeated end to
+    end -- e.g. "Amodi Chukuwudi Muomagolu Amodi Chukuwudi Muomagolu" or
+    "China China" -- into one occurrence. A single data-entry artifact
+    (the whole value typed/concatenated twice) is the only thing this
+    removes.
+
+    The test is exact and structural, not a resemblance heuristic: the
+    token sequence must tile perfectly (comparison case-insensitive,
+    tokens split on whitespace/comma/semicolon) with no leftover and no
+    partial match. "Sri Sri Ravi Shankar" does NOT collapse (only "Sri"
+    repeats, not the whole name); "Rama Rama Rao" does NOT collapse (the
+    tail "Rao" breaks the tiling). Only a genuine whole-value duplicate --
+    established by that exact tiling, never by "looks similar" -- is
+    removed, so a legitimate repeated word or compound name is preserved
+    exactly as given.
+
+    Idempotent: a value with no such repetition (including an
+    already-collapsed one) is returned unchanged.
+    """
+    if not text or not text.strip():
+        return text
+    tokens = [t for t in re.split(r"[\s,;]+", text.strip()) if t]
+    n = len(tokens)
+    if n < 2:
+        return text
+    normalized = [t.lower() for t in tokens]
+    for period in range(1, n // 2 + 1):
+        if n % period:
+            continue
+        if all(normalized[i] == normalized[i % period] for i in range(n)):
+            return " ".join(tokens[:period])
+    return text
+
+
 def extract_alias_from_name(name):
     if not name or "@" not in name:
         return None, name
@@ -65,7 +100,12 @@ def _strip_noise(name):
     name = re.sub(r"\s*\(?\s*UT\s+prisoner\s+no\.?\s*\d+\s*\)?\s*", "", name, flags=re.IGNORECASE)
     name = re.sub(r"\s*CRPF.*$", "", name, flags=re.IGNORECASE)
     name = re.sub(r"\s+", " ", name)
-    name = re.sub(r"^[,.\s]+|[,.\s]+$", "", name)
+    # Trailing/leading hyphen cluster left dangling once a noise phrase
+    # next to it is stripped (e.g. "ALLOY-Absconding" -> "ALLOY-"), or
+    # present in the source on its own ("Mr. Chris -"). Only the outer
+    # edge of the string is touched -- an internal hyphen (a hyphenated
+    # surname) is never affected.
+    name = re.sub(r"^[,.\-\s]+|[,.\-\s]+$", "", name)
     name = re.sub(r"\(\s*\)", "", name)
     return name.strip()
 
@@ -141,16 +181,36 @@ def clean_person_names(full_name, given_name=None, surname=None, alias=None,
     if not any((original_full, given, sur, ali)):
         return None
 
-    working = original_full or ""
+    # raw_full_name (returned below) stays exactly as the source gave it --
+    # collapsing only ever feeds the derived cleaned_full_name/alias/
+    # relationship extraction that follows.
+    #
+    # Deliberately NOT applied to given_name/surname: those fields are
+    # typically 1-2 words, where an exact 2-word tiling match (k=1) is far
+    # more likely to be a genuine short repeated-word name -- confirmed
+    # against live data, where this would have erased "Dung Dung" (a real
+    # Munda/Oraon surname) down to "Dung". The combined full_name field is
+    # where 341 confirmed real duplicates were found with zero false
+    # positives; given_name/surname have no comparable evidence, so they
+    # are left exactly as the source gave them.
+    working = collapse_exact_repetition(original_full) if original_full else ""
     if "@" in working and not ali:
         extracted_alias, without_alias = extract_alias_from_name(working)
         if extracted_alias:
             ali = extracted_alias
-            working = without_alias
+            # Re-check after the alias split: "Ravi Kumar Ravi Kumar @ Raju"
+            # does not tile as a WHOLE string (the alias breaks it), but the
+            # name alone, once the unambiguous "@" boundary has removed the
+            # alias, does. A boundary this explicit is safe to re-check
+            # against; an unmarked trailing word is not (see
+            # extract_relationship_info below and collapse_exact_repetition's
+            # own docstring on "Hassan Ali Hassan Ali Jer" staying untouched).
+            working = collapse_exact_repetition(without_alias)
 
     if working and (not rel_name or not rel_type):
         found_type, found_name, without_relation = extract_relationship_info(working)
         if found_type and found_name:
+            working = collapse_exact_repetition(without_relation)
             if not rel_type:
                 rel_type = found_type
             if not rel_name:

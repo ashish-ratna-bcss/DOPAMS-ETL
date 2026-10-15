@@ -1,0 +1,20 @@
+# NOT ENABLED. See etl3-daily-pipeline.service for the activation
+# prerequisites -- this file being present does not schedule anything until
+# a human runs `systemctl enable --now etl3-daily-pipeline.timer`, which must
+# not happen before that checklist passes.
+#
+# Cadence reuses the slot cadence already proposed (not invented here) in
+# etl3/docs/DAILY_PIPELINE_ROLLOUT.md: V1/V2 slots at 05:30/11:30/17:30/23:30
+# IST. IST is UTC+5:30, so in UTC that is 00:00/06:00/12:00/18:00 -- i.e. ETL-3
+# runs after both sources have had time to finish that slot's cycle.
+
+[Unit]
+Description=Trigger etl3-daily-pipeline.service on the proposed V1/V2 slot cadence (NOT ENABLED)
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

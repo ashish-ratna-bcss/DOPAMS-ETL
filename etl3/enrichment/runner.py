@@ -6,6 +6,7 @@ local kb.* tables on that same database. It does not update *_unified CCTNS
 columns and never connects to dev-2 at runtime.
 """
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -21,6 +22,14 @@ from etl3.enrichment.accused_facts import (
     enrich_existing_accused,
     map_v1_dossier_identity,
     _compose_address,
+)
+from etl3.merger.accused_split import (
+    build_split_rows,
+    diff_superseded_children,
+    existing_active_children,
+    supersede_children,
+    supersede_parent_if_unset,
+    write_split_rows,
 )
 from etl3.enrichment.ai import (
     AIExtractionError,
@@ -434,6 +443,128 @@ def _accused_enrichment(conn, run_id, accused_client=None, settings=None):
     return stats
 
 
+def _multi_accused_settings():
+    enabled = (os.environ.get("ETL3_MULTI_ACCUSED_SPLIT_ENABLED") or "0").strip() == "1"
+    return {"enabled": enabled}
+
+
+def _load_parent_accused_for_split(conn):
+    """One parent dict per existing accused_unified row whose linked
+    person has a name -- the field that may carry a packed CCTNS name.
+    Reuses _person_payloads so V1 (no persons_source) and V2 are both
+    covered the same way _load_accused_by_crime already covers them.
+    Never considers a row that is itself already a split child
+    (derived_from_accused_id set) -- a split is not re-split.
+    """
+    persons = _person_payloads(conn)
+    rows = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT accused_id, source_system, crime_id, person_id,
+                   current_source_run_id, current_as_of
+            FROM accused_unified
+            WHERE derived_from_accused_id IS NULL
+            """,
+        )
+        for (
+            accused_id, source_system, crime_id, person_id,
+            current_source_run_id, current_as_of,
+        ) in cur.fetchall():
+            person = persons.get((source_system, person_id)) if person_id else None
+            full_name = (person or {}).get("full_name")
+            if not full_name:
+                continue
+            rows.append({
+                "accused_id": accused_id,
+                "source_system": source_system,
+                "crime_id": crime_id,
+                "person_id": person_id,
+                "current_source_run_id": current_source_run_id,
+                "current_as_of": current_as_of,
+                "full_name": full_name,
+            })
+    return rows
+
+
+def _multi_accused_split(conn, run_id):
+    """Additive, feature-flagged stage: split a high-confidence packed
+    accused name into REAL additional persons_unified / accused_unified
+    rows, via etl3.merger.accused_split (merger-layer, since that module
+    owns writes to *_unified; enrichment never has).
+
+    Disabled by default (ETL3_MULTI_ACCUSED_SPLIT_ENABLED != '1') -- a
+    no-op that runs no query and touches nothing, so existing behaviour is
+    unchanged when the flag is off. Requires migration 018 (the new
+    nullable *_unified columns + accused_split_audit table) to already be
+    applied -- not executed anywhere by this repository yet; enabling the
+    flag before that migration is applied will fail loudly (unknown
+    column), not silently.
+
+    Never invents a person from "and N others" or from a low-confidence/
+    ambiguous pack (detect_multi_accused never returns segments for those).
+    A parent that successfully splits is marked split_superseded_at (not
+    deleted) so the existing AI roster builder (_load_accused_by_crime)
+    stops asking the model to enrich the combined pack text once its
+    children exist; a previously-created child no longer reproduced this
+    run is retired the same way, never deleted.
+
+    Once written, a child's name cleanup, address resolution, category/
+    type classification, and AI brief-facts enrichment all happen via the
+    EXISTING, unmodified _person_enrichment / _accused_enrichment / AI
+    roster pipeline on this or a later run -- nothing here duplicates that.
+    """
+    settings = _multi_accused_settings()
+    if not settings["enabled"]:
+        return {"status": "disabled"}
+
+    candidates = 0
+    high_confidence = 0
+    low_confidence = 0
+    parents_split = 0
+    children_superseded = 0
+    person_rows_all = []
+    accused_rows_all = []
+    audit_rows_all = []
+
+    for parent in _load_parent_accused_for_split(conn):
+        candidates += 1
+        person_rows, accused_rows, audit_rows, parse_result = build_split_rows(
+            parent, parent["full_name"],
+        )
+        if parse_result["confidence"] == "low":
+            low_confidence += 1
+            continue
+        if not accused_rows:
+            continue
+        high_confidence += 1
+
+        new_child_ids = [row["accused_id"] for row in accused_rows]
+        existing_ids = existing_active_children(conn, parent["accused_id"])
+        to_supersede = diff_superseded_children(existing_ids, new_child_ids)
+        children_superseded += supersede_children(conn, to_supersede)
+        if supersede_parent_if_unset(conn, parent["accused_id"]):
+            parents_split += 1
+
+        person_rows_all.extend(person_rows)
+        accused_rows_all.extend(accused_rows)
+        audit_rows_all.extend(audit_rows)
+
+    write_stats = write_split_rows(
+        conn, person_rows_all, accused_rows_all, audit_rows_all,
+        enrichment_run_id=run_id,
+    )
+    return {
+        "status": "ran",
+        "accused_candidates": candidates,
+        "high_confidence_packs": high_confidence,
+        "low_confidence_packs": low_confidence,
+        "parents_newly_split": parents_split,
+        "children_superseded": children_superseded,
+        "write_stats": write_stats,
+    }
+
+
 def _chargesheet_enrichment(conn, run_id):
     unified = {
         (source_system, source_module, source_record_id): charge_sheet_id
@@ -692,16 +823,36 @@ def _conn_usable(conn) -> bool:
 
 
 def _load_accused_by_crime(conn) -> dict:
-    """Map crime_id -> list of existing CCTNS accused records for AI enrichment."""
+    """Map crime_id -> list of existing CCTNS accused records for AI enrichment.
+
+    When ETL3_MULTI_ACCUSED_SPLIT_ENABLED=1 (and migration 018 applied),
+    this also excludes a parent accused_unified row once it has been split
+    (split_superseded_at set -- see _multi_accused_split) and includes each
+    still-active split child (derived_from_accused_id set, split_superseded_at
+    NULL), built from its own persons_unified row via _split_child_records,
+    so the existing AI pipeline enriches it exactly like any other CCTNS
+    accused. Both behaviours are complete no-ops, with no dependency on the
+    new nullable columns, when the flag is off (the default).
+    """
+    split_enabled = _multi_accused_settings()["enabled"]
     unified = {}
-    for accused_id, source_system, source_record_id, crime_id, person_id, accused_code, accused_status, is_ccl in _pairs(
-        conn,
-        """
-        SELECT accused_id, source_system, source_record_id, crime_id, person_id,
-               accused_code, accused_status, is_ccl
-        FROM accused_unified
-        """,
-    ):
+    select_cols = (
+        "accused_id, source_system, source_record_id, crime_id, person_id, "
+        "accused_code, accused_status, is_ccl"
+        + (", split_superseded_at" if split_enabled else "")
+    )
+    for row in _pairs(conn, f"SELECT {select_cols} FROM accused_unified"):
+        if split_enabled:
+            (
+                accused_id, source_system, source_record_id, crime_id, person_id,
+                accused_code, accused_status, is_ccl, split_superseded_at,
+            ) = row
+        else:
+            (
+                accused_id, source_system, source_record_id, crime_id, person_id,
+                accused_code, accused_status, is_ccl,
+            ) = row
+            split_superseded_at = None
         unified[(source_system, source_record_id)] = {
             "accused_id": accused_id,
             "crime_id": crime_id,
@@ -709,6 +860,7 @@ def _load_accused_by_crime(conn) -> dict:
             "accused_code": accused_code,
             "accused_status": accused_status,
             "is_ccl": is_ccl,
+            "split_superseded_at": split_superseded_at,
         }
 
     persons = _person_payloads(conn)
@@ -717,6 +869,8 @@ def _load_accused_by_crime(conn) -> dict:
         for record_id, payload in _latest(conn, "accused_source", source_system):
             meta = unified.get((source_system, record_id))
             if not meta or not meta.get("accused_id"):
+                continue
+            if meta.get("split_superseded_at"):
                 continue
             person_id = meta.get("person_id") or payload.get("person_id")
             person_payload = persons.get((source_system, person_id)) if person_id else None
@@ -727,7 +881,55 @@ def _load_accused_by_crime(conn) -> dict:
             if not crime_id:
                 continue
             by_crime.setdefault(crime_id, []).append(record)
+
+    if split_enabled:
+        for record in _split_child_records(conn):
+            by_crime.setdefault(record["crime_id"], []).append(record)
     return by_crime
+
+
+def _split_child_records(conn):
+    """Still-active split children (etl3/merger/accused_split.py), shaped
+    like _compose_existing_accused_record's output, built from their own
+    persons_unified row -- they have no accused_source/persons_source row
+    of their own, since they were created by the splitter, not observed
+    from a CCTNS API response.
+    """
+    rows = _pairs(
+        conn,
+        """
+        SELECT a.accused_id, a.source_system, a.crime_id, a.person_id,
+               p.full_name, p.alias, p.age, p.gender, p.occupation,
+               p.phone_number, p.present_address_text, p.permanent_address_text
+        FROM accused_unified a
+        JOIN persons_unified p ON p.person_id = a.person_id
+        WHERE a.derived_from_accused_id IS NOT NULL AND a.split_superseded_at IS NULL
+        """,
+    )
+    records = []
+    for (
+        accused_id, source_system, crime_id, person_id, full_name, alias, age,
+        gender, occupation, phone_number, present_address_text, permanent_address_text,
+    ) in rows:
+        records.append({
+            "accused_id": accused_id,
+            "source_system": source_system,
+            "crime_id": crime_id,
+            "person_id": person_id,
+            "accused_code": None,
+            "accused_status": None,
+            "status": None,
+            "is_ccl": None,
+            "type": None,
+            "full_name": full_name,
+            "alias_name": alias,
+            "age": age,
+            "gender": gender,
+            "occupation": occupation,
+            "phone_numbers": phone_number,
+            "address": _text_or_none(present_address_text) or _text_or_none(permanent_address_text),
+        })
+    return records
 
 
 def _empty_drug_stats(mode: str = "backfill") -> dict:
@@ -1639,6 +1841,7 @@ def run_enrichment(conn, run_id, ai_client=None, accused_client=None):
             ("accused", lambda: _accused_enrichment(
                 conn, run_id, accused_client=accused_client,
             )),
+            ("multi_accused_split", lambda: _multi_accused_split(conn, run_id)),
             ("chargesheets", lambda: _chargesheet_enrichment(conn, run_id)),
             ("hierarchy", lambda: _hierarchy_enrichment(conn, run_id)),
             ("properties", lambda: _property_enrichment(conn, run_id)),

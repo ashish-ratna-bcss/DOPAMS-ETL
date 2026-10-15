@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from etl3.enrichment.ai import AIExtractionError, extract_with_retry, parse_drug_response
 from etl3.enrichment.kb import resolve_primary_name
-from etl3.enrichment.names import clean_person_names
+from etl3.enrichment.names import clean_person_names, collapse_exact_repetition
 from etl3.enrichment.project import (
     accused_row,
     ai_drug_rows,
@@ -235,6 +235,83 @@ def test_name_cleanup_for_v1_and_v2():
     assert v1["domicile_method"] == "non_recoverable"
 
 
+def test_collapse_exact_repetition_confirmed_real_records():
+    """Four real person_enrichment rows (source CSV export, 317 rows
+    total) whose raw_full_name is the whole name typed/concatenated
+    twice, confirmed still duplicated in cleaned_full_name as actually
+    stored in the database before this fix."""
+    assert collapse_exact_repetition(
+        "Amodi Chukuwudi Muomagolu Amodi Chukuwudi Muomagolu",
+    ) == "Amodi Chukuwudi Muomagolu"
+    assert collapse_exact_repetition("Thomas Anagha Kalu Thomas Anagha Kalu") == "Thomas Anagha Kalu"
+    assert collapse_exact_repetition("China China") == "China"
+    assert collapse_exact_repetition("Chhaganlal Chhaganlal") == "Chhaganlal"
+
+    for raw, expected in (
+        ("Amodi Chukuwudi Muomagolu Amodi Chukuwudi Muomagolu", "Amodi Chukuwudi Muomagolu"),
+        ("Thomas Anagha Kalu Thomas Anagha Kalu", "Thomas Anagha Kalu"),
+        ("China China", "China"),
+        ("Chhaganlal Chhaganlal", "Chhaganlal"),
+    ):
+        result = clean_person_names(raw)
+        assert result["cleaned_full_name"] == expected
+        # Raw source value is never touched by the collapse.
+        assert result["raw_full_name"] == raw
+
+
+def test_collapse_exact_repetition_never_touches_legitimate_names():
+    """A repeated WORD inside a name, or a name that merely looks
+    duplicate-ish, must survive untouched -- only an exact, whole-string
+    tiling match is ever collapsed."""
+    assert collapse_exact_repetition("Sri Sri Ravi Shankar") == "Sri Sri Ravi Shankar"
+    assert collapse_exact_repetition("Rama Rama Rao") == "Rama Rama Rao"
+    assert collapse_exact_repetition("Ravi Kumar") == "Ravi Kumar"
+    assert collapse_exact_repetition("Jean-Jean Baptiste") == "Jean-Jean Baptiste"
+    # Three-way repetition still collapses (same structural test, period=1).
+    assert collapse_exact_repetition("Ravi Ravi Ravi") == "Ravi"
+    # Case-insensitive match, but the FIRST occurrence's original casing survives.
+    assert collapse_exact_repetition("RAVI kumar Ravi KUMAR") == "RAVI kumar"
+
+
+def test_collapse_exact_repetition_idempotent_and_edge_inputs():
+    once = collapse_exact_repetition("China China")
+    twice = collapse_exact_repetition(once)
+    assert once == twice == "China"
+    for value in (None, "", "   ", "Solo"):
+        assert collapse_exact_repetition(value) == value
+
+
+def test_duplicate_name_full_pipeline_preserves_raw_and_other_fields():
+    """End to end through clean_person_names: alias/relationship
+    extraction still works correctly on an ALREADY-collapsed full_name,
+    and the collapse never reaches given_name/surname -- confirmed
+    against live data to risk erasing a legitimate short repeated-word
+    name (e.g. "Dung Dung", a real tribal surname) that full_name's
+    341-row evidence base does not cover."""
+    result = clean_person_names(
+        "China China", given_name="Dung Dung", surname="Syed Syed",
+    )
+    assert result["raw_full_name"] == "China China"
+    assert result["cleaned_full_name"] == "China"
+    assert result["cleaned_given_name"] == "Dung Dung"
+    assert result["surname"] == "Syed Syed"
+
+    with_alias = clean_person_names("Ravi Kumar Ravi Kumar @ Raju")
+    assert with_alias["cleaned_full_name"] == "Ravi Kumar"
+    assert with_alias["cleaned_alias"] == "Raju"
+
+
+def test_trailing_hyphen_residue_trimmed():
+    """A second, smaller real-data gap found while investigating the
+    duplicate-name issue: a noise phrase stripped next to a bare hyphen
+    (or a bare trailing hyphen already in the source) used to leave the
+    hyphen dangling. Only the outer edge is trimmed -- an internal
+    hyphenated surname is untouched."""
+    assert clean_person_names("MADUKA UCHE ALLOY-Absconding")["cleaned_full_name"] == "MADUKA UCHE ALLOY"
+    assert clean_person_names("Mr. Chris -")["cleaned_full_name"] == "Mr. Chris"
+    assert clean_person_names("Smith-Jones")["cleaned_full_name"] == "Smith-Jones"
+
+
 def test_replay_hash_stable():
     first = crime_row("V2", "C1", {"class_classification": "Small", "case_status": "PT Cases"})
     second = crime_row("V2", "C1", {"class_classification": "Small", "case_status": "PT Cases"})
@@ -320,6 +397,11 @@ def main():
     check("projection", test_projection_does_not_invent)
     check("address knowledge base", test_address_kb_confirms_known_geography_only)
     check("name cleanup", test_name_cleanup_for_v1_and_v2)
+    check("duplicate name collapse: confirmed real records", test_collapse_exact_repetition_confirmed_real_records)
+    check("duplicate name collapse: legitimate names untouched", test_collapse_exact_repetition_never_touches_legitimate_names)
+    check("duplicate name collapse: idempotent + edge inputs", test_collapse_exact_repetition_idempotent_and_edge_inputs)
+    check("duplicate name: full pipeline preserves raw/other fields", test_duplicate_name_full_pipeline_preserves_raw_and_other_fields)
+    check("trailing hyphen residue trimmed", test_trailing_hyphen_residue_trimmed)
     check("replay hash", test_replay_hash_stable)
     check("ai validation", test_ai_validation)
     check("ai retry", test_ai_retry_and_success_does_not_invent_on_empty)
