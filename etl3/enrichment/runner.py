@@ -107,7 +107,8 @@ def _person_enrichment(conn, run_id, geo_kb=None):
         conn,
         """
         SELECT person_id, source_system, source_record_id,
-               full_name, alias, relative_name, nationality
+               full_name, alias, relative_name, nationality,
+               present_address_text, permanent_address_text
         FROM persons_unified
         """,
     )
@@ -116,7 +117,10 @@ def _person_enrichment(conn, run_id, geo_kb=None):
         for record_id, payload in _latest(conn, "persons_source", "V2")
     }
     rows = []
-    for person_id, source_system, record_id, full_name, alias, relative_name, nationality in people:
+    for (
+        person_id, source_system, record_id, full_name, alias, relative_name,
+        nationality, present_address_text, permanent_address_text,
+    ) in people:
         if source_system == "V2":
             payload = dict(v2_payloads.get(record_id) or {})
             if not payload.get("full_name"):
@@ -127,12 +131,19 @@ def _person_enrichment(conn, run_id, geo_kb=None):
                 payload["relative_name"] = relative_name
             if not payload.get("nationality"):
                 payload["nationality"] = nationality
+            if not payload.get("present_address_text") and present_address_text:
+                payload["present_address_text"] = present_address_text
+            if not payload.get("permanent_address_text") and permanent_address_text:
+                payload["permanent_address_text"] = permanent_address_text
         else:
+            # V1 has no persons_source; domicile/address come from unified text.
             payload = {
                 "full_name": full_name,
                 "alias": alias,
                 "relative_name": relative_name,
                 "nationality": nationality,
+                "present_address_text": present_address_text,
+                "permanent_address_text": permanent_address_text,
             }
         row = person_row(source_system, person_id, payload, geo_kb=geo_kb)
         if row:
@@ -140,7 +151,7 @@ def _person_enrichment(conn, run_id, geo_kb=None):
     return upsert_rows(
         conn, "person_enrichment", "person_id", rows,
         ["person_id", "source_system", "domicile_classification", "domicile_method",
-         "surname", "relation_type", "gender_source", "address_resolution",
+         "nationality", "surname", "relation_type", "gender_source", "address_resolution",
          "raw_full_name", "cleaned_full_name", "cleaned_given_name",
          "cleaned_alias", "cleaned_relative_name", "input_hash"],
         run_id, "person_enrichment",

@@ -86,13 +86,35 @@ def normalize_text(text: Optional[str]) -> Optional[str]:
     return stripped.lower()
 
 
+# Nationality labels that mean the country India (not a foreign country).
+_NATIONALITY_TO_COUNTRY = {
+    "indian": "india",
+    "india": "india",
+}
+
+
 def classify_domicile(perm_state, perm_country, pres_state, pres_country, nationality=None):
-    """Same precedence as domicile_classifier.classify_domicile."""
+    """Classify domicile from nationality and geography.
+
+    Precedence:
+    1. Explicit foreign nationality (anything other than Indian/India) →
+       ``international``, even when present/permanent address is in India.
+    2. Else country from permanent, then present, then Indian/India nationality.
+    3. Non-India country → ``international``.
+    4. India + Telangana → ``native state``; India + other listed state →
+       ``inter state``; India with no state → null.
+    """
     perm_st = normalize_text(perm_state)
     perm_co = normalize_text(perm_country)
     pres_st = normalize_text(pres_state)
     pres_co = normalize_text(pres_country)
     nat = normalize_text(nationality)
+    if nat is not None:
+        nat_country = _NATIONALITY_TO_COUNTRY.get(nat)
+        # Specific non-India nationality wins over an Indian address.
+        if nat_country is None:
+            return "international"
+        nat = nat_country
 
     effective_country = perm_co if perm_co is not None else pres_co
     if effective_country is None and nat is not None:

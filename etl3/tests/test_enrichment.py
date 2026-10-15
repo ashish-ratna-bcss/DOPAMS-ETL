@@ -15,7 +15,12 @@ from etl3.enrichment.project import (
     drug_rows_from_sources,
     person_row,
 )
-from etl3.enrichment.address import GeoKB, resolve_person_address
+from etl3.enrichment.address import (
+    GeoKB,
+    resolve_address_text,
+    resolve_name_country,
+    resolve_person_address,
+)
 from etl3.enrichment.rules import (
     classify_domicile,
     classify_sections,
@@ -73,7 +78,14 @@ def test_domicile():
     assert classify_domicile("Karnataka", "India", "Telangana", "India") == "inter state"
     assert classify_domicile(None, "United States", None, None) == "international"
     assert classify_domicile(None, "India", None, None) is None
-    assert classify_domicile(None, None, None, None, "Indian") == "international"
+    # Indian / India are nationality aliases for country India (need a state).
+    assert classify_domicile(None, None, None, None, "Indian") is None
+    assert classify_domicile("Telangana", None, None, None, "Indian") == "native state"
+    # Explicit foreign nationality wins over an Indian address.
+    assert classify_domicile(
+        "Maharashtra", "India", "Maharashtra", "India", "Nigeria",
+    ) == "international"
+    assert classify_domicile("Telangana", "India", None, None, "Nigerian") == "international"
     assert classify_domicile(None, "default", None, None) is None
     assert classify_domicile(None, None, None, None, None) is None
 
@@ -181,6 +193,7 @@ def test_projection_does_not_invent():
 def test_address_kb_confirms_known_geography_only():
     kb = GeoKB()
     kb.add_reference("Telangana", "Medchal Malkajgiri", "Quthbullapur", "Suraram")
+    kb.add_reference("Telangana", "Adilabad", None, None)
     kb.add_country("India")
     kb.add_country("United States")
     found = resolve_person_address({
@@ -203,6 +216,96 @@ def test_address_kb_confirms_known_geography_only():
     assert person["domicile_classification"] == "native state"
     untouched = person_row("V2", "P1", {"domicile_classification": "native state", "surname": "Rao"})
     assert "address_resolution" not in untouched
+
+    # V1 free-text District,State → KB district/state + native state domicile
+    text_hit = resolve_address_text("Adilabad,Telangana", kb)
+    assert text_hit["state"] == "Telangana"
+    assert text_hit["district"] == "Adilabad"
+    assert text_hit["country"] == "India"
+    assert text_hit["path"] == "kb+text"
+    v1 = person_row("V1", "201100102014467001", {
+        "full_name": "Dube Rajani Kanth",
+        "nationality": "Indian",
+        "permanent_address_text": "Adilabad,Telangana",
+        "present_address_text": "Adilabad,Telangana",
+    }, geo_kb=kb)
+    assert v1["domicile_classification"] == "native state"
+    assert v1["domicile_method"] == "deterministic"
+    assert v1["nationality"] == "India"
+    assert v1["address_resolution"]["permanent"]["district"] == "Adilabad"
+    assert v1["address_resolution"]["permanent"]["state"] == "Telangana"
+    assert v1["address_resolution"]["permanent"]["country"] == "India"
+
+    # Foreign nationality + Indian address → international; KB still maps address.
+    kb.add_reference("Maharashtra", "Mumbai Suburban", "Vasai", "Nalasopara")
+    kb.add_country("Nigeria")
+    kb.add_country("Netherlands")
+    foreign = person_row("V2", "63a12b0f9d874d46715aea0a", {
+        "full_name": "ChijiokeUchechukwu",
+        "nationality": "Nigeria",
+        "permanent_state_ut": "MAHARASHTRA",
+        "present_state_ut": "MAHARASHTRA",
+        "permanent_district": "MUMBAI",
+        "present_district": "MUMBAI",
+        "permanent_locality_village": "Nalasopara",
+        "present_locality_village": "Nalasopara",
+        "permanent_address_text": "Nalasopara, Mumbai",
+        "present_address_text": "Nalasopara, Mumbai",
+    }, geo_kb=kb)
+    assert foreign["domicile_classification"] == "international"
+    assert foreign["domicile_method"] == "nationality"
+    assert foreign["nationality"] == "Nigeria"
+    assert foreign["address_resolution"]["permanent"]["state"] == "Maharashtra"
+    assert foreign["address_resolution"]["permanent"]["district"] == "Mumbai Suburban"
+    assert foreign["address_resolution"]["permanent"]["mandal"] == "Vasai"
+    assert foreign["address_resolution"]["permanent"]["country"] == "India"
+
+    assert resolve_name_country("Ifeanyi (Nigerian)", kb) == "Nigeria"
+    assert resolve_name_country("Frankl ( Netherland, Europe)", kb) == "Netherlands"
+    assert resolve_name_country("Khali of Nigeria", kb) == "Nigeria"
+    assert resolve_name_country("Aisha - Nigeria", kb) == "Nigeria"
+    assert resolve_name_country("Summy, Nigeria", kb) == "Nigeria"
+
+    # Regression guard: "Mali"/"Israel"/"Sudan" are common Indian
+    # surnames/given names that also happen to be countries already in
+    # the KB. Confirmed against live data that reading them as a
+    # nationality from the bare trailing word alone produced an actual
+    # ~60% false-positive rate (14 "Mali" + 3 "Israel" + 1 "Sudan" rows
+    # misclassified as foreign out of 30 real name_country rows). Only an
+    # explicit marker (parens/comma/dash/"of") may ever read a name as
+    # naming a nationality -- a bare collision never does, however common
+    # the word is as a country name elsewhere.
+    kb.add_country("Mali")
+    kb.add_country("Israel")
+    kb.add_country("Sudan")
+    assert resolve_name_country("Pintu Sikandar Mali", kb) is None
+    assert resolve_name_country("Kailash Mali", kb) is None
+    assert resolve_name_country("Keerthi Israel", kb) is None
+    assert resolve_name_country("Madhu Sudan goud T", kb) is None
+    # The same word, explicitly marked, still resolves.
+    assert resolve_name_country("Kailash (Mali)", kb) == "Mali"
+    # Name says Nigerian even when nationality/source domicile say India / inter state.
+    named = person_row("V2", "P-NG", {
+        "full_name": "Ifeanyi (Nigerian)",
+        "nationality": "India",
+        "domicile_classification": "inter state",
+        "permanent_state_ut": "TELANGANA",
+        "permanent_country": "India",
+    }, geo_kb=kb)
+    assert named["domicile_classification"] == "international"
+    assert named["domicile_method"] == "name_country"
+    assert named["nationality"] == "Nigeria"
+
+    # Pure Indian name + Indian address → India nationality + native/inter from KB.
+    pure = person_row("V2", "P-IN", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "TELANGANA",
+        "permanent_district": "Sangareddy",
+        "permanent_country": "India",
+    }, geo_kb=kb)
+    assert pure["nationality"] == "India"
+    assert pure["domicile_classification"] == "native state"
+    assert pure["domicile_method"] == "deterministic"
 
 
 def test_name_cleanup_for_v1_and_v2():
