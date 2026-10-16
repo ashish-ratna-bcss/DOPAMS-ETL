@@ -17,6 +17,7 @@ from etl3.enrichment.project import (
 )
 from etl3.enrichment.address import (
     GeoKB,
+    _fuzzy_mandal,
     resolve_address_text,
     resolve_name_country,
     resolve_person_address,
@@ -306,6 +307,30 @@ def test_address_kb_confirms_known_geography_only():
     assert pure["nationality"] == "India"
     assert pure["domicile_classification"] == "native state"
     assert pure["domicile_method"] == "deterministic"
+
+
+def test_fuzzy_mandal_tie_break_is_deterministic():
+    # "Mahabubnagar Rural" and "Mahabubnagar Urban" score identically
+    # (confirmed: 0.6842...) against the bare token "Mahabubnagar". Before
+    # the fix, mandals_by_district stored them in a plain set(), so which
+    # one won was decided by that process's string hash seed -- live data
+    # showed the winner flip across separate enrichment runs on unchanged
+    # records. sorted() makes the alphabetically-first tied candidate win,
+    # every call, every process.
+    kb = GeoKB()
+    kb.add_reference("Telangana", "Mahabubnagar", "Mahabubnagar Urban", None)
+    kb.add_reference("Telangana", "Mahabubnagar", "Mahabubnagar Rural", None)
+    winner = _fuzzy_mandal(kb, "Telangana", "Mahabubnagar", "Mahabubnagar")
+    assert winner == "Mahabubnagar Rural"
+    for _ in range(50):
+        assert _fuzzy_mandal(kb, "Telangana", "Mahabubnagar", "Mahabubnagar") == winner
+
+    # Non-tied matching is unaffected: a clearly-closer candidate still wins
+    # regardless of insertion order.
+    kb2 = GeoKB()
+    kb2.add_reference("Telangana", "Medak", "Zzzzzzzzzzz", None)
+    kb2.add_reference("Telangana", "Medak", "Narsapur", None)
+    assert _fuzzy_mandal(kb2, "Telangana", "Medak", "Narsapur") == "Narsapur"
 
 
 def test_name_cleanup_for_v1_and_v2():

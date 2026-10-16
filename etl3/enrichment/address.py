@@ -410,7 +410,10 @@ def _fuzzy_state(kb: GeoKB, token):
 
 
 def _fuzzy_district(kb: GeoKB, state, token):
-    choices = list(kb.districts_by_state.get(state.lower(), ()))
+    # sorted(), not list(): districts_by_state values are sets, whose iteration
+    # order depends on the process's string hash seed. A sorted order keeps
+    # tie-breaking (the first candidate at the best score) stable across runs.
+    choices = sorted(kb.districts_by_state.get(state.lower(), ()))
     return _best(token, choices, SIM_DISTRICT)
 
 
@@ -419,7 +422,7 @@ def _fuzzy_district_any(kb: GeoKB, token):
     best_state = None
     best_score = 0.0
     for state_key, names in kb.districts_by_state.items():
-        for name in names:
+        for name in sorted(names):
             score = trigram_similarity(token, name)
             if score > best_score:
                 best = name
@@ -431,14 +434,17 @@ def _fuzzy_district_any(kb: GeoKB, token):
 
 
 def _fuzzy_mandal(kb: GeoKB, state, district, token):
-    choices = list(kb.mandals_by_district.get((state.lower(), district.lower()), ()))
+    # sorted(), not list(): see _fuzzy_district -- mandals_by_district values
+    # are sets too, so this keeps tied mandal matches deterministic.
+    choices = sorted(kb.mandals_by_district.get((state.lower(), district.lower()), ()))
     return _best(token, choices, SIM_MANDAL)
 
 
 def _fuzzy_village_mandal(kb: GeoKB, state, district, token):
     best_mandal = None
     best_score = 0.0
-    for village in kb.villages_by_district.get((state.lower(), district.lower()), ()):
+    # sorted(): villages_by_district values are sets; see _fuzzy_district.
+    for village in sorted(kb.villages_by_district.get((state.lower(), district.lower()), ())):
         score = trigram_similarity(token, village)
         if score > best_score:
             best_mandal = kb.village_to_mandal.get((state.lower(), district.lower(), village.lower()))
