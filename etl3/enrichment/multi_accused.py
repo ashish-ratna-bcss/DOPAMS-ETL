@@ -30,11 +30,16 @@ _SHARED_TRAILER_RE = re.compile(
 # audit/display; callers that want to feed it to the address resolver need
 # just the place text, which trailer_address_text() strips down to.
 _SHARED_TRAILER_PREFIX_RE = re.compile(r"^\s*\b(?:both|all)\b\s+r/o\.?\s+", re.IGNORECASE)
-# A segment-leading marker: "1)" "01." "2." etc. Deliberately excludes
+# A segment-leading marker: "1)" "01." "2." etc. Boundary before the marker
+# is start-of-string, comma, semicolon, newline, OR "and " -- the last item
+# of a CCTNS numbered list is routinely introduced as "... and 4. Name"
+# rather than ", 4. Name" (confirmed against live accused_unified data;
+# without the "and " branch, that final segment silently merges into the
+# previous one instead of becoming its own segment). Deliberately excludes
 # "A-1" / "A.1" / "A1)" style accused-code markers and bare initials ("A.")
 # -- both are real single-person patterns this module must not mistake for
 # a second person (see tests for "A. Bhujangarao", "A1) Ravi, A2) Suresh").
-_MARKER_RE = re.compile(r"(?:^|[,;\n]\s*)\s*0*([1-9]\d?)\s*[.)]\s+(?=\S)")
+_MARKER_RE = re.compile(r"(?:^|[,;\n]\s*|\band\s+)\s*0*([1-9]\d?)\s*[.)]\s+(?=\S)")
 
 _NAME_LIKE_RE = re.compile(r"^[A-Za-z][A-Za-z.\s]{1,60}$")
 

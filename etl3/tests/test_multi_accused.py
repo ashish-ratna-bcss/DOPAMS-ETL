@@ -203,6 +203,32 @@ def test_and_others_trailing_a_numbered_pack():
     assert r["segments"][1]["raw_text"] == "Mohan Rao"
 
 
+def test_and_prefixed_final_marker_does_not_merge_into_previous_segment():
+    """Real production case (accused_id V1:6aca34e6e316abdc89ad243f34ad1ab5):
+    the last item of a numbered list is introduced with "and 4." rather
+    than ", 4." -- without treating "and " as a marker boundary, segment 3
+    would silently absorb "and 4. Manthri Shiva sai", fabricating a single
+    garbled-name person out of two real accused."""
+    r = detect_multi_accused(
+        " 1. Karrothu Chandra, 2. Borrothu Prakash , 3. Maddula Venkata"
+        " Shiva Shekar and 4. Manthri Shiva sai",
+    )
+    assert r["confidence"] == "high"
+    assert [s["raw_text"] for s in r["segments"]] == [
+        "Karrothu Chandra",
+        "Borrothu Prakash",
+        "Maddula Venkata Shiva Shekar",
+        "Manthri Shiva sai",
+    ]
+    assert [s["label_number"] for s in r["segments"]] == [1, 2, 3, 4]
+
+
+def test_and_prefixed_marker_simple_two_segment_case():
+    r = detect_multi_accused("1) Ramesh Kumar and 2) Suresh Babu")
+    assert r["confidence"] == "high"
+    assert [s["raw_text"] for s in r["segments"]] == ["Ramesh Kumar", "Suresh Babu"]
+
+
 # ---------------------------------------------------------------------------
 # build_split_rows: pure row-building for persons_unified/accused_unified.
 # Reuses nothing from names.py/address.py here on purpose -- cleaning and
@@ -370,6 +396,8 @@ def main():
     check("'and N others' recorded, not fabricated", test_and_n_others_recorded_not_fabricated)
     check("'and others' unknown count recorded", test_and_others_unknown_count_recorded_not_fabricated)
     check("'and others' trailing a numbered pack", test_and_others_trailing_a_numbered_pack)
+    check("and-prefixed final marker does not merge into previous segment", test_and_prefixed_final_marker_does_not_merge_into_previous_segment)
+    check("and-prefixed marker simple two-segment case", test_and_prefixed_marker_simple_two_segment_case)
     check("build_split_rows: basic two segments", test_build_split_rows_basic_two_segments)
     check("duplicate-name segment does not contaminate sibling", test_duplicate_name_segment_does_not_contaminate_sibling_segment)
     check("build_split_rows: low/none produce nothing", test_build_split_rows_low_confidence_and_single_produce_nothing)
