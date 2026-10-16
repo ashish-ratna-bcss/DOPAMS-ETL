@@ -182,7 +182,9 @@ def test_geography_and_domicile():
         assert classify_domicile("Karnataka", "India", None, None) == "inter state"
         assert classify_domicile(None, "United States", None, None) == "international"
         assert classify_domicile(None, None, None, None) is None
-        assert classify_domicile("Telangana", None, None, None) is None
+        # A recognized Indian state is usable without a country. The country
+        # string is not invented; present-address fallback is not used.
+        assert classify_domicile("Telangana", None, None, None) == "native state"
     finally:
         conn.close()
 

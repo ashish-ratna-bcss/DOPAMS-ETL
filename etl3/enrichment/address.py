@@ -37,6 +37,28 @@ STATE_ABBREV = {
     "ld": "Lakshadweep",
 }
 
+# Historical CCTNS spellings. Values are the canonical names INDIAN_STATES uses.
+STATE_ALIASES = {
+    "orissa": "Odisha",
+    "pondicherry": "Puducherry",
+    "pondicheri": "Puducherry",
+    "uttaranchal": "Uttarakhand",
+    "nct of delhi": "Delhi",
+    "nct delhi": "Delhi",
+    "delhi nct": "Delhi",
+    "national capital territory of delhi": "Delhi",
+    "jammu & kashmir": "Jammu and Kashmir",
+    "j&k": "Jammu and Kashmir",
+    "j & k": "Jammu and Kashmir",
+    "dadra and nagar haveli": "Dadra and Nagar Haveli and Daman and Diu",
+    "dadra & nagar haveli": "Dadra and Nagar Haveli and Daman and Diu",
+    "daman and diu": "Dadra and Nagar Haveli and Daman and Diu",
+    "daman & diu": "Dadra and Nagar Haveli and Daman and Diu",
+    "andaman and nicobar": "Andaman and Nicobar Islands",
+    "andaman & nicobar": "Andaman and Nicobar Islands",
+    "andaman & nicobar islands": "Andaman and Nicobar Islands",
+}
+
 COUNTRY_ALIASES = {
     "us": "United States", "usa": "United States", "u s": "United States",
     "u s a": "United States", "united states of america": "United States",
@@ -78,6 +100,10 @@ NATIONALITY_TO_COUNTRY = {
     "uganda": "Uganda",
     "tanzanian": "Tanzania",
     "tanzania": "Tanzania",
+    "yemeni": "Yemen",
+    "yemen": "Yemen",
+    "yeman": "Yemen",
+    "federation of nigeria": "Nigeria",
     "russian": "Russia",
     "russia": "Russia",
     "chinese": "China",
@@ -156,7 +182,84 @@ NATIONALITY_TO_COUNTRY = {
     "u a e": "United Arab Emirates",
     "saudi": "Saudi Arabia",
     "saudi arabian": "Saudi Arabia",
+    "omani": "Oman",
+    "oman": "Oman",
+    "muscat": "Oman",  # Muscat is a governorate/city in Oman, not a country.
 }
+
+# Nationality / country placeholders. These are missing data, not foreign countries.
+NATIONALITY_PLACEHOLDERS = {
+    "nil", "none", "null", "unknown", "default", "other", "others",
+    "n/a", "na", "n a", "not available", "not known", "notknown",
+    "notavailable", "-", "--", "---",
+}
+
+
+def _known_country_index():
+    """Exact alias/canonical-name map. Unknown strings are absent, not foreign."""
+    index = {}
+    for key, value in NATIONALITY_TO_COUNTRY.items():
+        index[key] = value
+        index.setdefault(value.lower(), value)
+    for key, value in COUNTRY_ALIASES.items():
+        index.setdefault(key, value)
+        index.setdefault(value.lower(), value)
+    index["india"] = "India"
+    index["indian"] = "India"
+    return index
+
+
+_KNOWN_COUNTRIES = _known_country_index()
+
+
+def _recognize_country_token(raw, kb: "GeoKB | None" = None):
+    token = norm_token(raw)
+    if not token:
+        return None
+    key = token.lower().strip().rstrip(".")
+    if key in NATIONALITY_PLACEHOLDERS:
+        return None
+    mapped = _KNOWN_COUNTRIES.get(key)
+    if mapped:
+        if kb is not None and kb.loaded:
+            return kb.canon_country(mapped) or mapped
+        return mapped
+    expanded = expand_country(token)
+    if expanded:
+        expanded_key = expanded.lower()
+        if expanded_key in NATIONALITY_PLACEHOLDERS:
+            return None
+        mapped = _KNOWN_COUNTRIES.get(expanded_key)
+        if mapped:
+            if kb is not None and kb.loaded:
+                return kb.canon_country(mapped) or mapped
+            return mapped
+    if kb is not None and kb.loaded:
+        hit = kb.canon_country(key)
+        if hit is None and expanded:
+            hit = kb.canon_country(expanded)
+        if hit:
+            return hit
+    return None
+
+
+def recognized_country(raw, kb: "GeoKB | None" = None):
+    """Canonical country name, or None when the value is missing or not a known country.
+
+    Placeholders and unrelated words (``Hindu``, ``Nil``, ``Not Available``)
+    return None. They are not treated as foreign. Matching is exact against
+    ``NATIONALITY_TO_COUNTRY``, ``COUNTRY_ALIASES``, and KB country names.
+    A leading clause before a comma or parenthesis is tried once
+    (``Tanzania, United Republic Of``, ``United Kingdom (Uk)``).
+    """
+    found = _recognize_country_token(raw, kb)
+    if found or raw is None:
+        return found
+    head = re.split(r"[,(\[]", str(raw), maxsplit=1)[0]
+    if head.strip() and head.strip() != str(raw).strip():
+        return _recognize_country_token(head, kb)
+    return None
+
 
 # Parenthetical / trailing tokens that are not countries.
 _NAME_COUNTRY_NOISE = {
@@ -308,6 +411,14 @@ def norm_token(value: Optional[str]) -> Optional[str]:
     return text or None
 
 
+def is_blank_geo_token(raw) -> bool:
+    """True when a country or nationality value is missing or a known placeholder."""
+    token = norm_token(raw)
+    if not token:
+        return True
+    return token.lower().strip().rstrip(".") in NATIONALITY_PLACEHOLDERS
+
+
 def _titlecase(text: str) -> str:
     parts = []
     for part in text.split():
@@ -318,13 +429,34 @@ def _titlecase(text: str) -> str:
     return " ".join(parts)
 
 
+def _lookup_state(key):
+    if key in STATE_ABBREV:
+        return STATE_ABBREV[key]
+    if key in STATE_ALIASES:
+        return STATE_ALIASES[key]
+    return None
+
+
 def expand_state(raw):
+    """Canonical state/UT name for abbreviations and historical spellings.
+
+    Unknown text is title-cased and returned unchanged in meaning. It is not
+    fuzzy-matched to a state. ``Jammu & Kashmir`` is looked up before ``&``
+    is rewritten as ``and``.
+    """
     token = norm_token(raw)
     if not token:
         return None
     key = token.lower().strip().rstrip(".")
-    if key in STATE_ABBREV:
-        return STATE_ABBREV[key]
+    hit = _lookup_state(key)
+    if hit:
+        return hit
+    and_key = _WS.sub(" ", key.replace("&", " and ")).strip()
+    if and_key != key:
+        hit = _lookup_state(and_key)
+        if hit:
+            return hit
+        return _titlecase(and_key)
     return _titlecase(token)
 
 
@@ -640,29 +772,13 @@ def resolve_name_country(name, kb: GeoKB | None = None):
 
 
 def resolve_nationality_label(raw, kb: GeoKB | None = None):
-    """Canonical country for a nationality field value (Indian → India, etc.)."""
-    token = norm_token(raw)
-    if not token:
-        return None
-    key = token.lower().strip().rstrip(".")
-    if key in ("default", "others", "other", "unknown", "n/a", "na"):
-        return None
-    mapped = NATIONALITY_TO_COUNTRY.get(key)
-    if mapped == "India":
-        return "India"
-    if mapped:
-        if kb is not None and kb.loaded:
-            return kb.canon_country(mapped) or mapped
-        return mapped
-    if kb is not None and kb.loaded:
-        hit = kb.canon_country(key) or kb.canon_country(expand_country(token))
-        if hit is None:
-            hit = _fuzzy_country(kb, expand_country(token) or token)
-        if hit:
-            return hit
-    if key in ("india", "indian"):
-        return "India"
-    return _titlecase(token)
+    """Canonical country for a nationality field value.
+
+    ``Indian`` and ``India`` resolve to India. Mapped demonyms resolve to
+    their country. Placeholders and unrecognized words return None. An
+    unrecognized value is not a foreign nationality.
+    """
+    return recognized_country(raw, kb)
 
 
 def resolve_address_text(text, kb: GeoKB):

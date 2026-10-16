@@ -14,7 +14,7 @@ Fields the old jobs wrote, and where they are available to ETL-3:
 |---|---|---|---|
 | `crimes.class_classification` | Deterministic NDPS section rules in `section-wise-case-clarification/process_sections.py` | Yes, 9,613 / 9,613 crimes | Copy the stored value. For V1, run the same rules on `section_of_law` |
 | `crimes.case_status` dictionary | `etl_case_status/case-status.sql` overwrites the raw status | The raw value is what V2 currently holds when a later crime reload undoes the map | Store the mapped label beside the raw status. Do not overwrite `crimes_unified.case_status` |
-| `persons.domicile_classification` | Deterministic country/state rules in `domicile_classifier.py` | Yes, 29,747 persons | Copy the stored value. Recompute only when the column is empty and structured geo fields exist |
+| `persons.domicile_classification` | Deterministic country/state rules in `domicile_classifier.py` | Yes, 29,747 persons | Recompute with permanent-address-first rules. Keep a valid stored label only when the new result is inconclusive |
 | `persons.surname`, `relation_type`, `gender_source` | API passthrough, plus offline `@` cleanup scripts | Yes | Copy, then apply the four `fix_fullname` rules on V1 and V2. Cleaned name, alias, and relative are stored beside the source name |
 | Arrest `is_41a_crpc`, `is_41a_explain_submitted`, `date_of_issue_41a`, `accused_type` | API passthrough, plus `parse_accused_status` when status text contains `41a` and `issued` | Yes, 8,954 arrests with `is_41a_crpc` true | Copy. Fill a false/null 41A flag from accused status text only when the source flag is not already true |
 | `is_41a_pending` | Parsed from status text and then discarded | Not stored | Not stored |
@@ -69,16 +69,45 @@ The drug row hash covers quantity, unit, raw name, and measurements. It does not
 
 ## 4. Deterministic transformations
 
-From `etl3/enrichment/rules.py`, matching the old code:
+From `etl3/enrichment/rules.py`. Section, case-status, unit, and drug rules match the old code. Domicile does not: `Indian` is no longer treated as a foreign nationality.
 
 - Section classification priority: Cultivation > Commercial > Intermediate > Small. Digits-only, `27*`, and exact `8c` are Small. `20a` is Cultivation. A trailing `a`/`b`/`c` is Small/Intermediate/Commercial.
 - Case-status map: `PT Cases` and `Pending Trial` → `PT`; `UI Cases`, `New`, `Under Investigation`, `Under Trial` → `UI`; `Chargesheet Created` → `Chargesheeted`; `compounded` → `Compounded`. Any other value is kept.
-- Domicile: permanent country, else present country, else nationality. Anything other than `india` is `international` (so `Indian` is international, which is the old rule). India + `telangana` is `native state`. India + another listed state/UT is `inter state`. Missing state with country `india` is null. `default` is treated as missing.
+- Domicile: see the rules below. A recognized foreign nationality still beats an Indian address. `Indian` with no usable address is null, not `international`. `default` and the other placeholders are missing, not foreign.
 - Units: g→grams and kg (`/1000`), kg→grams (`*1000`), mg→grams (`/1000`), litre↔ml (`*1000` / `/1000`). A `wg` / `w/g` sentence with worth/quantity above 1000 is treated as kilograms. Unknown unit with a solid/liquid/count form uses that form. A missing quantity stays missing. Zero grams stays zero.
 - Commercial quantity uses the old NDPS thresholds (ganja 20 kg, heroin 0.250 kg, and the rest of the dicts in `extractor_drugs.py`). `mdm` is compared as `mdma`. An existing true flag propagates to the crime+drug group.
 - Brief-facts drug extraction keeps drug name, quantity, unit, worth, and the seizure-only filter.
 - Brief-facts accused enrichment keeps only existing CCTNS `accused_id` values. It fills missing role, type, age, alias, gender, occupation, phone, address, status, and CCL. It never invents a synthetic accused_id, never creates a narrative-only accused, and never overwrites a populated CCTNS/person field. CCL uses that accused's age or an explicit CCL statement about them; another accused's age does not transfer. Person identity for a null `person_id` is stored on `accused_enrichment` only; `persons_unified` is not invented from FIR text.
 - V1 has no separate persons table: identity is read from the accused dossier (`accused_name`, `alias_name`, `accused_occupation`, `mobile_1`, addresses) and from `persons_unified` when linked. V1 `accused_code` prefers a CCTNS value, else an A-code explicitly tied to that name in the FIR. V1 category is `CCL` when that accused's age is under 18 and `Accused` when 18+. Minors are renumbered `CCL 1`, `CCL 2`, … even if the FIR called them A1/A2. Missing age or code stays unresolved.
+
+### Domicile classification
+
+`classify_domicile` and `person_row` use one permanent address, then the present address only if the permanent address is unusable. The two slots are never mixed: a permanent state is not paired with a present country, and a present state is not paired with a permanent country.
+
+A slot is usable when either:
+
+- its country is a recognized foreign country (`United States`, `Nigeria`, a `COUNTRY_ALIASES` / `NATIONALITY_TO_COUNTRY` value, or an exact `geo_countries` name), or
+- its state normalizes to a name in `INDIAN_STATES`, and its country is `India` or missing.
+
+Country `India` with no recognized state is not usable, so the present address is tried. A missing country is not rewritten to `India`. Inside one usable slot, a recognized foreign country wins over an Indian state (`Telangana` + `United States` is `international`).
+
+State text goes through `expand_state` before the `INDIAN_STATES` check. That helper already maps abbreviations (`ts`, `or`, `jk`) and the historical spellings added beside it (`Orissa`, `Pondicherry`, `Uttaranchal`, `Jammu & Kashmir`, `NCT of Delhi`). Unknown state text is not fuzzy-matched to a state. On `person_row`, a recognized raw state wins over the knowledge-base state. An unrecognized raw state does not block a canonical knowledge-base state.
+
+Nationality:
+
+- `Indian` and `India` resolve to India. They do not by themselves produce a domicile label or `international`.
+- A mapped foreign demonym or country (`Nigerian`, `Nigeria`, `Federation of Nigeria`, `Yemeni`, and the spelling `Yeman`) produces `international` even when the permanent address is in India. A leading clause before a comma or parenthesis is accepted (`Tanzania, United Republic Of`, `United Kingdom (Uk)`). Name evidence (`Name (Nigerian)`) is checked before the nationality field. A bare surname that collides with a country (`Mali`, `Israel`, `Sudan`) is not nationality evidence. `Muscat` maps to `Oman` (Muscat is a governorate/city in Oman, not a country of its own) via an explicit alias — it does not fuzzy-match (confirmed against the live 223-row `kb.geo_countries` table: best trigram score 0.125, far below the 0.70 floor), so the alias is required, not optional. Region words that are not in the map (`Africa`, `West Indies`) remain unrecognized: neither is an exact `geo_countries` name, and `resolve_nationality_label`/`recognized_country` for the nationality field only ever does exact alias/KB lookups, never fuzzy matching, so no future KB content can accidentally promote them to a country.
+- `Nil`, `None`, empty, `Unknown`, `Default`, `Other`, `Others`, `N/A`, `NA`, `Not Available`, and `Not Known` are unknown. So is an unrelated word such as `Hindu`. Unknown nationality does not produce `international`.
+
+Labels: Telangana is `native state`. Any other listed Indian state or UT is `inter state`. A recognized foreign country on the selected slot is `international`.
+
+Stored V2 fallback, after the steps above:
+
+- A deterministic result (`name_country`, `nationality`, or `deterministic`) replaces the stored label.
+- If the new result is inconclusive, a stored value of `native state`, `inter state`, or `international` is kept with method `source_column`.
+- Otherwise domicile is null and the method is `non_recoverable`. No label is invented to avoid null.
+
+`person_enrichment.nationality` is set from a recognized name or nationality field, or to India when the domicile result is `native state` or `inter state`. The unified nationality column is not overwritten.
 
 ## 5. Source mappings
 
@@ -87,7 +116,7 @@ All of these are read from `*_source.payload` in `dopams_cctns`, which Phase 3 a
 | Target | Observation | Payload fields |
 |---|---|---|
 | Crime class / status | `crimes_source` | V2 `class_classification`, `acts_sections`, `case_status`. V1 `section_of_law`, `fir_status` |
-| Person | `persons_source` (V2 only) | `domicile_classification`, `surname`, `relation_type`, `gender_source`, and the geo columns when domicile is null |
+| Person | `persons_source` (V2 only); V1 uses unified name, nationality, and address text | `domicile_classification` (replaced when deterministic classification succeeds; kept when it does not), `surname`, `relation_type`, `gender_source`, and the geo columns |
 | Arrest 41A | `arrests_source` plus V2 `accused_source.accused_status` | `is_41a_crpc`, `is_41a_explain_submitted`, `date_of_issue_41a`, `accused_type`, `accused_seq_no` |
 | Accused category | `accused_source` | `type` |
 | Chargesheet | `chargesheets_source` | `taken_on_file_*`, `accused_requested_for_nbw` |
@@ -102,7 +131,7 @@ All of these are read from `*_source.payload` in `dopams_cctns`, which Phase 3 a
 | Table | Key | Provenance |
 |---|---|---|
 | `crime_enrichment` | `crime_id` | `source_column`, `deterministic_sections`, `dictionary`, `source_unchanged`, `non_recoverable` |
-| `person_enrichment` | `person_id` | `source_column` or `deterministic` |
+| `person_enrichment` | `person_id` | Domicile method: `name_country`, `nationality`, `deterministic`, `source_column`, or `non_recoverable` |
 | `arrest_enrichment` | `arrest_id` | `source_column` or `status_text` |
 | `accused_enrichment` | `accused_id` | CCTNS category copied; FIR fills missing role/type/person fields for that `accused_id` only; `field_sources` provenance |
 | `chargesheet_enrichment` | `charge_sheet_id` | copied lifecycle fields |
@@ -200,8 +229,8 @@ The existing ETL-3 suite was run after the backfill:
 | V2 `class_classification = Small` (and the other stored labels) | Stored column | `crime_enrichment.class_classification`, method `source_column` | Yes, 0 mismatches |
 | V1 `section_of_law` with no V2 class column | Rules in `process_sections.py` | Same rules, method `deterministic_sections` | Same function. 7,304 labeled, 1 with no section token |
 | `PT Cases`, `Under Investigation`, `compounded` | SQL map to `PT`, `UI`, `Compounded` | `case_status_normalized` | Yes. Raw status remains on `crimes_unified` |
-| V2 `domicile_classification` | Stored column | Copied, method `source_column` | Yes, 0 mismatches |
-| `Indian` nationality with no country | Old function returns `international` | Same function, only when geo or nationality is present and the stored domicile is null | Same rule |
+| V2 `domicile_classification` | Stored column copied whenever geo was empty | Recomputed when permanent or present evidence is usable; stored label kept only when the new result is inconclusive (`source_column`) | Overwrite is intentional. See the domicile section |
+| `Indian` nationality with no country | Old function returns `international` | Null, unless a valid stored label is kept. `Indian` is not foreign | Corrected. The old international result is not reproduced |
 | Arrest `is_41a_crpc` | Stored boolean | Copied | 8,954 true on both sides |
 | Status text `41A issued on 02/03/2024` and flag not already true | `is_41a_crpc` true, date `2024-03-02` | `arrest_flag_method = status_text` | Yes, unit-tested |
 | V1 `Ganja`, `weight_gm = 1000` | `standardize_units`: 1000 g, 1 kg, category Cannabis | `drug_extractions` provenance `v1_dossier` | Yes, sampled live rows |
@@ -215,7 +244,7 @@ The existing ETL-3 suite was run after the backfill:
 - Accused enrichment from brief facts also needs `ETL3_AI_ENABLED=1`. Only existing CCTNS `accused_id` rows are enriched. Names that appear only in the FIR are not stored as accused.
 - `drug_categories` fuzzy matches (`pg_trgm`, threshold 0.35). The table is not in the source database.
 - Address normalization against `geo_reference` / `geo_countries`. Both tables are empty, so there is nothing to look up.
-- V1 domicile. V1 persons are not in `persons_source`, and the V1 arrest payload has address text and nationality but not `permanent_state_ut` / `permanent_country`.
+- V1 structured state/country. V1 persons are not in `persons_source`. Domicile for V1 is classified from unified address text when the knowledge base confirms a state, plus a recognized nationality. It is not guessed from free text the knowledge base does not confirm.
 - Surname split out of `full_name`. The old persons ETL did not do that.
 - `is_41a_pending`. The old parser set it and did not persist it.
 - Interrogation `drug_quantities` is almost entirely null in the captured payloads, so it is not a second quantity source.

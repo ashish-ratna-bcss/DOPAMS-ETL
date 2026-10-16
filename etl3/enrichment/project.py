@@ -10,16 +10,18 @@ from decimal import Decimal
 
 from etl3.enrichment import kb as drug_kb
 from etl3.enrichment.address import (
+    is_blank_geo_token,
+    recognized_country,
     resolve_name_country,
     resolve_nationality_label,
     resolve_person_address,
 )
 from etl3.enrichment.names import clean_person_names
 from etl3.enrichment.rules import (
-    INDIAN_STATES,
     apply_commercial_flags,
     classify_domicile,
     classify_sections,
+    indian_state_for_domicile,
     normalize_case_status,
     parse_accused_status,
     resolve_drug_category,
@@ -79,71 +81,81 @@ def _slot_geo(address, slot):
     return data.get("state"), data.get("country"), data.get("district")
 
 
+_STORED_DOMICILE = {
+    "native state": "native state",
+    "inter state": "inter state",
+    "international": "international",
+}
+
+
+def _stored_domicile(value):
+    """Canonical stored V2 label, or None when the stored value is not one of the three."""
+    text = _text(value)
+    if not text:
+        return None
+    return _STORED_DOMICILE.get(text.lower())
+
+
+def _prefer_state(raw, kb_state):
+    """Recognized raw state wins. An unrecognized raw value does not block the KB state."""
+    recognized = indian_state_for_domicile(raw)
+    if recognized:
+        return recognized
+    return indian_state_for_domicile(kb_state)
+
+
+def _prefer_country(raw, kb_country, geo_kb):
+    """Explicit recognized country wins. A blank country may use the KB country.
+
+    An explicit but unrecognized country is not replaced with the KB country
+    and is not treated as foreign.
+    """
+    if not is_blank_geo_token(raw):
+        return recognized_country(raw, geo_kb)
+    return recognized_country(kb_country, geo_kb)
+
+
 def person_row(source_system, person_id, payload, geo_kb=None):
     """Build person enrichment: domicile, resolved nationality, KB address.
 
-    Rules:
-    1. Foreign country in ``nationality`` field OR embedded in the name
-       (``Name (Nigerian)``, ``Name, Nigeria``, …) → domicile ``international``
-       and ``nationality`` column set to that country.
-    2. No foreign country found → if present/permanent address maps to Indian
-       geography via KB (or nationality is Indian/India), set ``nationality``
-       to India and domicile ``native state`` / ``inter state`` from KB state.
-    3. Pure accused name + Indian-only address → same as (2) using
-       ``address_resolution`` (village/mandal/district/state from KB).
-    4. Else keep V2 stored domicile when present; otherwise non_recoverable.
+    Domicile precedence:
+    1. Recognized foreign country embedded in the name (``Name (Nigerian)``)
+       → ``international``, method ``name_country``. This replaces a stored
+       V2 label. A surname that merely matches a country is not evidence.
+    2. Recognized foreign nationality field → ``international``, method
+       ``nationality``, including when the permanent address is in India.
+       Placeholders and unrelated words are not foreign.
+    3. Otherwise classify from the permanent address alone when it is usable
+       (recognized foreign country, or recognized Indian state with country
+       India or missing). A permanent country of India and no state is not
+       usable.
+    4. Otherwise classify from the present address alone.
+    5. Otherwise keep a stored V2 label of ``native state``, ``inter state``,
+       or ``international`` (method ``source_column``).
+    6. Otherwise domicile is null and method is ``non_recoverable``.
 
+    A deterministic label replaces the stored V2 value. An inconclusive
+    result does not. India is never inserted as a missing permanent country.
     ``persons_unified.nationality`` is never overwritten; the resolved value
     is stored on ``person_enrichment.nationality``.
     """
     address = resolve_person_address(payload, geo_kb)
-    perm_state = _text(payload.get("permanent_state_ut"))
-    perm_country = _text(payload.get("permanent_country"))
-    present_state = _text(payload.get("present_state_ut"))
-    present_country = _text(payload.get("present_country"))
-
-    addr_perm_state, addr_perm_country, _ = _slot_geo(address, "permanent")
-    addr_pres_state, addr_pres_country, _ = _slot_geo(address, "present")
-    if not perm_state and addr_perm_state:
-        perm_state = addr_perm_state
-    if not present_state and addr_pres_state:
-        present_state = addr_pres_state
-    if not perm_country and addr_perm_country:
-        perm_country = addr_perm_country
-    if not present_country and addr_pres_country:
-        present_country = addr_pres_country
+    kb_perm_state, kb_perm_country, _ = _slot_geo(address, "permanent")
+    kb_pres_state, kb_pres_country, _ = _slot_geo(address, "present")
+    perm_state = _prefer_state(payload.get("permanent_state_ut"), kb_perm_state)
+    pres_state = _prefer_state(payload.get("present_state_ut"), kb_pres_state)
+    perm_country = _prefer_country(payload.get("permanent_country"), kb_perm_country, geo_kb)
+    pres_country = _prefer_country(payload.get("present_country"), kb_pres_country, geo_kb)
 
     name_country = resolve_name_country(
         payload.get("full_name") or payload.get("name"), geo_kb,
     )
     field_nationality = resolve_nationality_label(payload.get("nationality"), geo_kb)
 
-    matched_state = perm_state or present_state
-    indian_address = False
-    if matched_state:
-        state_key = matched_state.lower()
-        kb_indian = geo_kb is not None and geo_kb.canon_state(matched_state)
-        if kb_indian or state_key == "telangana" or state_key in INDIAN_STATES:
-            indian_address = True
-    if (perm_country or present_country or "").lower() == "india":
-        indian_address = True
-    if address:
-        for slot in ("permanent", "present"):
-            slot_data = address.get(slot) or {}
-            if (slot_data.get("country") or "").lower() == "india":
-                indian_address = True
-            st = slot_data.get("state")
-            if st and (
-                (geo_kb is not None and geo_kb.canon_state(st))
-                or st.lower() == "telangana"
-                or st.lower() in INDIAN_STATES
-            ):
-                indian_address = True
-
     foreign_name = bool(name_country) and name_country.lower() != "india"
     foreign_field = bool(field_nationality) and field_nationality.lower() != "india"
 
-    stored = _text(payload.get("domicile_classification"))
+    stored = _stored_domicile(payload.get("domicile_classification"))
     enriched_nationality = None
     domicile = None
     method = "non_recoverable"
@@ -155,36 +167,22 @@ def person_row(source_system, person_id, payload, geo_kb=None):
         enriched_nationality = field_nationality
         domicile, method = "international", "nationality"
     else:
-        # No foreign country in name or nationality field.
-        if field_nationality == "India" or (name_country and name_country.lower() == "india"):
+        if (field_nationality and field_nationality.lower() == "india") or (
+            name_country and name_country.lower() == "india"
+        ):
             enriched_nationality = "India"
-        elif indian_address:
+        domicile = classify_domicile(
+            perm_state, perm_country, pres_state, pres_country,
+            nationality=None, geo_kb=geo_kb,
+        )
+        if domicile in ("native state", "inter state") and enriched_nationality is None:
             enriched_nationality = "India"
-        elif field_nationality:
-            enriched_nationality = field_nationality
-
-        if indian_address or enriched_nationality == "India":
-            if indian_address and not (perm_country or present_country):
-                perm_country = "India"
-            domicile = classify_domicile(
-                perm_state, perm_country or "India",
-                present_state, present_country,
-                enriched_nationality or "India",
-            )
-            if domicile:
-                method = "deterministic"
-            elif stored:
-                domicile, method = stored, "source_column"
-            else:
-                domicile, method = None, "non_recoverable"
+        if domicile:
+            method = "deterministic"
         elif stored:
             domicile, method = stored, "source_column"
         else:
-            domicile = classify_domicile(
-                perm_state, perm_country, present_state, present_country,
-                enriched_nationality or field_nationality,
-            )
-            method = "deterministic" if domicile else "non_recoverable"
+            domicile, method = None, "non_recoverable"
 
     surname_source = _text(payload.get("surname"))
     relation = _text(payload.get("relation_type"))

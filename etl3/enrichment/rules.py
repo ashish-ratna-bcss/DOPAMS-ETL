@@ -17,6 +17,8 @@ Narrative-only names are never turned into accused rows.
 import re
 from typing import Optional
 
+from etl3.enrichment.address import expand_state, recognized_country
+
 INDIAN_STATES = {
     "andhra pradesh", "arunachal pradesh", "assam", "bihar", "chhattisgarh",
     "goa", "gujarat", "haryana", "himachal pradesh", "jharkhand", "karnataka",
@@ -86,51 +88,66 @@ def normalize_text(text: Optional[str]) -> Optional[str]:
     return stripped.lower()
 
 
-# Nationality labels that mean the country India (not a foreign country).
-_NATIONALITY_TO_COUNTRY = {
-    "indian": "india",
-    "india": "india",
-}
+def indian_state_for_domicile(raw):
+    """Canonical Indian state/UT, or None when the text is not a known state.
 
-
-def classify_domicile(perm_state, perm_country, pres_state, pres_country, nationality=None):
-    """Classify domicile from nationality and geography.
-
-    Precedence:
-    1. Explicit foreign nationality (anything other than Indian/India) →
-       ``international``, even when present/permanent address is in India.
-    2. Else country from permanent, then present, then Indian/India nationality.
-    3. Non-India country → ``international``.
-    4. India + Telangana → ``native state``; India + other listed state →
-       ``inter state``; India with no state → null.
+    Uses ``expand_state`` (abbreviations and historical spellings). Unknown
+    text is not fuzzy-matched to a state.
     """
-    perm_st = normalize_text(perm_state)
-    perm_co = normalize_text(perm_country)
-    pres_st = normalize_text(pres_state)
-    pres_co = normalize_text(pres_country)
-    nat = normalize_text(nationality)
-    if nat is not None:
-        nat_country = _NATIONALITY_TO_COUNTRY.get(nat)
-        # Specific non-India nationality wins over an Indian address.
-        if nat_country is None:
-            return "international"
-        nat = nat_country
+    expanded = expand_state(raw)
+    if not expanded:
+        return None
+    if expanded.lower() in INDIAN_STATES:
+        return expanded
+    return None
 
-    effective_country = perm_co if perm_co is not None else pres_co
-    if effective_country is None and nat is not None:
-        effective_country = nat
-    if effective_country is None:
-        return None
-    if effective_country != "india":
+
+def _classify_address_slot(state, country, geo_kb=None):
+    """Classify one address slot. Never reads the other slot.
+
+    A slot is usable when it has a recognized foreign country, or a
+    recognized Indian state whose country is India or missing. Country
+    ``India`` with no recognized state is not usable. An unrecognized
+    country is not foreign. Within one slot, a recognized foreign country
+    wins over an Indian state.
+    """
+    country_name = recognized_country(country, geo_kb)
+    state_name = indian_state_for_domicile(state)
+    if country_name and country_name.lower() != "india":
         return "international"
-    effective_state = perm_st if perm_st is not None else pres_st
-    if effective_state is None:
-        return None
-    if effective_state == "telangana":
-        return "native state"
-    if effective_state in INDIAN_STATES:
+    if state_name:
+        if state_name.lower() == "telangana":
+            return "native state"
         return "inter state"
     return None
+
+
+def classify_domicile(
+    perm_state, perm_country, pres_state, pres_country,
+    nationality=None, geo_kb=None,
+):
+    """Classify domicile. Permanent address first, then present address.
+
+    Precedence:
+    1. A recognized foreign nationality (``Nigerian``, ``Nigeria``, …) →
+       ``international``, including when the permanent address is in India.
+       ``Indian`` / ``India`` are not foreign. Unrecognized nationality
+       text is ignored.
+    2. Else the permanent slot, when usable, alone.
+    3. Else the present slot, when usable, alone.
+    4. Else None. India with no state does not fall through inside the
+       permanent slot by borrowing the present state.
+
+    A recognized Indian state is usable when its country is India or
+    missing. The missing country is not rewritten to India.
+    """
+    nationality_name = recognized_country(nationality, geo_kb)
+    if nationality_name and nationality_name.lower() != "india":
+        return "international"
+    permanent = _classify_address_slot(perm_state, perm_country, geo_kb)
+    if permanent:
+        return permanent
+    return _classify_address_slot(pres_state, pres_country, geo_kb)
 
 
 def normalize_case_status(raw):

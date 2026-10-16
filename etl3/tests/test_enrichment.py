@@ -18,14 +18,17 @@ from etl3.enrichment.project import (
 from etl3.enrichment.address import (
     GeoKB,
     _fuzzy_mandal,
+    expand_state,
     resolve_address_text,
     resolve_name_country,
+    resolve_nationality_label,
     resolve_person_address,
 )
 from etl3.enrichment.rules import (
     classify_domicile,
     classify_sections,
     commercial_for_group,
+    indian_state_for_domicile,
     normalize_case_status,
     parse_accused_status,
     resolve_drug_category,
@@ -75,20 +78,219 @@ def test_case_status():
 
 
 def test_domicile():
+    # Permanent address is used alone. A recognized Indian state is usable
+    # when country is India or missing; India is not invented as a country.
     assert classify_domicile("Telangana", "India", None, None) == "native state"
+    assert classify_domicile("  TS ", " india ", None, None) == "native state"
+    assert classify_domicile("Maharashtra", "India", None, None) == "inter state"
+    assert classify_domicile("Orissa", "India", None, None) == "inter state"
+    assert classify_domicile("Pondicherry", "India", None, None) == "inter state"
+    assert classify_domicile("Uttaranchal", "India", None, None) == "inter state"
+    assert classify_domicile("Jammu & Kashmir", "India", None, None) == "inter state"
+    assert classify_domicile("NCT of Delhi", "India", None, None) == "inter state"
+    assert classify_domicile("jk", "India", None, None) == "inter state"
+    assert classify_domicile("or", "India", None, None) == "inter state"
+    # Present address does not override a usable permanent address.
+    assert classify_domicile("Telangana", "India", "Maharashtra", "India") == "native state"
     assert classify_domicile("Karnataka", "India", "Telangana", "India") == "inter state"
+    assert classify_domicile("Maharashtra", "India", "Telangana", "India") == "inter state"
+    assert classify_domicile("Telangana", None, None, "United States") == "native state"
+    # Permanent slot unusable → present slot alone. Do not mix fields.
+    assert classify_domicile(None, None, "Telangana", "India") == "native state"
+    assert classify_domicile(None, None, "Maharashtra", None) == "inter state"
+    assert classify_domicile(None, None, None, "United States") == "international"
+    assert classify_domicile(None, "India", "Telangana", None) == "native state"
+    assert classify_domicile(None, "India", "Maharashtra", "India") == "inter state"
+    assert classify_domicile(None, "India", None, "United States") == "international"
     assert classify_domicile(None, "United States", None, None) == "international"
+    assert classify_domicile("Telangana", "United States", "Telangana", "India") == "international"
     assert classify_domicile(None, "India", None, None) is None
-    # Indian / India are nationality aliases for country India (need a state).
+    assert classify_domicile("Narnia", "India", None, None) is None
+    assert indian_state_for_domicile("Narnia") is None
+    assert expand_state("Narnia") == "Narnia"
+    # Indian nationality with no usable address is not international.
     assert classify_domicile(None, None, None, None, "Indian") is None
     assert classify_domicile("Telangana", None, None, None, "Indian") == "native state"
-    # Explicit foreign nationality wins over an Indian address.
+    assert classify_domicile("Telangana", None, None, None) == "native state"
+    # Recognized foreign nationality wins over an Indian address.
     assert classify_domicile(
         "Maharashtra", "India", "Maharashtra", "India", "Nigeria",
     ) == "international"
     assert classify_domicile("Telangana", "India", None, None, "Nigerian") == "international"
+    # Unrecognized nationality and placeholders are not foreign.
+    for raw in ("Hindu", "Nil", "None", "Not Available", "Not Known", "Unknown", "Other", "Others", "N/A", "NA", "default"):
+        assert resolve_nationality_label(raw) is None
+        assert classify_domicile("Telangana", "India", None, None, raw) == "native state"
+        assert classify_domicile(None, None, None, None, raw) is None
+    assert resolve_nationality_label("Indian") == "India"
+    assert resolve_nationality_label("Nigerian") == "Nigeria"
+    assert resolve_nationality_label("Yemeni") == "Yemen"
+    assert resolve_nationality_label("Yeman") == "Yemen"
+    assert resolve_nationality_label("Federation of Nigeria") == "Nigeria"
+    assert resolve_nationality_label("Tanzania, United Republic Of") == "Tanzania"
+    assert resolve_nationality_label("United Kingdom (Uk)") == "United Kingdom"
+    assert classify_domicile("Telangana", "India", None, None, "Yemeni") == "international"
+    assert classify_domicile("Telangana", "India", None, None, "Tanzania, United Republic Of") == "international"
+    assert resolve_nationality_label("") is None
+    assert resolve_nationality_label(None) is None
     assert classify_domicile(None, "default", None, None) is None
     assert classify_domicile(None, None, None, None, None) is None
+    # Muscat is a city/governorate in Oman, not a country -- explicit alias,
+    # not a fuzzy match (confirmed against the live 223-row geo_countries
+    # table: best trigram score 0.125, far below the 0.70 floor).
+    assert resolve_nationality_label("Muscat") == "Oman"
+    assert resolve_nationality_label("muscat") == "Oman"
+    assert resolve_nationality_label("Omani") == "Oman"
+    assert classify_domicile("Telangana", "India", None, None, "Muscat") == "international"
+    assert classify_domicile(None, None, None, None, "Muscat") == "international"
+    # Africa and West Indies are regions, not countries. No alias maps them
+    # to one, and the nationality-field resolver never fuzzy-matches (only
+    # exact alias/KB lookups), so an Indian address still wins through.
+    for raw in ("Africa", "West Indies", "africa", "west indies"):
+        assert resolve_nationality_label(raw) is None
+        assert classify_domicile("Telangana", "India", None, None, raw) == "native state"
+        assert classify_domicile(None, None, None, None, raw) is None
+
+
+def test_domicile_person_precedence():
+    native = person_row("V2", "P-TS", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "  ts ",
+        "permanent_country": " INDIA ",
+        "present_state_ut": "Maharashtra",
+        "present_country": "India",
+    })
+    assert native["domicile_classification"] == "native state"
+    assert native["domicile_method"] == "deterministic"
+    assert native["nationality"] == "India"
+
+    inter = person_row("V2", "P-MH", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "Orissa",
+        "permanent_country": "India",
+        "present_state_ut": "Telangana",
+        "present_country": "India",
+    })
+    assert inter["domicile_classification"] == "inter state"
+    assert inter["domicile_method"] == "deterministic"
+
+    present_only = person_row("V2", "P-PR", {
+        "full_name": "Ravi Kumar",
+        "present_state_ut": "Maharashtra",
+        "present_country": "India",
+    })
+    assert present_only["domicile_classification"] == "inter state"
+
+    present_foreign = person_row("V2", "P-US", {
+        "full_name": "Ravi Kumar",
+        "nationality": "Indian",
+        "present_country": "United States",
+    })
+    assert present_foreign["domicile_classification"] == "international"
+    assert present_foreign["domicile_method"] == "deterministic"
+    assert present_foreign["nationality"] == "India"
+
+    india_only = person_row("V2", "P-IN-ONLY", {
+        "full_name": "Ravi Kumar",
+        "permanent_country": "India",
+        "present_state_ut": "Telangana",
+    })
+    assert india_only["domicile_classification"] == "native state"
+    assert india_only["domicile_method"] == "deterministic"
+
+    no_address = person_row("V2", "P-NONE", {
+        "full_name": "Ravi Kumar",
+        "nationality": "Indian",
+    })
+    assert no_address["domicile_classification"] is None
+    assert no_address["domicile_method"] == "non_recoverable"
+    assert no_address["nationality"] == "India"
+
+    for label in ("Hindu", "Nil", "Not Available", "Not Known"):
+        blocked = person_row("V2", "P-BAD", {
+            "full_name": "Ravi Kumar",
+            "nationality": label,
+        })
+        assert blocked["domicile_classification"] is None
+        assert blocked["nationality"] is None
+
+    kept = person_row("V2", "P-STORED", {
+        "full_name": "Ravi Kumar",
+        "nationality": "Nil",
+        "domicile_classification": "Native State",
+    })
+    assert kept["domicile_classification"] == "native state"
+    assert kept["domicile_method"] == "source_column"
+
+    replaced = person_row("V2", "P-REPL", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "Telangana",
+        "permanent_country": "India",
+        "domicile_classification": "inter state",
+    })
+    assert replaced["domicile_classification"] == "native state"
+    assert replaced["domicile_method"] == "deterministic"
+
+    unknown_state = person_row("V2", "P-BADSTATE", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "Narnia",
+        "permanent_country": "India",
+    })
+    assert unknown_state["domicile_classification"] is None
+    assert unknown_state["domicile_method"] == "non_recoverable"
+
+    kb = GeoKB()
+    kb.add_reference("Telangana", "Adilabad", None, None)
+    kb.add_country("India")
+    kb.add_country("Mali")
+    kb.add_country("United States")
+    from_kb = person_row("V2", "P-KB", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "ZZNOTASTATE",
+        "permanent_country": "India",
+        "permanent_address_text": "Adilabad,Telangana",
+    }, geo_kb=kb)
+    assert from_kb["domicile_classification"] == "native state"
+    assert from_kb["domicile_method"] == "deterministic"
+
+    raw_wins = person_row("V2", "P-RAW", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "Maharashtra",
+        "permanent_country": "India",
+        "permanent_address_text": "Adilabad,Telangana",
+    }, geo_kb=kb)
+    assert raw_wins["domicile_classification"] == "inter state"
+
+    surname = person_row("V2", "P-MALI", {"full_name": "Kailash Mali"}, geo_kb=kb)
+    assert surname["domicile_classification"] is None
+    assert resolve_name_country("Kailash Mali", kb) is None
+
+    muscat = person_row("V2", "P-MUSCAT", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "Telangana",
+        "permanent_country": "India",
+        "nationality": "Muscat",
+    })
+    assert muscat["domicile_classification"] == "international"
+    assert muscat["domicile_method"] == "nationality"
+    assert muscat["nationality"] == "Oman"
+
+    africa = person_row("V2", "P-AFRICA", {
+        "full_name": "Ravi Kumar",
+        "permanent_state_ut": "Telangana",
+        "permanent_country": "India",
+        "nationality": "Africa",
+    })
+    assert africa["domicile_classification"] == "native state"
+    assert africa["domicile_method"] == "deterministic"
+    assert africa["nationality"] == "India"
+
+    west_indies_no_address = person_row("V2", "P-WI", {
+        "full_name": "Ravi Kumar",
+        "nationality": "West Indies",
+    })
+    assert west_indies_no_address["domicile_classification"] is None
+    assert west_indies_no_address["nationality"] is None
 
 
 def test_units():
@@ -518,6 +720,7 @@ def main():
     check("sections", test_sections)
     check("case status", test_case_status)
     check("domicile", test_domicile)
+    check("domicile person precedence", test_domicile_person_precedence)
     check("units", test_units)
     check("category and commercial", test_drug_category_and_commercial)
     check("knowledge base", test_kb)
