@@ -1445,6 +1445,23 @@ def _merge_stat_block(dst: dict, src: dict) -> None:
             dst[key] = dst.get(key, 0) + value
 
 
+def _crime_recency_map(conn, crime_ids):
+    """{crime_id: current_as_of} for crimes_unified rows among crime_ids.
+
+    A crime_id with no row in crimes_unified (accused-only work whose crime
+    never consolidated) is simply absent from the returned dict -- callers
+    treat a missing key as "oldest", never as an error.
+    """
+    if not crime_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT crime_id, current_as_of FROM crimes_unified WHERE crime_id = ANY(%s)",
+            (list(crime_ids),),
+        )
+        return dict(cur.fetchall())
+
+
 def run_per_fir_ai_backfill(
     conn,
     run_id,
@@ -1470,15 +1487,34 @@ def run_per_fir_ai_backfill(
     batch_size = settings.get("batch_size") or 5
     parallel = configure_ollama_parallel(settings.get("parallel") or 1)
 
-    if do_drugs and drug_client is None and settings.get("enabled"):
-        drug_client = OllamaDrugClient(
-            settings["host"], settings["model"], settings["timeout"],
-        )
-    if do_accused and accused_client is None and settings.get("enabled"):
-        accused_client = OllamaAccusedClient(
-            settings["host"], settings["model"], settings["timeout"],
-        )
-    if do_drugs and drug_client is None and not settings.get("enabled"):
+    # worker_hosts: one Ollama endpoint per concurrent worker, for true
+    # per-GPU parallelism (one full model copy per GPU, no cross-GPU
+    # pipeline split). Falls back to [settings["host"]] when unset, which
+    # reproduces the prior single-host behaviour exactly.
+    worker_hosts = settings.get("worker_hosts") or ([settings["host"]] if settings.get("host") else [])
+    n_hosts = max(1, len(worker_hosts))
+
+    if drug_client is not None:
+        drug_clients = [drug_client]
+    elif do_drugs and settings.get("enabled"):
+        drug_clients = [
+            OllamaDrugClient(h, settings["model"], settings["timeout"])
+            for h in worker_hosts
+        ]
+    else:
+        drug_clients = [None]
+
+    if accused_client is not None:
+        accused_clients = [accused_client]
+    elif do_accused and settings.get("enabled"):
+        accused_clients = [
+            OllamaAccusedClient(h, settings["model"], settings["timeout"])
+            for h in worker_hosts
+        ]
+    else:
+        accused_clients = [None]
+
+    if do_drugs and drug_clients[0] is None and not settings.get("enabled"):
         return {
             "status": "disabled",
             "drugs": _empty_drug_stats(mode),
@@ -1511,6 +1547,25 @@ def run_per_fir_ai_backfill(
         seen.add(crime_id)
         crime_ids.append(crime_id)
 
+    # Newest-first scheduling: a single ordering by crimes_unified.current_as_of
+    # (the timestamp of the source observation each unified row currently
+    # reflects) naturally gives a just-consolidated crime priority over the
+    # historical backlog, and gives the backlog itself a newest-to-oldest
+    # order -- one sort satisfies both without a second queue or checkpoint
+    # table. A crime_id with no resolvable timestamp (e.g. an accused-only
+    # row whose crime never made it into crimes_unified) sorts last, never
+    # raises, and is never dropped from crime_ids.
+    from datetime import datetime as _datetime, timezone as _timezone
+
+    recency = _crime_recency_map(conn, crime_ids)
+    _oldest = _datetime.min.replace(tzinfo=_timezone.utc)
+    crime_ids.sort(key=lambda cid: recency.get(cid) or _oldest, reverse=True)
+
+    # Deterministic round-robin: crime i uses worker_hosts[i % n_hosts], so
+    # each GPU-pinned endpoint gets a steady share of distinct FIRs instead
+    # of all workers sharing one host.
+    host_idx_by_crime = {cid: i % n_hosts for i, cid in enumerate(crime_ids)}
+
     for crime_id in facts:
         if do_accused and crime_id not in by_crime:
             accused_stats["no_accused"] += 1
@@ -1518,6 +1573,7 @@ def run_per_fir_ai_backfill(
     print(
         f"[ai-per-fir] start mode={mode} crimes={len(crime_ids)} "
         f"do_drugs={do_drugs} do_accused={do_accused} parallel={parallel} "
+        f"worker_hosts={worker_hosts} "
         f"limit={limit or 'unlimited'} "
         f"batch_size={batch_size} request_delay_sec={settings.get('request_delay_sec')} "
         f"timeout_s={settings.get('timeout')} max_retries={settings.get('max_retries')}",
@@ -1550,6 +1606,7 @@ def run_per_fir_ai_backfill(
                 break
             if _budgets_exhausted():
                 break
+            host_idx = host_idx_by_crime.get(crime_id, 0)
             result = _process_one_crime_ai(
                 conn, run_id, crime_id,
                 fact_entry=facts.get(crime_id),
@@ -1557,8 +1614,8 @@ def run_per_fir_ai_backfill(
                 known=known,
                 do_drugs=do_drugs,
                 do_accused=do_accused,
-                drug_client=drug_client,
-                accused_client=accused_client,
+                drug_client=drug_clients[host_idx % len(drug_clients)],
+                accused_client=accused_clients[host_idx % len(accused_clients)],
                 kb_items=kb_items,
                 drug_kb_obj=drug_kb_obj,
                 settings=settings,
@@ -1582,6 +1639,7 @@ def run_per_fir_ai_backfill(
                 return {"crime_id": crime_id, "skipped_stop": True}
             local_drug_lat: list[float] = []
             local_accused_lat: list[float] = []
+            host_idx = host_idx_by_crime.get(crime_id, 0)
             worker_conn = connections.get_unified_connection()
             try:
                 result = _process_one_crime_ai(
@@ -1591,8 +1649,8 @@ def run_per_fir_ai_backfill(
                     known=known,
                     do_drugs=do_drugs,
                     do_accused=do_accused,
-                    drug_client=drug_client,
-                    accused_client=accused_client,
+                    drug_client=drug_clients[host_idx % len(drug_clients)],
+                    accused_client=accused_clients[host_idx % len(accused_clients)],
                     kb_items=kb_items,
                     drug_kb_obj=drug_kb_obj,
                     settings=settings,
