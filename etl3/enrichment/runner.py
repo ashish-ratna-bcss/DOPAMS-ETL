@@ -1194,6 +1194,14 @@ def process_accused_ai_for_crime(
                 )
                 outcome = "success" if extractions else "empty"
                 _pace_after_request(settings, latencies)
+    else:
+        # No fresh model call this pass (AI disabled, no FIR text, or
+        # call-budget exhausted). Reload whatever was already stored so a
+        # pass made with AI off never blanks a previously AI-derived
+        # role_in_crime/accused_type back to null -- same reload already
+        # used above for the "already settled" case, just not gated on it.
+        allowed_ids = [r["accused_id"] for r in work]
+        extractions = _load_stored_accused_extractions(conn, allowed_ids)
     merged = enrich_existing_accused(work, extractions, fir_text=fir_text)
     return {
         "outcome": outcome,
