@@ -33,6 +33,16 @@ PERSON_FIELDS = (
 _A_CODE_RE = re.compile(r"\bA\s*[-.]?\s*(\d+)\b", re.IGNORECASE)
 _CCL_CODE_RE = re.compile(r"\bCCL\s*[-.]?\s*(\d+)\b", re.IGNORECASE)
 
+# "R/o", "R.O.", "R O", "Res of", "Resident of" -- stripped for comparison
+# only, never from the kept segment's own text. Requires an explicit
+# separator between the R and the O, so "Road no.1" is never mistaken for
+# a tagged repeat of the address that follows it.
+_ADDR_PREFIX_RE = re.compile(
+    r"^\s*(?:r[\/.\s]o\.?|res(?:ident)?\.?\s+of)\s*[:\-]?\s*",
+    re.IGNORECASE,
+)
+_ADDR_DUP_MIN_RUN = 2
+
 
 def _text(value):
     if value is None:
@@ -303,6 +313,8 @@ def _fill_missing(current, extracted, field, sources):
         except (TypeError, ValueError):
             return None
     candidate = candidate if field == "age" else _text(candidate)
+    if field == "address" and candidate:
+        candidate = normalize_address_segments(candidate)
     if _present(candidate):
         sources[field] = SOURCE_LLM
         return candidate
@@ -511,7 +523,7 @@ def accused_row_from_existing(source_system, accused_id, payload, person_payload
             person.get("phone_number") or person.get("phone_numbers")
             or v1.get("phone_numbers") or payload.get("phone_number")
         ),
-        "address": (
+        "address": normalize_address_segments(
             _compose_address(person)
             or _text(person.get("present_address_text"))
             or v1.get("address")
@@ -528,6 +540,91 @@ def accused_row_from_existing(source_system, accused_id, payload, person_payload
     return rows[0] if rows else None
 
 
+def _normalize_address_segment_key(segment: str) -> str:
+    """Whitespace-folded, case-folded comparison key for one address
+    segment, with a leading R/o-style tag removed so a bare repeat of the
+    same text is recognized as a duplicate of the tagged original."""
+    text = _ADDR_PREFIX_RE.sub("", segment.strip())
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text.rstrip(".")
+
+
+def _collapse_duplicate_runs_once(segments: list, keys: list):
+    """Single left-to-right pass: drop the first run of >=2 consecutive
+    segments that already occurred earlier in the (growing) kept list.
+
+    Deliberately leaves a lone single-segment repeat alone (e.g. adjacent
+    "Moosapet, Moosapet") even when adjacent: a district segment
+    immediately following a locality segment that happens to end in the
+    same city name (no mandal segment between them) is a single-token
+    adjacency too, and must never be read as a duplicate of the locality
+    text -- collapsing it would silently delete the district. Only a
+    repeated run of >=2 segments is unambiguous enough to collapse.
+
+    One pass can leave a residual duplicate when a segment skipped as part
+    of a larger matched run later re-pairs, on its own, with a segment kept
+    after it (e.g. a 5-segment block repeated 3 times with a scrambled
+    partial copy in between) -- so the caller iterates this to a fixed
+    point rather than trusting a single pass.
+    """
+    kept: list = []
+    kept_keys: list = []
+    i = 0
+    n = len(segments)
+    changed = False
+    while i < n:
+        max_run = min(n - i, len(kept_keys))
+        matched = 0
+        for run in range(max_run, _ADDR_DUP_MIN_RUN - 1, -1):
+            window = keys[i:i + run]
+            for start in range(0, len(kept_keys) - run + 1):
+                if kept_keys[start:start + run] == window:
+                    matched = run
+                    break
+            if matched:
+                break
+        if matched:
+            i += matched
+            changed = True
+            continue
+        kept.append(segments[i])
+        kept_keys.append(keys[i])
+        i += 1
+    return kept, kept_keys, changed
+
+
+def normalize_address_segments(text: Optional[str]) -> Optional[str]:
+    """Collapse a comma-joined address string down to the first occurrence
+    of every contiguous run of segments, so a block that was accidentally
+    duplicated across two source columns (e.g. a full street address
+    copied into both ``house_no`` and ``ward_colony``) is not written
+    twice.
+
+    Only a run of 2+ consecutive segments counts as a duplicate -- never a
+    single shared word -- so a district segment such as ``Hyderabad`` is
+    kept even when an earlier locality segment happens to mention the same
+    city. A leading ``R/o`` / ``Resident of`` tag is ignored for comparison
+    only; a kept segment's own text, tag included, is never rewritten.
+    The collapse pass is repeated to a fixed point (each pass can only
+    keep the same number of segments or fewer, so this always terminates)
+    so a residual duplicate left behind by one pass is caught by the next.
+    Pure function: same input always yields the same output, so repeated
+    ETL-3 runs over unchanged source data never reintroduce a duplicate.
+    """
+    if not text:
+        return None
+    segments = [s.strip() for s in str(text).split(",") if s.strip()]
+    if not segments:
+        return None
+
+    keys = [_normalize_address_segment_key(s) for s in segments]
+    for _ in range(len(segments) + 1):
+        segments, keys, changed = _collapse_duplicate_runs_once(segments, keys)
+        if not changed:
+            break
+    return ", ".join(segments) if segments else None
+
+
 def _compose_address(person):
     if not person:
         return None
@@ -540,4 +637,6 @@ def _compose_address(person):
         value = _text(person.get(key))
         if value:
             parts.append(value)
-    return ", ".join(parts) if parts else None
+    if not parts:
+        return None
+    return normalize_address_segments(", ".join(parts))

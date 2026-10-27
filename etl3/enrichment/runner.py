@@ -22,6 +22,7 @@ from etl3.enrichment.accused_facts import (
     enrich_existing_accused,
     map_v1_dossier_identity,
     _compose_address,
+    normalize_address_segments,
 )
 from etl3.merger.accused_split import (
     build_split_rows,
@@ -245,7 +246,7 @@ def _compose_existing_accused_record(source_system, accused_id, payload, unified
     """One CCTNS accused row for brief-facts enrichment. accused_id is required."""
     person = person_payload or {}
     v1 = map_v1_dossier_identity(payload) if source_system == "V1" else {}
-    address = (
+    address = normalize_address_segments(
         _compose_address(person)
         or _text_or_none(person.get("present_address_text"))
         or v1.get("address")
@@ -938,7 +939,9 @@ def _split_child_records(conn):
             "gender": gender,
             "occupation": occupation,
             "phone_numbers": phone_number,
-            "address": _text_or_none(present_address_text) or _text_or_none(permanent_address_text),
+            "address": normalize_address_segments(
+                _text_or_none(present_address_text) or _text_or_none(permanent_address_text)
+            ),
         })
     return records
 

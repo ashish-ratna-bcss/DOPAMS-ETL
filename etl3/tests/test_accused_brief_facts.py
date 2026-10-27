@@ -14,8 +14,10 @@ from etl3.enrichment.accused_facts import (
     enrich_existing_accused,
     existing_accused_only,
     map_v1_dossier_identity,
+    normalize_address_segments,
     reject_narrative_only_names,
     resolve_v1_accused_code,
+    _compose_address,
 )
 from etl3.enrichment.project import accused_row
 from etl3.enrichment.rules import classify_accused_type, resolve_is_ccl
@@ -366,6 +368,107 @@ def test_v1_age_unavailable_leaves_type_unresolved():
     assert row["is_ccl"] is None
 
 
+def test_compose_address_drops_real_duplicated_block():
+    # accused_id 6898aa3ce8f9d860ba04e4b1: house_no and ward_colony both held
+    # the same free-text street address (one tagged "R/o", one bare).
+    person = {
+        "present_house_no": "R/o 14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad",
+        "present_street_road_no": None,
+        "present_ward_colony": "14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad",
+        "present_locality_village": "Mangalhat",
+        "present_area_mandal": "Asifnagar",
+        "present_district": "HYDERABAD",
+        "present_state_ut": "TELANGANA",
+        "present_country": "India",
+    }
+    assert _compose_address(person) == (
+        "R/o 14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad, "
+        "Mangalhat, Asifnagar, HYDERABAD, TELANGANA, India"
+    )
+
+
+def test_normalize_address_keeps_single_shared_word():
+    # "Hyderabad" inside the locality text and "HYDERABAD" as the district
+    # are two different fields -- a single shared word is never a duplicate.
+    text = (
+        "R/o 14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad, "
+        "14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad, "
+        "Mangalhat, Asifnagar, HYDERABAD, TELANGANA, India"
+    )
+    out = normalize_address_segments(text)
+    assert out == (
+        "R/o 14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad, "
+        "Mangalhat, Asifnagar, HYDERABAD, TELANGANA, India"
+    )
+    assert out.count("HYDERABAD") == 1
+    assert out.lower().count("hyderabad") == 2  # locality mention + district, both legitimate
+
+
+def test_normalize_address_partial_overlap_keeps_longer_block():
+    text = "Plot No.109, Road no.1, Gayatri Nagar, Boduppal, Road no.1, Gayatri Nagar, Boduppal, Gayathri Nagar, Medipally, TELANGANA, India"
+    assert normalize_address_segments(text) == (
+        "Plot No.109, Road no.1, Gayatri Nagar, Boduppal, "
+        "Gayathri Nagar, Medipally, TELANGANA, India"
+    )
+
+
+def test_normalize_address_is_idempotent():
+    cases = [
+        "R/o 14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad, 14-1-61, "
+        "Sitarampet, Gode ki KabarMangalhat, Hyderabad, Mangalhat, Asifnagar, "
+        "HYDERABAD, TELANGANA, India",
+        "Indhira Nagar,Dhoolpet, Hyderabad  ,Indhira Nagar,Dhoolpet, Hyderabad  ,Telangana",
+        "Plot No.109, Road no.1, Gayatri Nagar, Boduppal, Road no.1, Gayatri Nagar, "
+        "Boduppal, Gayathri Nagar, Medipally, TELANGANA, India",
+        "Just One Clean Address, Hyderabad, Telangana, India",
+        None,
+        "",
+        "SingleToken",
+    ]
+    for case in cases:
+        once = normalize_address_segments(case)
+        twice = normalize_address_segments(once)
+        assert once == twice, f"not idempotent for {case!r}: {once!r} -> {twice!r}"
+
+
+def test_normalize_address_handles_v1_style_self_duplicated_text():
+    # V1 dossier free text that already repeats itself inside a single field
+    # (not something _compose_address built) is still cleaned up.
+    text = "Indhira Nagar,Dhoolpet, Hyderabad  ,Indhira Nagar,Dhoolpet, Hyderabad  ,Telangana"
+    assert normalize_address_segments(text) == "Indhira Nagar, Dhoolpet, Hyderabad, Telangana"
+
+
+def test_normalize_address_fixed_point_catches_residual_duplicate():
+    # A single left-to-right pass can skip a whole repeated 5-segment block
+    # and then leave a *different* 2-segment duplicate behind, formed by a
+    # scrambled partial copy that follows it. The collapse must iterate
+    # until no repeated run of any kind remains.
+    text = (
+        "H.No. 81, S. No. 12, Chaitanya Nagar, Pade Gaon, Aurangabad, "
+        "H.No. 81, S. No. 12, Chaitanya Nagar, Pade Gaon, Aurangabad, "
+        "Pade Gaon, Chaitanya Nagar, Pade Gaon, Aurangabad, AURANGABAD, "
+        "MAHARASHTRA, India"
+    )
+    out = normalize_address_segments(text)
+    assert out == "H.No. 81, S. No. 12, Chaitanya Nagar, Pade Gaon, Aurangabad, MAHARASHTRA, India"
+    assert normalize_address_segments(out) == out
+
+
+def test_normalize_address_keeps_adjacent_district_matching_locality_tail():
+    # When the mandal segment is missing, the district segment sits
+    # directly next to a locality segment that happens to end in the same
+    # city name. This single-token adjacency must never be collapsed --
+    # doing so would silently delete the district.
+    text = "R/o 14-1-61, Sitarampet, Gode ki KabarMangalhat, Hyderabad, HYDERABAD, TELANGANA, India"
+    assert normalize_address_segments(text) == text
+
+
+def test_normalize_address_no_false_positive_on_road_prefix():
+    # "Road no.1" must never be mistaken for an "R/o"-tagged repeat.
+    text = "Road no.1, Gayatri Nagar, Boduppal, Hyderabad"
+    assert normalize_address_segments(text) == text
+
+
 def main():
     checks = [
         ("existing accused processed", test_existing_accused_processed),
@@ -395,6 +498,14 @@ def main():
         ("v1 ccl numbering overrides fir a-codes", test_v1_ccl_numbering_overrides_fir_a_codes),
         ("v1 preserves dossier fields", test_v1_preserves_dossier_fields_over_fir),
         ("v1 age unavailable type unresolved", test_v1_age_unavailable_leaves_type_unresolved),
+        ("compose address drops real duplicated block", test_compose_address_drops_real_duplicated_block),
+        ("normalize address keeps single shared word", test_normalize_address_keeps_single_shared_word),
+        ("normalize address partial overlap keeps longer block", test_normalize_address_partial_overlap_keeps_longer_block),
+        ("normalize address is idempotent", test_normalize_address_is_idempotent),
+        ("normalize address handles v1-style self-duplicated text", test_normalize_address_handles_v1_style_self_duplicated_text),
+        ("normalize address fixed point catches residual duplicate", test_normalize_address_fixed_point_catches_residual_duplicate),
+        ("normalize address keeps adjacent district matching locality tail", test_normalize_address_keeps_adjacent_district_matching_locality_tail),
+        ("normalize address no false positive on road prefix", test_normalize_address_no_false_positive_on_road_prefix),
     ]
     passed = sum(1 for label, fn in checks if check(label, fn))
     print(f"{passed}/{len(checks)} passed")
