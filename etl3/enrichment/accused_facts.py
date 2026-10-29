@@ -305,6 +305,12 @@ def _fill_missing(current, extracted, field, sources):
     """Keep DB value when present. Take LLM value only when DB is empty."""
     if _present(current):
         sources[field] = SOURCE_DB
+        if field == "address":
+            # Last-mile guard: re-normalize even an already-present DB/
+            # composed value. Idempotent on already-clean input, so this
+            # is a no-op whenever the upstream composer already normalized
+            # it, and a safety net if it didn't.
+            return normalize_address_segments(current)
         return current
     candidate = extracted.get(field) if extracted else None
     if field == "age" and candidate is not None and str(candidate).strip() != "":

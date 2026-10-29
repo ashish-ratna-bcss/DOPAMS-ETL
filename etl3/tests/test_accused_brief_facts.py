@@ -469,6 +469,99 @@ def test_normalize_address_no_false_positive_on_road_prefix():
     assert normalize_address_segments(text) == text
 
 
+def test_normalize_address_repeated_full_hierarchy_collapses():
+    # village, mandal, district, state, PIN, country repeated as one block.
+    text = (
+        "Kondapur village, Shankarpally mandal, Rangareddy district, "
+        "Telangana, 502032, India, "
+        "Kondapur village, Shankarpally mandal, Rangareddy district, "
+        "Telangana, 502032, India"
+    )
+    assert normalize_address_segments(text) == (
+        "Kondapur village, Shankarpally mandal, Rangareddy district, "
+        "Telangana, 502032, India"
+    )
+
+
+def test_normalize_address_mixed_casing_and_whitespace_treated_as_duplicate():
+    # Same segment repeated with different casing and stray whitespace must
+    # still be recognized as the same segment, with the first occurrence's
+    # own text (casing, spacing) kept verbatim.
+    text = "Moosapet,  Hyderabad ,moosapet,   HYDERABAD  ,Telangana"
+    assert normalize_address_segments(text) == "Moosapet, Hyderabad, Telangana"
+
+
+def test_normalize_address_null_and_empty_segments_dropped():
+    assert normalize_address_segments(None) is None
+    assert normalize_address_segments("") is None
+    assert normalize_address_segments(",,  ,,") is None
+    assert normalize_address_segments("Hyderabad,,  ,Telangana,") == "Hyderabad, Telangana"
+
+
+def test_normalize_address_legitimate_distinct_pin_and_country_kept():
+    # Two genuinely different PIN codes / districts are never collapsed
+    # just because they sit next to equal-length runs.
+    text = "Kondapur, Rangareddy, Telangana, 502032, India, Miyapur, Hyderabad, Telangana, 500049, India"
+    assert normalize_address_segments(text) == text
+
+
+def test_fill_missing_renormalizes_already_present_duplicated_db_address():
+    # Simulates data already in the DB (or a self-duplicated upstream
+    # source field) that still holds a repeated block -- the "DB value
+    # already present" branch must not pass it through untouched.
+    record = _base(
+        address=(
+            "Indhira Nagar,Dhoolpet, Hyderabad,Indhira Nagar,Dhoolpet, "
+            "Hyderabad,Telangana"
+        ),
+    )
+    result = enrich_existing_accused([record], [])
+    row = result["rows"][0]
+    assert row["address"] == "Indhira Nagar, Dhoolpet, Hyderabad, Telangana"
+    assert row["field_sources"]["address"] == "DB"
+
+
+def test_enrich_existing_accused_partial_ai_result_address_normalized():
+    # AI supplies the only address candidate (DB has none); the LLM text
+    # itself is self-duplicated -- must still come out clean.
+    record = _base(address=None)
+    result = enrich_existing_accused(
+        [record],
+        [{
+            "accused_id": "ACC-1",
+            "address": "Kalamarati,Sabjimarket,Kalamarati,Sabjimarket,Solapur",
+        }],
+    )
+    row = result["rows"][0]
+    assert row["address"] == "Kalamarati, Sabjimarket, Solapur"
+    assert row["field_sources"]["address"] == "LLM_FALLBACK"
+
+
+def test_enrich_existing_accused_retry_same_input_idempotent():
+    # A retried pass over the same roster/extraction must land on the
+    # exact same normalized address, not drift or re-duplicate.
+    record = _base(
+        address="Ward No.2,Haiberigaon,Nagaon,Haiberigaon,Nagaon,Assam",
+    )
+    first = enrich_existing_accused([dict(record)], [])["rows"][0]
+    second = enrich_existing_accused([dict(record)], [])["rows"][0]
+    assert first["address"] == second["address"] == "Ward No.2, Haiberigaon, Nagaon, Assam"
+
+
+def test_enrich_existing_accused_repeated_normalization_stable_across_runs():
+    # Feed one pass's output back in as the next pass's "already in DB"
+    # value (what a routine re-run actually sees) -- it must not change
+    # again, and must never grow a new duplicate.
+    record = _base(
+        address="LBT Nagar,Road No: 12, Banjarahills,Road No: 12, Banjarahills,Banjarahills,Hyderabad,Telangana",
+    )
+    once = enrich_existing_accused([dict(record)], [])["rows"][0]["address"]
+    fed_back = _base(address=once)
+    twice = enrich_existing_accused([dict(fed_back)], [])["rows"][0]["address"]
+    assert once == twice
+    assert normalize_address_segments(once) == once
+
+
 def main():
     checks = [
         ("existing accused processed", test_existing_accused_processed),
@@ -506,6 +599,14 @@ def main():
         ("normalize address fixed point catches residual duplicate", test_normalize_address_fixed_point_catches_residual_duplicate),
         ("normalize address keeps adjacent district matching locality tail", test_normalize_address_keeps_adjacent_district_matching_locality_tail),
         ("normalize address no false positive on road prefix", test_normalize_address_no_false_positive_on_road_prefix),
+        ("normalize address repeated full hierarchy collapses", test_normalize_address_repeated_full_hierarchy_collapses),
+        ("normalize address mixed casing and whitespace treated as duplicate", test_normalize_address_mixed_casing_and_whitespace_treated_as_duplicate),
+        ("normalize address null and empty segments dropped", test_normalize_address_null_and_empty_segments_dropped),
+        ("normalize address legitimate distinct pin and country kept", test_normalize_address_legitimate_distinct_pin_and_country_kept),
+        ("fill_missing renormalizes already-present duplicated db address", test_fill_missing_renormalizes_already_present_duplicated_db_address),
+        ("partial ai result address normalized", test_enrich_existing_accused_partial_ai_result_address_normalized),
+        ("retry same input idempotent", test_enrich_existing_accused_retry_same_input_idempotent),
+        ("repeated normalization stable across runs", test_enrich_existing_accused_repeated_normalization_stable_across_runs),
     ]
     passed = sum(1 for label, fn in checks if check(label, fn))
     print(f"{passed}/{len(checks)} passed")
