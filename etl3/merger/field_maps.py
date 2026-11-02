@@ -18,6 +18,40 @@ def _get(key):
     return lambda payload: payload.get(key)
 
 
+def compose_v2_address_text(payload, prefix):
+    """Address text for a V2 person's ``{prefix}_*`` fields.
+
+    ``house_no`` is usually already a full free-text address (observed on
+    live data), so it's kept verbatim when present. When it's absent, the
+    old code picked a single fallback field (locality, else district) and
+    stopped -- silently dropping state/mandal/country even though they were
+    captured at source. This composes every available level instead, so a
+    person with only district+state_ut (no house_no/locality) still gets
+    both in the result rather than losing the state.
+    """
+    house_no = payload.get(f"{prefix}_house_no")
+    if house_no and str(house_no).strip():
+        return house_no
+    parts = []
+    seen = set()
+    for key in (
+        f"{prefix}_locality_village",
+        f"{prefix}_area_mandal",
+        f"{prefix}_district",
+        f"{prefix}_state_ut",
+        f"{prefix}_country",
+    ):
+        value = payload.get(key)
+        if not value:
+            continue
+        value = str(value).strip()
+        if not value or value.lower() in seen:
+            continue
+        seen.add(value.lower())
+        parts.append(value)
+    return ", ".join(parts) if parts else None
+
+
 def _v1_crimes_residual(payload):
     """V1 fir fields with no dedicated crimes_unified column -- preserved in
     additional_json_data rather than discarded (payload preservation, even
@@ -108,8 +142,8 @@ PERSONS = {
             "occupation": "occupation",
             "caste": "caste",
             "nationality": "nationality",
-            "present_address_text": lambda p: p.get("present_house_no") or p.get("present_locality_village") or p.get("present_district"),
-            "permanent_address_text": lambda p: p.get("permanent_house_no") or p.get("permanent_locality_village") or p.get("permanent_district"),
+            "present_address_text": lambda p: compose_v2_address_text(p, "present"),
+            "permanent_address_text": lambda p: compose_v2_address_text(p, "permanent"),
             "phone_number": "phone_number",
             "email_id": "email_id",
         },
