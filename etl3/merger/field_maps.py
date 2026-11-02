@@ -28,6 +28,15 @@ def compose_v2_address_text(payload, prefix):
     captured at source. This composes every available level instead, so a
     person with only district+state_ut (no house_no/locality) still gets
     both in the result rather than losing the state.
+
+    ``country`` is appended only when some other locational part (locality,
+    mandal, district or state) is already present. Country alone is almost
+    always a boilerplate default ("India") rather than a captured address,
+    so surfacing it by itself would turn a genuine source gap (nothing
+    about this person's address was ever recorded) into what looks like a
+    real value. That distinction matters here specifically, not a general
+    rule -- elsewhere (e.g. the country-only case in enrich_existing_accused)
+    a lone recognized country is deliberately meaningful.
     """
     house_no = payload.get(f"{prefix}_house_no")
     if house_no and str(house_no).strip():
@@ -39,7 +48,6 @@ def compose_v2_address_text(payload, prefix):
         f"{prefix}_area_mandal",
         f"{prefix}_district",
         f"{prefix}_state_ut",
-        f"{prefix}_country",
     ):
         value = payload.get(key)
         if not value:
@@ -49,6 +57,12 @@ def compose_v2_address_text(payload, prefix):
             continue
         seen.add(value.lower())
         parts.append(value)
+    if parts:
+        country = payload.get(f"{prefix}_country")
+        if country:
+            country = str(country).strip()
+            if country and country.lower() not in seen:
+                parts.append(country)
     return ", ".join(parts) if parts else None
 
 

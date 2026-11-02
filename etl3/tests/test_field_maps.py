@@ -71,6 +71,31 @@ def test_full_hierarchy_composed_in_order():
     )
 
 
+def test_country_alone_not_surfaced():
+    # Only country captured (the common "India" boilerplate default, no
+    # locality/mandal/district/state) is treated the same as no data --
+    # otherwise a genuine source gap would start looking like a real value.
+    payload = {
+        "present_house_no": None,
+        "present_locality_village": None,
+        "present_area_mandal": None,
+        "present_district": None,
+        "present_state_ut": None,
+        "present_country": "India",
+    }
+    assert compose_v2_address_text(payload, "present") is None
+
+
+def test_country_appended_only_when_other_part_present():
+    payload = {
+        "present_house_no": None,
+        "present_district": "ALWAR",
+        "present_state_ut": "RAJASTHAN",
+        "present_country": "India",
+    }
+    assert compose_v2_address_text(payload, "present") == "ALWAR, RAJASTHAN, India"
+
+
 def test_all_fields_null_returns_none():
     payload = {
         "present_house_no": None,
@@ -147,6 +172,8 @@ def main():
         ("district+state composed when house_no/locality missing", test_district_plus_state_composed_when_house_no_and_locality_missing),
         ("mandal+state composed when district missing", test_mandal_and_state_composed_when_district_missing),
         ("full hierarchy composed in order", test_full_hierarchy_composed_in_order),
+        ("country alone not surfaced", test_country_alone_not_surfaced),
+        ("country appended only when other part present", test_country_appended_only_when_other_part_present),
         ("all fields null returns None", test_all_fields_null_returns_none),
         ("empty string fields treated as missing", test_empty_string_fields_treated_as_missing),
         ("duplicate segment not repeated", test_duplicate_segment_not_repeated),
