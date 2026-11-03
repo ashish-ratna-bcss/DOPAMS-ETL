@@ -1545,6 +1545,8 @@ def run_per_fir_ai_backfill(
     accused_budget = CallBudget(limit)
     stopped = False
     paused = False
+    completed = 0
+    progress_every = 25
 
     crime_ids = []
     seen = set()
@@ -1581,6 +1583,15 @@ def run_per_fir_ai_backfill(
         if do_accused and crime_id not in by_crime:
             accused_stats["no_accused"] += 1
 
+    # All of this function's own reads on `conn` (known/facts/by_crime/recency,
+    # above) are done. With parallel>1 `conn` is never touched again -- each
+    # worker opens its own connection -- so left uncommitted it would sit
+    # idle-in-transaction for the entire run (hours to days for a full
+    # backfill), holding back autovacuum's cleanup horizon the whole time.
+    # Nothing was written, so commit vs rollback is equivalent; commit matches
+    # the convention used elsewhere in this module.
+    conn.commit()
+
     print(
         f"[ai-per-fir] start mode={mode} crimes={len(crime_ids)} "
         f"do_drugs={do_drugs} do_accused={do_accused} parallel={parallel} "
@@ -1600,12 +1611,24 @@ def run_per_fir_ai_backfill(
         )
 
     def _handle_result(result):
-        nonlocal paused
+        nonlocal paused, completed
         with stats_lock:
             _merge_stat_block(drug_stats, result["drug"])
             _merge_stat_block(accused_stats, result["accused"])
             if result["paused"]:
                 paused = True
+            completed += 1
+            # Per-crime enrichment has no other log output for the entire
+            # (possibly multi-day) run -- without this, the log file goes
+            # silent right after the startup banner even while work is
+            # genuinely progressing, and a stalled run looks identical to a
+            # healthy one from the log alone.
+            if completed % progress_every == 0 or completed == len(crime_ids):
+                print(
+                    f"[ai-per-fir] progress: {completed}/{len(crime_ids)} crimes "
+                    f"drug_calls={drug_budget.used} accused_calls={accused_budget.used}",
+                    flush=True,
+                )
         return result["db_dead"]
 
     if parallel <= 1:

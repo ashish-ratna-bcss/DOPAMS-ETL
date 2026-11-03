@@ -292,8 +292,10 @@ def test_commit_per_enrichment_type():
             settings=SETTINGS,
         )
 
-    # 2 FIRs × (drug commit + accused commit) = 4
-    assert conn.commits == 4, conn.commits
+    # 1 upfront commit (releases the read-only setup transaction before the
+    # scheduling loop starts -- see run_per_fir_ai_backfill) + 2 FIRs ×
+    # (drug commit + accused commit) = 5
+    assert conn.commits == 5, conn.commits
 
 
 def test_multiple_accused_one_model_call():
