@@ -632,6 +632,42 @@ def _payload_text(payload, key):
     return text or None
 
 
+def _match_locality_patch(combined: str):
+    """(state, district, mandal) from LOCALITY_TO_DISTRICT_MANDAL for a
+    lowercased free-text blob, or None. Exact phrase first, then a
+    spelling-variant fuzzy fallback (see _fuzzy_locality_key).
+
+    Shared by the structured-field path (_candidate) and the free-text
+    path (resolve_address_text) -- confirmed live that relying on only one
+    of them left real records unresolved: a locality name can land in a
+    V2 structured field _candidate doesn't scan (e.g. present_house_no),
+    or the record can be V1, which has no structured fields at all and
+    only ever reaches this list through the composed free text.
+    """
+    hit = None
+    for phrase, mapping in LOCALITY_TO_DISTRICT_MANDAL.items():
+        if phrase in combined:
+            hit = mapping
+            break
+    if hit is None:
+        # Exact phrase not found: try a spelling-variant fuzzy match
+        # against single-word keys only (see _fuzzy_locality_key).
+        # Adjacent words are also joined WITHOUT a space ("dhool"+"pet"
+        # -> "dhoolpet") so a single-word locality split across two
+        # source words ("Dhool Pet") still matches -- joining WITH a
+        # space would instead let a shared second word falsely inflate
+        # similarity against a different first word.
+        words = re.findall(r"[a-z]+", combined)
+        candidates = list(words)
+        candidates += [f"{words[i]}{words[i + 1]}" for i in range(len(words) - 1)]
+        for cand in candidates:
+            key = _fuzzy_locality_key(cand)
+            if key is not None:
+                hit = LOCALITY_TO_DISTRICT_MANDAL[key]
+                break
+    return hit
+
+
 def _candidate(payload, prefix, nationality):
     state = expand_state(_payload_text(payload, f"{prefix}_state_ut"))
     district = expand_district(_payload_text(payload, f"{prefix}_district"))
@@ -642,33 +678,14 @@ def _candidate(payload, prefix, nationality):
     street = norm_token(_payload_text(payload, f"{prefix}_street_road_no"))
     landmark = norm_token(_payload_text(payload, f"{prefix}_landmark_milestone"))
     combined = " ".join(part for part in (
+        _payload_text(payload, f"{prefix}_house_no"),
         _payload_text(payload, f"{prefix}_ward_colony"),
         _payload_text(payload, f"{prefix}_street_road_no"),
         _payload_text(payload, f"{prefix}_locality_village"),
         _payload_text(payload, f"{prefix}_landmark_milestone"),
     ) if part).lower()
     if combined and not (state and district and mandal and country):
-        hit = None
-        for phrase, mapping in LOCALITY_TO_DISTRICT_MANDAL.items():
-            if phrase in combined:
-                hit = mapping
-                break
-        if hit is None:
-            # Exact phrase not found: try a spelling-variant fuzzy match
-            # against single-word keys only (see _fuzzy_locality_key).
-            # Adjacent words are also joined WITHOUT a space ("dhool"+"pet"
-            # -> "dhoolpet") so a single-word locality split across two
-            # source words ("Dhool Pet") still matches -- joining WITH a
-            # space would instead let a shared second word falsely inflate
-            # similarity against a different first word.
-            words = re.findall(r"[a-z]+", combined)
-            candidates = list(words)
-            candidates += [f"{words[i]}{words[i + 1]}" for i in range(len(words) - 1)]
-            for cand in candidates:
-                key = _fuzzy_locality_key(cand)
-                if key is not None:
-                    hit = LOCALITY_TO_DISTRICT_MANDAL[key]
-                    break
+        hit = _match_locality_patch(combined)
         if hit is not None:
             hit_state, hit_district, hit_mandal = hit
             state = state or hit_state
@@ -964,6 +981,7 @@ def resolve_address_text(text, kb: GeoKB):
     district = None
     district_idx = None
     mandal = None
+    from_patch = False
     if state is not None:
         for i, token in enumerate(tokens):
             if i == state_idx:
@@ -992,6 +1010,20 @@ def resolve_address_text(text, kb: GeoKB):
                 break
 
         if district is None:
+            # Still no anchor: try the hand-verified locality patch list
+            # next (see _match_locality_patch) -- this is what lets V1 free
+            # text like "DHOOLPET" or "Mangalhat,Mangalhat" resolve at all,
+            # since V1 has no structured fields and never reaches this list
+            # any other way. Tried before the automated KB mandal-name
+            # anchor below: it is hand-verified against real corroborating
+            # records, so it is the more trustworthy source when both could
+            # apply.
+            patch_hit = _match_locality_patch(str(text).lower())
+            if patch_hit is not None:
+                state, district, mandal = patch_hit
+                from_patch = True
+
+        if district is None:
             # Still no anchor: an exact, KB-wide-unique mandal name is the
             # last resort (e.g. V1 free text naming a mandal like
             # "Saroornagar" or "Jadcherla" with no state/district token at
@@ -1007,7 +1039,9 @@ def resolve_address_text(text, kb: GeoKB):
         return None
 
     path = "kb+text"
-    if mandal:
+    if from_patch:
+        path = "kb+text+patch"
+    elif mandal:
         path = "kb+text+mandal"
     elif state and district:
         for i, token in enumerate(tokens):

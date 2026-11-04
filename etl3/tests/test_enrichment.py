@@ -550,6 +550,45 @@ def test_free_text_state_conflict_blocks_borrowed_district():
     assert agreeing["present"]["district"] == "Nalgonda"
 
 
+def test_locality_patch_reaches_free_text_too():
+    """LOCALITY_TO_DISTRICT_MANDAL must resolve through resolve_address_text
+    (free text), not just the structured-field path (_candidate) -- confirmed
+    live that it did not: V1 records (no structured fields at all) and V2
+    records whose locality name lands in present_house_no (not scanned by
+    _candidate's combined string) stayed unresolved even after Dhoolpet/
+    Mangalhat/Mangar Basthi were verified and added, because
+    resolve_address_text never consulted the list at all. 26 real
+    "nationality=India, state unresolved" records were found with exactly
+    this shape (plain text like "DHOOLPET" or "Mangalhat ,Mangalhat").
+    """
+    kb = GeoKB()
+    kb.add_reference("Telangana", "Hyderabad", "Asif Nagar", None)
+    kb.add_reference("Andhra Pradesh", "Visakhapatnam", None, None)
+    kb.add_country("India")
+    assert "dhoolpet" in LOCALITY_TO_DISTRICT_MANDAL
+
+    for text in ("DHOOLPET", "Mangalhat", "Mangalhat ,Mangalhat",
+                 "Balramgalli,Near Baba Balakdass  Mutt,Dhoolpet,Mangalhat"):
+        found = resolve_address_text(text, kb)
+        assert found is not None, text
+        assert found["state"] == "Telangana", text
+        assert found["district"] == "Hyderabad", text
+        assert found["path"] == "kb+text+patch", text
+
+    # An explicit, different state token in the same text still wins --
+    # the patch list is only ever tried when no state token was found.
+    mismatched = resolve_address_text(
+        "H.No.13-2-269,Baba Balakdas Mutt,Upper Dhoolpet, Mangalhat,Andhra  Pradesh", kb,
+    )
+    assert mismatched["state"] == "Andhra Pradesh"
+    assert mismatched["district"] is None
+
+    # house_no is now scanned by the structured path too.
+    cand = _candidate({"present_house_no": "DHOOLPET"}, "present", None)
+    assert cand["state"] == "Telangana"
+    assert cand["district"] == "Hyderabad"
+
+
 def test_malkajgiri_district_alias():
     """"Medchal Malkajgiri" district (2016 Telangana reorganization) is
     near-universally shortened to "Malkajgiri" in free-text addresses --
@@ -896,6 +935,7 @@ def main():
     check("projection", test_projection_does_not_invent)
     check("address knowledge base", test_address_kb_confirms_known_geography_only)
     check("free-text state conflict blocks borrowed district", test_free_text_state_conflict_blocks_borrowed_district)
+    check("locality patch reaches free text too", test_locality_patch_reaches_free_text_too)
     check("malkajgiri district alias", test_malkajgiri_district_alias)
     check("locality fuzzy spelling variants", test_locality_fuzzy_spelling_variants)
     check("resolve address text: mandal-only anchor", test_resolve_address_text_mandal_only_anchor)
