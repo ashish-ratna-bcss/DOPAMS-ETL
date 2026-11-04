@@ -101,6 +101,12 @@ class DrugKB:
                 (needle, needle, needle, SIMILARITY_THRESHOLD),
             )
             row = cur.fetchone()
+        # This conn is the one shared main connection, loaded once and reused
+        # by every parallel worker's drug-name resolution for the entire
+        # (possibly multi-day) run -- nothing else ever touches it again, so
+        # leaving this SELECT's implicit transaction open would strand it
+        # idle-in-transaction until the next fuzzy_match call, indefinitely.
+        self.conn.commit()
         return row[0] if row else None
 
 
