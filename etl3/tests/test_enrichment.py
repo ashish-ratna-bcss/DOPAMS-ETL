@@ -17,6 +17,9 @@ from etl3.enrichment.project import (
 )
 from etl3.enrichment.address import (
     GeoKB,
+    LOCALITY_TO_DISTRICT_MANDAL,
+    _candidate,
+    _fuzzy_locality_key,
     _fuzzy_mandal,
     expand_state,
     resolve_address_text,
@@ -511,6 +514,171 @@ def test_address_kb_confirms_known_geography_only():
     assert pure["domicile_method"] == "deterministic"
 
 
+def test_free_text_state_conflict_blocks_borrowed_district():
+    """A free-text mandal-only match must never override district/mandal
+    when its OWN state disagrees with an already-confirmed structured
+    state. Confirmed live: a real record with structured state=Andhra
+    Pradesh (district unresolved -- clerk spelled it "VISAKHAPATANAM",
+    which didn't match the KB) had free text "Chinthapally" with no state
+    or district token of its own. The mandal-only anchor fallback found a
+    real, unique "Chinthapally" mandal -- but in Nalgonda, Telangana, an
+    entirely unrelated state. Before this guard, the merge would have
+    produced the geographically impossible pair (Andhra Pradesh, Nalgonda).
+    """
+    kb = GeoKB()
+    kb.add_reference("Andhra Pradesh", "Visakhapatnam", None, None)
+    kb.add_reference("Telangana", "Nalgonda", "Chinthapally", None)
+    kb.add_country("India")
+
+    found = resolve_person_address({
+        "present_state_ut": "ANDHRA PRADESH",
+        "present_district": "VISAKHAPATANAM",  # clerk's spelling: no exact/fuzzy KB match
+        "present_country": "India",
+        "present_address_text": "Chinthapally",
+    }, kb)
+    assert found["present"]["state"] == "Andhra Pradesh"
+    assert found["present"]["district"] is None
+
+    # Sanity: when the structured state agrees (or is absent), the mandal
+    # anchor still works normally.
+    agreeing = resolve_person_address({
+        "present_state_ut": "TELANGANA",
+        "present_country": "India",
+        "present_address_text": "Chinthapally",
+    }, kb)
+    assert agreeing["present"]["state"] == "Telangana"
+    assert agreeing["present"]["district"] == "Nalgonda"
+
+
+def test_malkajgiri_district_alias():
+    """"Medchal Malkajgiri" district (2016 Telangana reorganization) is
+    near-universally shortened to "Malkajgiri" in free-text addresses --
+    confirmed against 555 real V1 records using the short form with no
+    "Medchal" anywhere in the text. DISTRICT_ALIASES maps it so the
+    state-anchored district search in resolve_address_text can still find
+    it; this must never fire ahead of an already-present exact district
+    match like "Hyderabad" earlier in the same text (confirmed live: 18
+    V1 records mention both, and "Hyderabad" -- appearing earlier -- always
+    wins, treating "Malkajgiri" there as the Marredpally-area village
+    instead, which this alias must not disturb).
+    """
+    kb = GeoKB()
+    kb.add_reference("Telangana", "Medchal Malkajgiri", "Medipally", None)
+    kb.add_reference("Telangana", "Hyderabad", "Marredpally", "Malkajgiri")
+    kb.add_country("India")
+
+    only_malkajgiri = resolve_address_text(
+        "h no-8-30,Balaji Hills colony,Boduppal,Malkajgiri,Telangana", kb,
+    )
+    assert only_malkajgiri["state"] == "Telangana"
+    assert only_malkajgiri["district"] == "Medchal Malkajgiri"
+
+    mixed_with_hyderabad = resolve_address_text("hyderabad,Malkajgiri,Telangana", kb)
+    assert mixed_with_hyderabad["district"] == "Hyderabad"
+    assert mixed_with_hyderabad["mandal"] == "Marredpally"
+
+
+def test_locality_fuzzy_spelling_variants():
+    """LOCALITY_TO_DISTRICT_MANDAL spelling-variant matching: single-word
+    typos of a known locality resolve via edit distance even when the exact
+    phrase isn't present. Confirmed against real CCTNS data: "Doolpet",
+    "Dholpet", "Dhulpet", "Doolipet" and "Dhool Pet" are all real spellings
+    of "Dhoolpet" seen in source records.
+    """
+    assert "dhoolpet" in LOCALITY_TO_DISTRICT_MANDAL
+    for variant in ("Doolpet", "Dholpet", "Dhulpet", "Doolipet", "Dhool Pet"):
+        cand = _candidate({"present_ward_colony": variant}, "present", None)
+        assert cand["state"] == "Telangana", variant
+        assert cand["district"] == "Hyderabad", variant
+        assert cand["mandal"] == "Asif Nagar", variant
+
+    # Real unrelated Hyderabad localities (including ones sharing the
+    # "-pet" suffix with Dhoolpet) must never be fuzzy-matched.
+    for unrelated in ("Moosapet", "Shaikpet", "Golconda", "Nampally", "Kukatpally"):
+        cand = _candidate({"present_ward_colony": unrelated}, "present", None)
+        assert cand["district"] is None, unrelated
+
+    # Regression guard: a candidate sharing only the SECOND word with a
+    # multi-word KEY must never match that key via fuzzy logic, even if the
+    # shared word drags the whole-string similarity above SIM_LOCALITY --
+    # confirmed live that "namger basti" scores 0.75 against the multi-word
+    # key "mangar basti" (edit distance 3, i.e. HALF of "namger"'s 6 letters
+    # differ from "mangar") purely because both share the word "basti".
+    # Multi-word keys are therefore never offered as fuzzy-match targets
+    # (_fuzzy_locality_key skips any key containing a space) -- only the
+    # exact-phrase check elsewhere may match them.
+    assert any(" " in key for key in LOCALITY_TO_DISTRICT_MANDAL)  # guard is non-vacuous
+    cand = _candidate({"present_ward_colony": "NAMGER BASTI HABEEB NAGAR"}, "present", None)
+    assert cand["district"] is None
+
+    # A single-word key's fuzzy match is unaffected by this guard.
+    assert _fuzzy_locality_key("doolpet") == "dhoolpet"
+
+
+def test_resolve_address_text_mandal_only_anchor():
+    """Free text naming only a mandal, with no state or district token at
+    all, still resolves when that mandal name is unique to one district
+    KB-wide. Confirmed against live V1 data: 40 non-blank "nationality
+    India, state unresolved" records name a real mandal (e.g. Saroornagar,
+    Jadcherla, Asifabad) with no state/district token anywhere in the text --
+    the pre-existing "no state token" fallback only tried district-level
+    matching, so these fell through and were marked non_recoverable even
+    though the mandal is already in kb.geo_reference.
+    """
+    kb = GeoKB()
+    kb.add_reference("Telangana", "Ranga Reddy", "Saroornagar", None)
+    hit = resolve_address_text("Sri Ram Nagar colony, Karmanghat, ,Saroornagar", kb)
+    assert hit["state"] == "Telangana"
+    assert hit["district"] == "Ranga Reddy"
+    assert hit["mandal"] == "Saroornagar"
+    assert hit["country"] == "India"
+    assert hit["path"] == "kb+text+mandal"
+
+    v1 = person_row("V1", "V1-SAROORNAGAR", {
+        "full_name": "Test Person",
+        "nationality": "Indian",
+        "permanent_address_text": "Sri Ram Nagar colony, Karmanghat, ,Saroornagar",
+        "present_address_text": "Sri Ram Nagar colony, Karmanghat, ,Saroornagar",
+    }, geo_kb=kb)
+    assert v1["domicile_classification"] == "native state"
+    assert v1["domicile_method"] == "deterministic"
+
+    # Ambiguity guard: the same mandal name in a second, different district
+    # anywhere in the KB must never be guessed between -- no anchor wins.
+    kb.add_reference("Karnataka", "Some Other District", "Saroornagar", None)
+    assert resolve_address_text("Plot 4, Saroornagar", kb) is None
+
+    # A real district token still resolves via the existing path (this new
+    # fallback only ever runs when both the state-token and district-anywhere
+    # searches already failed; existing precedence is unaffected).
+    kb2 = GeoKB()
+    kb2.add_reference("Telangana", "Mahabubnagar", "Jadcherla", None)
+    kb2.add_country("India")
+    via_district = resolve_address_text("Mahabubnagar,Telangana", kb2)
+    assert via_district["state"] == "Telangana"
+    assert via_district["district"] == "Mahabubnagar"
+    assert via_district["path"] == "kb+text"
+
+    # Regression guard: "Moosapet" is a real, unique mandal name in
+    # Mahabubnagar (confirmed in kb.geo_reference), but is ALSO the name of
+    # a well-known village under Kukatpally/Medchal Malkajgiri -- live data
+    # showed 83% of real clerk-filled records meant the latter. A mandal
+    # name match must never be trusted when the same token also names a
+    # village in a *different* district -- silently guessing which one the
+    # text means would be worse than staying non_recoverable.
+    kb3 = GeoKB()
+    kb3.add_reference("Telangana", "Mahabubnagar", "Moosapet", "Nandipet")
+    kb3.add_reference("Telangana", "Medchal Malkajgiri", "Kukatpally", "Moosapet")
+    assert kb3.unambiguous_mandal("Moosapet") is None
+    assert resolve_address_text("Sevalal Nagar, Moosapet", kb3) is None
+    # Same village name confirmed again under the SAME district as the
+    # mandal (e.g. a mandal headquarters village sharing its mandal's name)
+    # is not a cross-district collision and stays trustworthy.
+    kb4 = GeoKB()
+    kb4.add_reference("Telangana", "Mahabubnagar", "Moosapet", "Moosapet")
+    assert kb4.unambiguous_mandal("Moosapet") == ("Telangana", "Mahabubnagar", "Moosapet")
+
+
 def test_fuzzy_mandal_tie_break_is_deterministic():
     # "Mahabubnagar Rural" and "Mahabubnagar Urban" score identically
     # (confirmed: 0.6842...) against the bare token "Mahabubnagar". Before
@@ -727,6 +895,10 @@ def main():
     check("accused and arrest", test_accused_and_arrest)
     check("projection", test_projection_does_not_invent)
     check("address knowledge base", test_address_kb_confirms_known_geography_only)
+    check("free-text state conflict blocks borrowed district", test_free_text_state_conflict_blocks_borrowed_district)
+    check("malkajgiri district alias", test_malkajgiri_district_alias)
+    check("locality fuzzy spelling variants", test_locality_fuzzy_spelling_variants)
+    check("resolve address text: mandal-only anchor", test_resolve_address_text_mandal_only_anchor)
     check("name cleanup", test_name_cleanup_for_v1_and_v2)
     check("duplicate name collapse: confirmed real records", test_collapse_exact_repetition_confirmed_real_records)
     check("duplicate name collapse: legitimate names untouched", test_collapse_exact_repetition_never_touches_legitimate_names)

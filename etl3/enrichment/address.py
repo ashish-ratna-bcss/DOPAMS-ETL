@@ -81,6 +81,15 @@ DISTRICT_ALIASES = {
     "mumbai city": "Mumbai Suburban",
     "bombay": "Mumbai Suburban",
     "bom": "Mumbai Suburban",
+    # "Medchal Malkajgiri" district (carved out in the 2016 Telangana
+    # reorganization) is near-universally shortened to just "Malkajgiri" in
+    # source addresses -- confirmed against 555 V1 records using the short
+    # form with no "Medchal" anywhere in the text, consistently in the
+    # trailing district position ("...,Malkajgiri,Telangana"). Only reached
+    # when no other token already matched a district first (state-anchored
+    # district search still finds "Hyderabad" etc. ahead of this one when
+    # both appear), so this never overrides an exact district match.
+    "malkajgiri": "Medchal Malkajgiri",
     "mum": "Mumbai Suburban",
 }
 
@@ -283,7 +292,90 @@ LOCALITY_TO_DISTRICT_MANDAL = {
     "yedapally": ("Telangana", "Nizamabad", "Yedapally"),
     "bhainsa": ("Telangana", "Nirmal", "Bhainsa"),
     "rayanch enclave": ("Telangana", "Medchal Malkajgiri", "Medipally"),
+    # Confirmed against 110 other CCTNS person records that independently
+    # filled district/state for this colony (none in kb.geo_reference's
+    # census village list for Hyderabad/Asif Nagar).
+    "dhoolpet": ("Telangana", "Hyderabad", "Asif Nagar"),
+    # Confirmed against 298 corroborating records (100% Hyderabad/Telangana,
+    # 82% specifically Asif Nagar); not in kb.geo_reference under any name.
+    "mangalhat": ("Telangana", "Hyderabad", "Asif Nagar"),
+    # Confirmed against 29 corroborating records (100% Hyderabad/Telangana,
+    # 90% of named-mandal claims say Nampally); not in kb.geo_reference.
+    # Spelling varies across source records (basthi/basti, spaced/unspaced);
+    # matching is literal substring, so each variant is listed separately
+    # rather than relying on one to catch the others.
+    "mangar basthi": ("Telangana", "Hyderabad", "Nampally"),
+    "mangarbasthi": ("Telangana", "Hyderabad", "Nampally"),
+    "mangarbasti": ("Telangana", "Hyderabad", "Nampally"),
+    "mangar basti": ("Telangana", "Hyderabad", "Nampally"),
+    # "dulpet" is a real spelling of Dhoolpet seen in source data (e.g.
+    # "Mangalhat Dulpet"), but at edit-distance ratio 0.625 against
+    # "dhoolpet" it falls below SIM_LOCALITY (0.75) -- the fuzzy matcher
+    # below deliberately won't reach it (too many unrelated short words
+    # also score ~0.5), so it is listed explicitly instead.
+    "dulpet": ("Telangana", "Hyderabad", "Asif Nagar"),
 }
+
+# Spelling-variant matching for LOCALITY_TO_DISTRICT_MANDAL, for names typed
+# differently across source records (doolpet/dholpet/dhulpet/doolipet are
+# all real CCTNS spellings of "Dhoolpet"). Edit-distance ratio, not trigram
+# similarity: trigram scores are too noisy for short near-identical spellings
+# (confirmed live: "dholpet" scores 0.70 but "dhulpet" scores only 0.42
+# against "dhoolpet" by trigram, even though both are single/double-letter
+# edits away). SIM_LOCALITY=0.75 and MIN_LOCALITY_FUZZY_LEN=6 were chosen
+# against real data: every confirmed Dhoolpet spelling except "dulpet"
+# scores >=0.75, while the closest unrelated Hyderabad locality name
+# ("Moosapet"/"Shaikpet", sharing the "-pet" suffix) scores only 0.50 --
+# a clean margin. "dulpet" itself is listed explicitly above instead of
+# loosening this threshold to reach it.
+SIM_LOCALITY = 0.75
+MIN_LOCALITY_FUZZY_LEN = 6
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance. Small inputs only (locality-name tokens)."""
+    a, b = a.lower(), b.lower()
+    if a == b:
+        return 0
+    m, n = len(a), len(b)
+    prev = list(range(n + 1))
+    for i in range(1, m + 1):
+        curr = [i] + [0] * n
+        for j in range(1, n + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+        prev = curr
+    return prev[n]
+
+
+def _fuzzy_locality_key(token: str, floor: float = SIM_LOCALITY):
+    """Best LOCALITY_TO_DISTRICT_MANDAL key within edit-distance ratio
+    ``floor`` of ``token``, or None. Tokens shorter than
+    MIN_LOCALITY_FUZZY_LEN are never fuzzy-matched (too easy to collide).
+
+    Multi-word keys (e.g. "mangar basti") are never fuzzy-matched, only
+    exact-matched elsewhere: confirmed live that a candidate sharing one
+    word with a multi-word key can score above SIM_LOCALITY even when the
+    *other* word is quite different -- "namger basti" scores 0.75 against
+    "mangar basti" (edit distance 3 over a 12-char string) purely because
+    both share the word "basti", even though "namger" vs "mangar" alone is
+    a 3-edit difference on a 6-letter word (half the characters).
+    """
+    if not token or len(token) < MIN_LOCALITY_FUZZY_LEN:
+        return None
+    best_key = None
+    best_ratio = 0.0
+    for key in LOCALITY_TO_DISTRICT_MANDAL:
+        if " " in key or len(key) < MIN_LOCALITY_FUZZY_LEN:
+            continue
+        distance = _edit_distance(token, key)
+        ratio = 1 - distance / max(len(token), len(key))
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_key = key
+    if best_key is not None and best_ratio >= floor:
+        return best_key
+    return None
 
 _WS = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s\-&/.]", re.UNICODE)
@@ -331,6 +423,20 @@ class GeoKB:
         self.districts_by_state = {}
         self.mandals_by_district = {}
         self.villages_by_district = {}
+        # mandal name (lower) -> {(state, district), ...}. A key with more
+        # than one pair is a real same-named mandal in >1 district (confirmed
+        # against live data: ~3% of mandal names) and is never used as an
+        # anchor -- only a name unique to one district is trustworthy enough
+        # to infer state/district from alone, with no other anchor in the text.
+        self._mandal_name_pairs = {}
+        # village name (lower) -> {(state, district), ...}, independent of
+        # mandal uniqueness. Confirmed against live data: "Moosapet" is a
+        # real, unique mandal name in Mahabubnagar, but is ALSO the name of a
+        # well-known village under Kukatpally/Medchal Malkajgiri -- 83% of
+        # real clerk-filled records mentioning it meant the latter. A mandal
+        # name match is only trusted when it does not also collide with a
+        # village of the same name in a *different* district.
+        self._village_name_pairs = {}
 
     @property
     def loaded(self) -> bool:
@@ -351,11 +457,13 @@ class GeoKB:
             mandal = mandal.strip()
             self.mandal_canon.setdefault((state.lower(), district.lower(), mandal.lower()), mandal)
             self.mandals_by_district.setdefault(key, set()).add(mandal)
+            self._mandal_name_pairs.setdefault(mandal.lower(), set()).add((state, district))
         if village and village.strip() and mandal and str(mandal).strip():
             village = village.strip()
             mandal = mandal.strip()
             self.village_to_mandal.setdefault((state.lower(), district.lower(), village.lower()), mandal)
             self.villages_by_district.setdefault(key, set()).add(village)
+            self._village_name_pairs.setdefault(village.lower(), set()).add((state, district))
 
     def add_country(self, country, state=None):
         if not country:
@@ -384,6 +492,28 @@ class GeoKB:
         if not state or not district or not village:
             return None
         return self.village_to_mandal.get((state.lower(), district.lower(), village.lower()))
+
+    def unambiguous_mandal(self, token):
+        """(state, district, mandal) when ``token`` exactly names a mandal that
+        exists in exactly one (state, district) pair KB-wide, AND does not
+        also name a village in any *other* district, else None.
+
+        Exact match only, deliberately no fuzzy matching here: this is used
+        with no other anchor in the text (no state or district token found),
+        so a wrong guess from a loose match would be silent and unverifiable.
+        """
+        if not token:
+            return None
+        key = token.lower()
+        pairs = self._mandal_name_pairs.get(key)
+        if not pairs or len(pairs) != 1:
+            return None
+        state, district = next(iter(pairs))
+        village_pairs = self._village_name_pairs.get(key)
+        if village_pairs and village_pairs - {(state, district)}:
+            return None
+        mandal = self.mandal_canon.get((state.lower(), district.lower(), key))
+        return (state, district, mandal)
 
     def canon_country(self, name):
         if not name:
@@ -518,12 +648,32 @@ def _candidate(payload, prefix, nationality):
         _payload_text(payload, f"{prefix}_landmark_milestone"),
     ) if part).lower()
     if combined and not (state and district and mandal and country):
-        for phrase, (hit_state, hit_district, hit_mandal) in LOCALITY_TO_DISTRICT_MANDAL.items():
+        hit = None
+        for phrase, mapping in LOCALITY_TO_DISTRICT_MANDAL.items():
             if phrase in combined:
-                state = state or hit_state
-                district = district or hit_district
-                mandal = mandal or hit_mandal
+                hit = mapping
                 break
+        if hit is None:
+            # Exact phrase not found: try a spelling-variant fuzzy match
+            # against single-word keys only (see _fuzzy_locality_key).
+            # Adjacent words are also joined WITHOUT a space ("dhool"+"pet"
+            # -> "dhoolpet") so a single-word locality split across two
+            # source words ("Dhool Pet") still matches -- joining WITH a
+            # space would instead let a shared second word falsely inflate
+            # similarity against a different first word.
+            words = re.findall(r"[a-z]+", combined)
+            candidates = list(words)
+            candidates += [f"{words[i]}{words[i + 1]}" for i in range(len(words) - 1)]
+            for cand in candidates:
+                key = _fuzzy_locality_key(cand)
+                if key is not None:
+                    hit = LOCALITY_TO_DISTRICT_MANDAL[key]
+                    break
+        if hit is not None:
+            hit_state, hit_district, hit_mandal = hit
+            state = state or hit_state
+            district = district or hit_district
+            mandal = mandal or hit_mandal
     return {
         "state": state,
         "district": district,
@@ -813,6 +963,7 @@ def resolve_address_text(text, kb: GeoKB):
 
     district = None
     district_idx = None
+    mandal = None
     if state is not None:
         for i, token in enumerate(tokens):
             if i == state_idx:
@@ -840,12 +991,25 @@ def resolve_address_text(text, kb: GeoKB):
                 district_idx = i
                 break
 
+        if district is None:
+            # Still no anchor: an exact, KB-wide-unique mandal name is the
+            # last resort (e.g. V1 free text naming a mandal like
+            # "Saroornagar" or "Jadcherla" with no state/district token at
+            # all). Exact match only -- see GeoKB.unambiguous_mandal.
+            for i, token in enumerate(tokens):
+                hit = kb.unambiguous_mandal(token)
+                if hit is not None:
+                    state, district, mandal = hit
+                    district_idx = i
+                    break
+
     if state is None and district is None:
         return None
 
-    mandal = None
     path = "kb+text"
-    if state and district:
+    if mandal:
+        path = "kb+text+mandal"
+    elif state and district:
         for i, token in enumerate(tokens):
             if i in (state_idx, district_idx):
                 continue
@@ -900,7 +1064,22 @@ def _merge_address_hits(kb: GeoKB, structured: dict, text_hit: dict | None):
     else:
         weak_country = None
 
-    if text_hit:
+    # A free-text match whose OWN state disagrees with an already-confirmed
+    # structured state is not corroborating that address -- it independently
+    # landed somewhere else entirely, and its district/mandal must not be
+    # borrowed. Confirmed live: a record with structured state=Andhra
+    # Pradesh (district unresolved -- the clerk's "VISAKHAPATANAM" spelling
+    # didn't match the KB) had free text "Chinthapally" with no state/
+    # district token of its own; the mandal-only anchor fallback correctly
+    # found a real, unique "Chinthapally" mandal -- but in Nalgonda,
+    # Telangana, an unrelated state. Merging its district alone would have
+    # produced the geographically impossible pair (Andhra Pradesh,
+    # Nalgonda).
+    state_conflict = bool(
+        out.get("state") and text_hit and text_hit.get("state")
+        and out["state"].lower() != text_hit["state"].lower()
+    )
+    if text_hit and not state_conflict:
         for key in ("state", "district", "mandal"):
             if not out.get(key) and text_hit.get(key):
                 out[key] = text_hit[key]
