@@ -589,6 +589,47 @@ def test_locality_patch_reaches_free_text_too():
     assert cand["district"] == "Hyderabad"
 
 
+def test_state_word_isolation_and_short_word_guard():
+    """resolve_address_text isolates a STATE name buried inside a longer
+    token (a "District"/"State" qualifier, a parenthetical already
+    stripped by norm_token) by also trying that token's first and last
+    word -- but never a word under 4 letters, which is the exact length
+    of every STATE_ABBREV key. Confirmed live: without that floor, "HP
+    Road, Moosapet" resolved to state Himachal Pradesh purely because the
+    isolated word "HP" matched STATE_ABBREV's "hp" -- an unrelated local
+    road-name abbreviation, not the state.
+
+    A matching DISTRICT-only last-word fallback (so "R/o Nagpur" could
+    resolve "Nagpur") was tried and withdrawn, not merely length-guarded:
+    confirmed live that it resolved "Seetaphal Mandi, Secunderabad" and
+    "Miralam Mandi, Hyderabad" -- both real Hyderabad localities -- to
+    Himachal Pradesh, because "Mandi" means "market" in common Indian
+    usage and is ALSO a real HP district; 6 of 12 live hits were exactly
+    this false positive. Districts are nowhere near as distinctive a set
+    as states, so this fallback stays gone.
+    """
+    kb = GeoKB()
+    kb.add_reference("Odisha", "Khordha", None, None)
+    kb.add_reference("Jharkhand", "Giridih", None, None)
+    kb.add_reference("Maharashtra", "Nagpur", None, None)
+    kb.add_reference("Himachal Pradesh", "Mandi", None, None)
+    kb.add_country("India")
+
+    assert resolve_address_text("Odisha State", kb)["state"] == "Odisha"
+    assert resolve_address_text("Tambagudiyo, Giridih District Jharkhand", kb)["state"] == "Jharkhand"
+
+    # The confirmed regression itself: an unrelated 2-letter road
+    # abbreviation must never be read as a state via STATE_ABBREV.
+    assert resolve_address_text("5-58/1, HP Road, Moosapet", kb) is None
+
+    # The withdrawn district fallback stays withdrawn: a bare city name
+    # with no state token resolves nothing at all (better than guessing)...
+    assert resolve_address_text("R/o Nagpur", kb) is None
+    # ...and a locally-common word that happens to also be a district name
+    # elsewhere is never read as that district.
+    assert resolve_address_text("Seetaphal Mandi, Secunderabad", kb) is None
+
+
 def test_malkajgiri_district_alias():
     """"Medchal Malkajgiri" district (2016 Telangana reorganization) is
     near-universally shortened to "Malkajgiri" in free-text addresses --
@@ -636,6 +677,14 @@ def test_locality_fuzzy_spelling_variants():
     for unrelated in ("Moosapet", "Shaikpet", "Golconda", "Nampally", "Kukatpally"):
         cand = _candidate({"present_ward_colony": unrelated}, "present", None)
         assert cand["district"] is None, unrelated
+
+    # Regression guard: fuzzy matching is an explicit allowlist, not every
+    # single-word key, because the dict keeps growing -- confirmed live
+    # that adding "kompally" made "Nampally" (above: a real, distinct
+    # Hyderabad locality, not even in this dict) score exactly 0.75
+    # against it, the same class of same-suffix collision as Moosapet.
+    assert "kompally" in LOCALITY_TO_DISTRICT_MANDAL
+    assert _fuzzy_locality_key("nampally") is None
 
     # Regression guard: a candidate sharing only the SECOND word with a
     # multi-word KEY must never match that key via fuzzy logic, even if the
@@ -936,6 +985,7 @@ def main():
     check("address knowledge base", test_address_kb_confirms_known_geography_only)
     check("free-text state conflict blocks borrowed district", test_free_text_state_conflict_blocks_borrowed_district)
     check("locality patch reaches free text too", test_locality_patch_reaches_free_text_too)
+    check("state word isolation and short-word guard", test_state_word_isolation_and_short_word_guard)
     check("malkajgiri district alias", test_malkajgiri_district_alias)
     check("locality fuzzy spelling variants", test_locality_fuzzy_spelling_variants)
     check("resolve address text: mandal-only anchor", test_resolve_address_text_mandal_only_anchor)

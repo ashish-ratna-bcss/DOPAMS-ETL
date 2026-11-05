@@ -40,6 +40,9 @@ STATE_ABBREV = {
 # Historical CCTNS spellings. Values are the canonical names INDIAN_STATES uses.
 STATE_ALIASES = {
     "orissa": "Odisha",
+    # "Odissa" (phonetic misspelling) scores only 0.4 trigram similarity
+    # against "Odisha" -- too far below SIM_STATE (0.80) to ever fuzzy-match.
+    "odissa": "Odisha",
     "pondicherry": "Puducherry",
     "pondicheri": "Puducherry",
     "uttaranchal": "Uttarakhand",
@@ -91,6 +94,25 @@ DISTRICT_ALIASES = {
     # both appear), so this never overrides an exact district match.
     "malkajgiri": "Medchal Malkajgiri",
     "mum": "Mumbai Suburban",
+    # "Vishakapatnam" (transposed spelling: -sha- vs official -kha-) scores
+    # only 0.47 trigram similarity against "Visakhapatnam" -- too far below
+    # SIM_DISTRICT (0.75) to ever fuzzy-match.
+    "vishakapatnam": "Visakhapatnam",
+    # Karnataka's 2023 reorganization split the single "Bangalore"/
+    # "Bengaluru" district into Bengaluru Urban/Rural/South -- the bare
+    # historical name no longer exact- or fuzzy-matches any of them
+    # (confirmed: "Bengaluru" scores only 0.14 against "Bangalore Urban").
+    # Urban is the sensible default for a bare city reference with no
+    # further qualifier, same convention as "mumbai" -> "Mumbai Suburban"
+    # above.
+    "bangalore": "Bengaluru Urban",
+    "bengaluru": "Bengaluru Urban",
+    "banagalore": "Bengaluru Urban",  # confirmed real CCTNS typo
+    # Andhra Pradesh's 2022 reorganization renamed Krishna district's
+    # successor "NTR" after its new headquarters city -- "Vijayawada"
+    # itself was never a district name, only several mandals (Central/
+    # East/North/Rural/West), all of which fall under NTR.
+    "vijayawada": "NTR",
 }
 
 # Nationality / demonym words often stuffed into the accused name field.
@@ -314,6 +336,36 @@ LOCALITY_TO_DISTRICT_MANDAL = {
     # below deliberately won't reach it (too many unrelated short words
     # also score ~0.5), so it is listed explicitly instead.
     "dulpet": ("Telangana", "Hyderabad", "Asif Nagar"),
+    # The following are all confirmed against >=90% corroboration from
+    # independently clerk-filled CCTNS records (district+state agreement;
+    # mandal included only where a clear single leader also emerged).
+    # Found NOT to meet this bar, and deliberately left unresolved rather
+    # than guessed: Madhapur (81% Ranga Reddy / 12% Hyderabad -- genuine
+    # Ranga Reddy/Hyderabad border locality), Borabanda (88% Hyderabad),
+    # Ecil (53% Medchal Malkajgiri / 37% Hyderabad -- straddles the
+    # district border), Lalapet (83% Hyderabad), Nizampet (78% Medchal
+    # Malkajgiri -- kb.geo_reference itself has two separate legitimate
+    # "Nizampet" mandals in different districts), Chintal (52%, split
+    # across 5 different districts -- too generic a name), Nallagandla
+    # (86% Ranga Reddy).
+    "chandrayangutta": ("Telangana", "Hyderabad", "Bandlaguda"),
+    "banjara hills": ("Telangana", "Hyderabad", "Khairatabad"),
+    "banjarahills": ("Telangana", "Hyderabad", "Khairatabad"),
+    "yousufguda": ("Telangana", "Hyderabad", "Khairatabad"),
+    "malakpet": ("Telangana", "Hyderabad", "Amberpet"),
+    "nanakramguda": ("Telangana", "Ranga Reddy", "Serilingampally"),
+    "falaknuma": ("Telangana", "Hyderabad", "Bandlaguda"),
+    "gachibowli": ("Telangana", "Ranga Reddy", "Serilingampally"),
+    "kompally": ("Telangana", "Medchal Malkajgiri", "Gandimaisamma Dundigal"),
+    "kavadiguda": ("Telangana", "Hyderabad", "Secunderabad"),
+    "dabeerpura": ("Telangana", "Hyderabad", "Charminar"),
+    "kokapet": ("Telangana", "Ranga Reddy", "Gandipet"),
+    # Thinnest evidence of this batch: only 6 corroborating records, but
+    # unanimous (100%, Kondapak mandal) with no conflicting signal at all.
+    "duddeda": ("Telangana", "Siddipet", "Kondapak"),
+    # Mandal left blank: Nampally (23) vs Asifnagar (15) corroboration is
+    # too close to call, unlike this batch's other entries.
+    "mallepally": ("Telangana", "Hyderabad", None),
 }
 
 # Spelling-variant matching for LOCALITY_TO_DISTRICT_MANDAL, for names typed
@@ -330,6 +382,16 @@ LOCALITY_TO_DISTRICT_MANDAL = {
 # loosening this threshold to reach it.
 SIM_LOCALITY = 0.75
 MIN_LOCALITY_FUZZY_LEN = 6
+
+# Keys eligible for fuzzy spelling-variant matching -- an explicit allowlist,
+# not "every single-word key", because the dict keeps growing and a new
+# entry can accidentally become a fuzzy target for an unrelated existing
+# locality's typo. Confirmed live: adding "kompally" made "Nampally" (a
+# real, distinct Hyderabad locality, not even in this dict) score exactly
+# 0.75 against it -- same class of risk as Moosapet/Shaikpet, just from a
+# different entry. Only list a key here when real spelling variants of it
+# have actually been found in source data.
+_FUZZY_LOCALITY_TARGETS = {"dhoolpet"}
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -365,7 +427,9 @@ def _fuzzy_locality_key(token: str, floor: float = SIM_LOCALITY):
         return None
     best_key = None
     best_ratio = 0.0
-    for key in LOCALITY_TO_DISTRICT_MANDAL:
+    for key in _FUZZY_LOCALITY_TARGETS:
+        if key not in LOCALITY_TO_DISTRICT_MANDAL:
+            continue
         if " " in key or len(key) < MIN_LOCALITY_FUZZY_LEN:
             continue
         distance = _edit_distance(token, key)
@@ -948,6 +1012,32 @@ def resolve_nationality_label(raw, kb: GeoKB | None = None):
     return recognized_country(raw, kb)
 
 
+def _state_word_variants(token):
+    """``token``, then its first and last word (each >= 4 letters), deduped,
+    in that order.
+
+    Lets a real state name buried inside a longer phrase still match --
+    "Odisha State" names it as the first word, "Giridih District
+    Jharkhand" and "Nerul (V) Maharashtra" (parens already stripped by
+    norm_token) name it as the last. The length-4 floor on the isolated
+    word (the whole token itself has no such floor) is deliberate:
+    confirmed live that without it, "HP Road, Moosapet" resolved to state
+    Himachal Pradesh -- STATE_ABBREV's "hp" matched the word "HP" in
+    isolation, an unrelated local road-name abbreviation, not the state.
+    Every STATE_ABBREV key is exactly 2 letters, so a short isolated word
+    is exactly the collision STATE_ABBREV is built to match on; a real
+    state's full name is never that short.
+    """
+    words = token.split()
+    variants = [token]
+    if len(words) > 1:
+        if len(words[0]) >= 4 and words[0] not in variants:
+            variants.append(words[0])
+        if len(words[-1]) >= 4 and words[-1] not in variants:
+            variants.append(words[-1])
+    return variants
+
+
 def resolve_address_text(text, kb: GeoKB):
     """Confirm state/district/mandal from free-text such as ``Adilabad,Telangana``.
 
@@ -969,10 +1059,14 @@ def resolve_address_text(text, kb: GeoKB):
     state = None
     state_idx = None
     for i in range(len(tokens) - 1, -1, -1):
-        expanded = expand_state(tokens[i])
-        hit = kb.canon_state(expanded) if expanded else None
-        if hit is None and expanded:
-            hit = _fuzzy_state(kb, expanded)
+        hit = None
+        for candidate in _state_word_variants(tokens[i]):
+            expanded = expand_state(candidate)
+            hit = kb.canon_state(expanded) if expanded else None
+            if hit is None and expanded:
+                hit = _fuzzy_state(kb, expanded)
+            if hit is not None:
+                break
         if hit is not None:
             state = hit
             state_idx = i
@@ -993,17 +1087,29 @@ def resolve_address_text(text, kb: GeoKB):
                 break
     else:
         # No state token: try district anywhere and inherit its state.
+        def _exact_district_any(name):
+            for state_key, names in kb.districts_by_state.items():
+                for cand in names:
+                    if cand.lower() == name.lower():
+                        return cand, kb.state_canon.get(state_key)
+            return None, None
+
         for i, token in enumerate(tokens):
             expanded = expand_district(token) or token
             hit, state_guess = _fuzzy_district_any(kb, expanded)
             if hit is None:
-                for state_key, names in kb.districts_by_state.items():
-                    for name in names:
-                        if name.lower() == expanded.lower():
-                            hit, state_guess = name, kb.state_canon.get(state_key)
-                            break
-                    if hit:
-                        break
+                hit, state_guess = _exact_district_any(expanded)
+            # Deliberately NO last-word-only fallback here (e.g. reading
+            # "Nagpur" out of "R/o Nagpur"): tried and reverted. "Mandi"
+            # means "market" in common Indian usage and is ALSO a real
+            # Himachal Pradesh district -- confirmed live that this
+            # fallback resolved "Seetaphal Mandi, Secunderabad" and
+            # "Miralam Mandi, Hyderabad" (both real Hyderabad localities)
+            # to Himachal Pradesh, 6 of 12 live hits being exactly this
+            # false positive. A generic last word is too easy to collide
+            # with some district's literal name somewhere in India; the
+            # state-only word-isolation above does not have this problem
+            # because states are a small, fixed, highly distinctive set.
             if hit and state_guess:
                 district, state = hit, state_guess
                 district_idx = i
