@@ -13,6 +13,7 @@ import re
 import threading
 import urllib.error
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from etl3.enrichment.kb import compact
@@ -264,8 +265,146 @@ def source_mentions_label(label, source_text) -> bool:
     return False
 
 
-def source_mentions_quantity(quantity, source_text) -> bool:
-    """True when the numeric quantity is evidenced in the source text."""
+# Weight/volume unit -> factor to a common base unit (grams / millilitres).
+# Spelling variants and abbreviations observed in Brief Facts text. Only
+# units in these two tables get semantic (unit-aware) quantity matching;
+# everything else (counts, "packets", worth-like numbers, no unit at all)
+# keeps the original literal-substring heuristic.
+_WEIGHT_UNIT_TO_GRAMS = {
+    "mg": Decimal("0.001"), "mgs": Decimal("0.001"),
+    "milligram": Decimal("0.001"), "milligrams": Decimal("0.001"),
+    "g": Decimal("1"), "gm": Decimal("1"), "gms": Decimal("1"),
+    "gram": Decimal("1"), "grams": Decimal("1"), "grm": Decimal("1"),
+    "grms": Decimal("1"), "grsm": Decimal("1"), "gr": Decimal("1"),
+    "kg": Decimal("1000"), "kgs": Decimal("1000"),
+    "kilogram": Decimal("1000"), "kilograms": Decimal("1000"),
+    "kilo": Decimal("1000"), "kilos": Decimal("1000"),
+}
+_VOLUME_UNIT_TO_ML = {
+    "ml": Decimal("1"), "milliliter": Decimal("1"), "milliliters": Decimal("1"),
+    "millilitre": Decimal("1"), "millilitres": Decimal("1"),
+    "l": Decimal("1000"), "ltr": Decimal("1000"), "ltrs": Decimal("1000"),
+    "liter": Decimal("1000"), "liters": Decimal("1000"),
+    "litre": Decimal("1000"), "litres": Decimal("1000"),
+}
+
+
+def _unit_alternation(units) -> str:
+    # Longest-first so e.g. "kilograms" is not cut short at "kilo".
+    return "|".join(sorted((re.escape(u) for u in units), key=len, reverse=True))
+
+
+_NUMBER_GROUP = r"\d[\d,]*(?:\.\d+)?"
+# Punctuation observed between a number and its unit word in scanned/typed
+# Brief Facts, e.g. "(1) Kg", "6- Kgs", "16-kgs.", "1. KG". Bounded to a few
+# characters so this never bridges across an unrelated number.
+_NUM_UNIT_GAP = r"[\s.,():&-]{0,5}"
+_WEIGHT_MENTION_RE = re.compile(
+    rf"({_NUMBER_GROUP}){_NUM_UNIT_GAP}({_unit_alternation(_WEIGHT_UNIT_TO_GRAMS)})\b",
+    re.IGNORECASE,
+)
+_VOLUME_MENTION_RE = re.compile(
+    rf"({_NUMBER_GROUP}){_NUM_UNIT_GAP}({_unit_alternation(_VOLUME_UNIT_TO_ML)})\b",
+    re.IGNORECASE,
+)
+# Connector text allowed between chained split-unit mentions, e.g.
+# "21 Kgs 499 grams", "1 Kg and 500 Grams", "15 Kgs, 631 grams",
+# "16-kgs. 290-grams", "1 Kilo & 686 grams".
+_CHAIN_GAP_RE = re.compile(r"^[\s,.;&-]*(?:and)?[\s,.;&-]*$", re.IGNORECASE)
+_MAX_CHAIN_GAP_CHARS = 20
+_QTY_TOLERANCE_REL = Decimal("0.001")
+_QTY_TOLERANCE_ABS = Decimal("0.01")
+
+
+def _to_decimal(value):
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _approx_equal(a, b) -> bool:
+    if a is None or b is None:
+        return False
+    tolerance = max(_QTY_TOLERANCE_ABS, abs(b) * _QTY_TOLERANCE_REL)
+    return abs(a - b) <= tolerance
+
+
+def _unit_mentions(text, unit_table, pattern):
+    """(start, end, value_in_base_unit, unit_factor) for every match, in order."""
+    mentions = []
+    for match in pattern.finditer(text):
+        value = _to_decimal(match.group(1).replace(",", ""))
+        if value is None:
+            continue
+        factor = unit_table[match.group(2).lower()]
+        mentions.append((match.start(), match.end(), value * factor, factor))
+    return sorted(mentions, key=lambda m: m[0])
+
+
+def _compound_chain_sums(text, mentions):
+    """Sums of adjacent mentions whose unit strictly shrinks (kg then g, …).
+
+    Only a short, punctuation/"and"-only gap between two mentions counts as
+    one split-unit expression; unrelated nearby numbers never chain.
+    """
+    sums = []
+    i = 0
+    n = len(mentions)
+    while i < n:
+        total = mentions[i][2]
+        j = i
+        while j + 1 < n:
+            gap = text[mentions[j][1]:mentions[j + 1][0]]
+            if (
+                len(gap) <= _MAX_CHAIN_GAP_CHARS
+                and _CHAIN_GAP_RE.match(gap)
+                and mentions[j + 1][3] < mentions[j][3]
+            ):
+                total += mentions[j + 1][2]
+                j += 1
+            else:
+                break
+        if j > i:
+            sums.append(total)
+        i = j + 1
+    return sums
+
+
+def _semantic_quantity_match(qty_value, unit_norm, text):
+    """Unit-aware weight/volume match, or None when ``unit_norm`` isn't one.
+
+    None tells the caller to fall back to the legacy literal-substring
+    check (counts, worth-like figures, or no usable unit at all).
+    """
+    if unit_norm in _WEIGHT_UNIT_TO_GRAMS:
+        base = qty_value * _WEIGHT_UNIT_TO_GRAMS[unit_norm]
+        mentions = _unit_mentions(text, _WEIGHT_UNIT_TO_GRAMS, _WEIGHT_MENTION_RE)
+    elif unit_norm in _VOLUME_UNIT_TO_ML:
+        base = qty_value * _VOLUME_UNIT_TO_ML[unit_norm]
+        mentions = _unit_mentions(text, _VOLUME_UNIT_TO_ML, _VOLUME_MENTION_RE)
+    else:
+        return None
+    candidates = [m[2] for m in mentions] + _compound_chain_sums(text, mentions)
+    return any(_approx_equal(base, c) for c in candidates)
+
+
+def source_mentions_quantity(quantity, source_text, unit=None) -> bool:
+    """True when the numeric quantity is evidenced in the source text.
+
+    When ``unit`` is a recognised weight or volume unit, both the candidate
+    and every weight/volume mention in ``source_text`` are converted to a
+    common base unit (grams or millilitres) and compared numerically. This
+    also recognises split/mixed-unit phrasing such as "21 Kgs 499 grams" or
+    "1 Kg and 500 grams", which a model may combine into a single decimal
+    (21.499 kg) that never appears as a literal substring of the source.
+
+    Falls back to the original literal-substring heuristic for counts,
+    worth-like numbers, or when no usable unit is supplied, so existing
+    callers that omit ``unit`` keep their prior behaviour unchanged. An
+    expression this cannot support (including genuinely ambiguous ones,
+    e.g. a stated range) is rejected rather than guessed.
+    """
     if quantity is None or source_text is None:
         return False
     text = str(source_text)
@@ -273,6 +412,12 @@ def source_mentions_quantity(quantity, source_text) -> bool:
         qty = float(quantity)
     except (TypeError, ValueError):
         return False
+    qty_dec = _to_decimal(qty)
+    unit_norm = re.sub(r"[^a-z]", "", str(unit or "").lower().strip())
+    if qty_dec is not None and unit_norm:
+        semantic = _semantic_quantity_match(qty_dec, unit_norm, text)
+        if semantic is not None:
+            return semantic
     candidates = {str(quantity).strip(), str(qty), f"{qty:g}"}
     if qty == int(qty):
         candidates.add(str(int(qty)))
@@ -341,7 +486,7 @@ def validate_ai_drug_item(item, source_text, drug_kb_obj=None):
         "source_sentence": (item or {}).get("source_sentence") or "",
         "worth_scope": (item or {}).get("worth_scope"),
     }
-    if qty not in (None, "", 0, 0.0) and source_text and not source_mentions_quantity(qty, source_text):
+    if qty not in (None, "", 0, 0.0) and source_text and not source_mentions_quantity(qty, source_text, unit=unit):
         out["raw_quantity"] = None
         out["quantity_reject"] = REASON_INVALID_QUANTITY
     if unit and source_text:
