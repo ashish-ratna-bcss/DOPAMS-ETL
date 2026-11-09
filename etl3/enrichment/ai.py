@@ -31,6 +31,7 @@ REASON_INVALID_SCHEMA = "INVALID_SCHEMA"
 REASON_EMPTY_RESPONSE = "EMPTY_RESPONSE"
 REASON_INVALID_QUANTITY = "INVALID_QUANTITY"
 REASON_INVALID_UNIT = "INVALID_UNIT"
+REASON_NON_DRUG_PROPERTY = "NON_DRUG_PROPERTY"
 
 # Documented generics not always present on kb.drug_ignore_list. Used only as a
 # secondary code-level guard for AI validation; KB ignore list remains primary
@@ -42,6 +43,42 @@ CODE_LEVEL_GENERIC_TERMS = frozenset({
     "narcotic",
     "narcotic substance",
 })
+
+# Non-drug seized property that an extraction occasionally proposes as if it
+# were a drug row (observed real cases: "Mobile Phones", "Cell Phone", "Cash",
+# "Vehicle", "TVS Star City Bike", "Polythene Cover", "Laptop", shotgun
+# cartridges). None of these are NDPS substances; they belong in the existing
+# non-drug property module, never in drug_extractions. Matched by exact or
+# compacted substring so brand/model text ("Realme Narzo 50-A") still hits the
+# "cell phone" guard via the raw item's own descriptive name.
+NON_DRUG_PROPERTY_TERMS = (
+    "mobile phone", "mobile phones", "cell phone", "cell phones",
+    "smart phone", "smartphone", "handset",
+    "cash", "currency", "money",
+    "vehicle", "motorcycle", "motor cycle", "scooty", "bike", "car", "auto",
+    "cartridge", "cartridges", "shotgun cartridge", "gun", "pistol", "weapon",
+    "knife", "laptop", "sim card", "sim cards", "document", "documents",
+    "polythene cover", "polythene covers", "empty cover", "empty covers",
+    "wallet", "chain", "gold ornament", "ornament", "watch",
+)
+# Matched as a whole word/phrase (word-boundary, not a bare substring) so
+# this never misfires on a real drug name that happens to contain these
+# letters, e.g. "gunja" / "gunjayi" (an OCR/phonetic variant of Ganja
+# contains "gun") or "Carfentanil" (a real opioid; contains "car") -- \b
+# requires an actual word break on both sides, which neither has.
+_NON_DRUG_PROPERTY_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in NON_DRUG_PROPERTY_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_non_drug_property(name) -> bool:
+    if name is None:
+        return False
+    text = str(name).strip()
+    if not text:
+        return False
+    return bool(_NON_DRUG_PROPERTY_RE.search(text))
 
 
 class AIExtractionError(Exception):
@@ -180,7 +217,12 @@ def parse_drug_response(text: str) -> dict:
     """Validate model output. Raises AIExtractionError(status='invalid') on reject.
 
     An empty drugs list is valid and means the text had no seizure to store.
-    Entries with null/blank raw_drug_name are dropped (generic / unnamed).
+    Entries with a null/blank raw_drug_name never become a drug row (a name
+    is never invented), but when such an item still carries real seizure
+    evidence (a quantity, unit, or worth) it is kept in ``ambiguous`` for
+    audit/manual-review rather than silently discarded -- this is what lets
+    a crime be classified "Manual review" instead of "No drug Found" when
+    the source describes a seizure of an only-suspected substance.
     """
     raw = "" if text is None else str(text)
     if not raw.strip():
@@ -201,6 +243,7 @@ def parse_drug_response(text: str) -> dict:
     if not isinstance(drugs, list):
         raise AIExtractionError("invalid", "drugs is not a list", raw_response=raw)
     cleaned = []
+    ambiguous = []
     for item in drugs:
         if not isinstance(item, dict):
             raise AIExtractionError(
@@ -208,7 +251,27 @@ def parse_drug_response(text: str) -> dict:
             )
         name = item.get("raw_drug_name")
         if name is None or not str(name).strip() or str(name).strip().lower() in ("null", "none"):
-            # Explicit null / blank name: skip row (not a schema failure).
+            # Explicit null / blank name: never invent one, so this item can
+            # never become a drug row. If it still carries real evidence of
+            # a seizure, record it as ambiguous for manual review instead of
+            # dropping it with no trace (not a schema failure either way).
+            try:
+                amb_qty = float(item.get("raw_quantity") or 0)
+            except (TypeError, ValueError):
+                amb_qty = 0.0
+            try:
+                amb_worth = float(item.get("seizure_worth") or 0)
+            except (TypeError, ValueError):
+                amb_worth = 0.0
+            amb_unit = item.get("raw_unit")
+            if amb_qty > 0 or amb_worth > 0 or (amb_unit and str(amb_unit).strip()):
+                meta = item.get("extraction_metadata")
+                ambiguous.append({
+                    "raw_quantity": amb_qty or None,
+                    "raw_unit": str(amb_unit).strip() if amb_unit else None,
+                    "seizure_worth": amb_worth or None,
+                    "source_sentence": (meta or {}).get("source_sentence", "") if isinstance(meta, dict) else "",
+                })
             continue
         form = str(item.get("drug_form") or "solid").lower().strip()
         if form not in ALLOWED_FORMS:
@@ -246,7 +309,7 @@ def parse_drug_response(text: str) -> dict:
             "confidence_score": item.get("confidence_score"),
             "source_sentence": ((item.get("extraction_metadata") or {}) if isinstance(item.get("extraction_metadata"), dict) else {}).get("source_sentence") or "",
         })
-    return {"drugs": cleaned}
+    return {"drugs": cleaned, "ambiguous": ambiguous}
 
 
 def source_mentions_label(label, source_text) -> bool:
@@ -315,6 +378,58 @@ _MAX_CHAIN_GAP_CHARS = 20
 _QTY_TOLERANCE_REL = Decimal("0.001")
 _QTY_TOLERANCE_ABS = Decimal("0.01")
 
+# Fraction quantities observed in real Brief Facts, e.g. "1½ Kgs", "3 ½
+# Kgs", "1 1/2 Kg", "6(1/2)KG", "4½ KGs". Normalized to a decimal string
+# BEFORE unit-mention scanning so the rest of the matcher is unaffected.
+_UNICODE_FRACTION_VALUES = {"½": Decimal("0.5"), "¼": Decimal("0.25"), "¾": Decimal("0.75")}
+_ASCII_FRACTION_VALUES = {"1/2": Decimal("0.5"), "1/4": Decimal("0.25"), "3/4": Decimal("0.75")}
+_MIXED_UNICODE_FRACTION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([½¼¾])")
+_BARE_UNICODE_FRACTION_RE = re.compile(r"([½¼¾])")
+_MIXED_ASCII_FRACTION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*\(?\s*(1/2|1/4|3/4)\s*\)?")
+_BARE_ASCII_FRACTION_RE = re.compile(r"(?<![\d./])(1/2|1/4|3/4)(?![\d/])")
+
+
+def _normalize_fractions(text: str) -> str:
+    text = _MIXED_UNICODE_FRACTION_RE.sub(
+        lambda m: str(Decimal(m.group(1)) + _UNICODE_FRACTION_VALUES[m.group(2)]), text,
+    )
+    text = _BARE_UNICODE_FRACTION_RE.sub(
+        lambda m: str(_UNICODE_FRACTION_VALUES[m.group(1)]), text,
+    )
+    text = _MIXED_ASCII_FRACTION_RE.sub(
+        lambda m: str(Decimal(m.group(1)) + _ASCII_FRACTION_VALUES[m.group(2)]), text,
+    )
+    text = _BARE_ASCII_FRACTION_RE.sub(
+        lambda m: str(_ASCII_FRACTION_VALUES[m.group(1)]), text,
+    )
+    return text
+
+
+# "N <words> each <weight mention>" -- repeated identical-quantity items,
+# e.g. "5 Ganja packets each one 100 grams", "19 packets (each packet wg
+# about 10 grams)", "10 ... boxes each consisting 11 gms". The count must be
+# within a short, same-sentence span of the literal word "each" immediately
+# before the mention for this to count as one multiplicative expression.
+_COUNT_BEFORE_EACH_RE = re.compile(
+    rf"({_NUMBER_GROUP})(?:(?!each)[^.]){{0,40}}?\beach\b", re.IGNORECASE,
+)
+_MAX_EACH_LOOKBACK_CHARS = 80
+
+
+def _each_multiplier_candidates(text, mentions):
+    candidates = []
+    for start, _end, value, _factor in mentions:
+        window = text[max(0, start - _MAX_EACH_LOOKBACK_CHARS):start]
+        match = None
+        for match in _COUNT_BEFORE_EACH_RE.finditer(window):
+            pass  # keep the last (closest-to-the-mention) match
+        if match is None:
+            continue
+        count = _to_decimal(match.group(1).replace(",", ""))
+        if count is not None and count > 0:
+            candidates.append(value * count)
+    return candidates
+
 
 def _to_decimal(value):
     try:
@@ -377,6 +492,7 @@ def _semantic_quantity_match(qty_value, unit_norm, text):
     None tells the caller to fall back to the legacy literal-substring
     check (counts, worth-like figures, or no usable unit at all).
     """
+    text = _normalize_fractions(text)
     if unit_norm in _WEIGHT_UNIT_TO_GRAMS:
         base = qty_value * _WEIGHT_UNIT_TO_GRAMS[unit_norm]
         mentions = _unit_mentions(text, _WEIGHT_UNIT_TO_GRAMS, _WEIGHT_MENTION_RE)
@@ -385,7 +501,11 @@ def _semantic_quantity_match(qty_value, unit_norm, text):
         mentions = _unit_mentions(text, _VOLUME_UNIT_TO_ML, _VOLUME_MENTION_RE)
     else:
         return None
-    candidates = [m[2] for m in mentions] + _compound_chain_sums(text, mentions)
+    candidates = (
+        [m[2] for m in mentions]
+        + _compound_chain_sums(text, mentions)
+        + _each_multiplier_candidates(text, mentions)
+    )
     return any(_approx_equal(base, c) for c in candidates)
 
 
@@ -455,6 +575,8 @@ def validate_ai_drug_item(item, source_text, drug_kb_obj=None):
         return {"reject_reason": REASON_GENERIC_IGNORED, "raw_drug_name": raw_text}
     if is_code_level_generic(raw_text):
         return {"reject_reason": REASON_GENERIC_IGNORED, "raw_drug_name": raw_text}
+    if is_non_drug_property(raw_text):
+        return {"reject_reason": REASON_NON_DRUG_PROPERTY, "raw_drug_name": raw_text}
 
     if not source_mentions_label(raw_text, source_text):
         return {"reject_reason": REASON_SOURCE_UNSUPPORTED, "raw_drug_name": raw_text}

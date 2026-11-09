@@ -384,7 +384,14 @@ def test_process_drug_success_writes_and_settles():
 
     assert result["outcome"] == "success"
     assert record.call_args[0][4] == "success"
-    upsert.assert_called_once()
+    # One upsert for the drug_extractions row, one for the crime-level
+    # drug_finding_status ("Drug found") -- both written by the same
+    # centralized _finalize_drug_extraction helper.
+    assert upsert.call_count == 2
+    tables = [call.args[1] for call in upsert.call_args_list]
+    assert tables == ["drug_extractions", "drug_finding_status"]
+    finding_rows = upsert.call_args_list[1].args[3]
+    assert finding_rows[0]["status"] == "Drug found"
 
 
 def test_stop_check_halts_between_firs():

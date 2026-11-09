@@ -61,6 +61,14 @@ DRUG_COLUMNS = [
     "input_hash",
 ]
 
+DRUG_FINDING_COLUMNS = ["crime_id", "source_system", "status", "method", "input_hash"]
+
+# Exact crime-level classification strings (section 8/9 of the brief-facts
+# accuracy spec). "No drug Found" uses the mandated exact casing.
+DRUG_FOUND = "Drug found"
+NO_DRUG_FOUND = "No drug Found"
+MANUAL_REVIEW = "Manual review"
+
 ACCUSED_COLUMNS = [
     "accused_id", "source_system", "accused_category", "role_in_crime",
     "accused_type", "accused_type_method", "accused_code", "person_id",
@@ -1026,6 +1034,88 @@ class CallBudget:
                 self._used -= 1
 
 
+def _drug_finding_status_row(crime_id, source_system, status, method):
+    body = {
+        "crime_id": crime_id,
+        "source_system": source_system,
+        "status": status,
+        "method": method,
+    }
+    body["input_hash"] = _hash(body)
+    return body
+
+
+def _finalize_drug_extraction(conn, run_id, crime_id, source_system, parsed, rows):
+    """Shared outcome for every AI drug pass (per-FIR and bulk backfill alike).
+
+    Centralizes the attempt status, the etl3_ai drug_extractions replace, and
+    the crime-level drug_finding_status so no caller can persist drug rows
+    while bypassing the crime-level classification, and "No drug Found" is
+    only ever written here -- never as a fabricated drug_extractions row.
+
+    Precedence: a confirmed drug (``rows`` non-empty) always wins, even
+    alongside leftover ambiguous evidence for a second, unconfirmed item --
+    the crime has a drug, full stop. Otherwise, any ambiguous item (a
+    seizure described but the substance only suspected, never named) means
+    "Manual review", never "No drug Found". Only when nothing was proposed,
+    or everything proposed was rejected, with no ambiguous residue, is the
+    crime "No drug Found".
+    """
+    drugs = parsed.get("drugs") or []
+    ambiguous = parsed.get("ambiguous") or []
+    rejections = getattr(rows, "rejections", []) or []
+    generic_rejected = unsupported = 0
+    for rej in rejections:
+        reason = rej.get("reason") or ""
+        if reason == "GENERIC_IGNORED":
+            generic_rejected += 1
+        elif reason == "SOURCE_UNSUPPORTED":
+            unsupported += 1
+
+    if rows:
+        validation_status = "partial" if rejections else "accepted"
+        status, outcome = "success", "success"
+        finding_status, finding_method = DRUG_FOUND, "ai_source_supported"
+    elif ambiguous:
+        validation_status = "rejected" if drugs else "empty"
+        status, outcome = "empty", "empty"
+        finding_status, finding_method = MANUAL_REVIEW, "ambiguous_suspected_substance"
+    elif drugs:
+        validation_status = "rejected"
+        status, outcome = "empty", "empty"
+        finding_status, finding_method = NO_DRUG_FOUND, "all_proposed_items_rejected"
+    else:
+        validation_status = "empty"
+        status, outcome = "empty", "empty"
+        finding_status, finding_method = NO_DRUG_FOUND, "model_found_no_seizure"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM drug_extractions WHERE provenance = 'etl3_ai' AND crime_id = %s",
+            (crime_id,),
+        )
+    if rows:
+        upsert_rows(
+            conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS,
+            run_id, "drug_extraction",
+        )
+    upsert_rows(
+        conn, "drug_finding_status", "crime_id",
+        [_drug_finding_status_row(crime_id, source_system, finding_status, finding_method)],
+        DRUG_FINDING_COLUMNS, run_id, "drug_finding_status",
+    )
+    return {
+        "status": status,
+        "outcome": outcome,
+        "validation_status": validation_status,
+        "rejections": rejections,
+        "generic_rejected": generic_rejected,
+        "unsupported": unsupported,
+        "ambiguous": ambiguous,
+        "drug_finding_status": finding_status,
+    }
+
+
 def process_drug_for_crime(
     conn,
     run_id,
@@ -1081,49 +1171,20 @@ def process_drug_for_crime(
         crime_id, source_system, drugs, kb_items,
         drug_kb_obj=drug_kb_obj, source_text=text,
     )
-    rejections = getattr(rows, "rejections", []) or []
-    generic_rejected = unsupported = 0
-    for rej in rejections:
-        reason = rej.get("reason") or ""
-        if reason == "GENERIC_IGNORED":
-            generic_rejected += 1
-        elif reason == "SOURCE_UNSUPPORTED":
-            unsupported += 1
-    if rows:
-        validation_status = "partial" if rejections else "accepted"
-        status = "success"
-        outcome = "success"
-    elif drugs:
-        validation_status = "rejected"
-        status = "empty"
-        outcome = "empty"
-    else:
-        validation_status = "empty"
-        status = "empty"
-        outcome = "empty"
+    result = _finalize_drug_extraction(conn, run_id, crime_id, source_system, parsed, rows)
     record_ai_attempt(
-        conn, crime_id, digest, settings.get("model"), status, attempts, None,
+        conn, crime_id, digest, settings.get("model"), result["status"], attempts, None,
         source_system=source_system, source_module=source_module,
         raw_response=raw_response, parsed_response=parsed,
-        validation_status=validation_status, validation_errors=rejections or None,
+        validation_status=result["validation_status"], validation_errors=result["rejections"] or None,
     )
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM drug_extractions WHERE provenance = 'etl3_ai' AND crime_id = %s",
-            (crime_id,),
-        )
-    if rows:
-        upsert_rows(
-            conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS,
-            run_id, "drug_extraction",
-        )
     _pace_after_request(settings, latencies)
     return {
-        "outcome": outcome,
+        "outcome": result["outcome"],
         "digest": digest,
-        "rejected": len(rejections),
-        "generic_rejected": generic_rejected,
-        "unsupported": unsupported,
+        "rejected": len(result["rejections"]),
+        "generic_rejected": result["generic_rejected"],
+        "unsupported": result["unsupported"],
     }
 
 
@@ -1852,42 +1913,20 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
             crime_id, source_system, drugs, kb_items,
             drug_kb_obj=drug_kb_obj, source_text=text,
         )
-        rejections = getattr(rows, "rejections", []) or []
-        for rej in rejections:
-            rejected += 1
-            reason = rej.get("reason") or ""
-            if reason == "GENERIC_IGNORED":
-                generic_rejected += 1
-            elif reason == "SOURCE_UNSUPPORTED":
-                unsupported += 1
-        if rows:
-            validation_status = "partial" if rejections else "accepted"
-            status = "success"
+        result = _finalize_drug_extraction(conn, run_id, crime_id, source_system, parsed, rows)
+        rejected += len(result["rejections"])
+        generic_rejected += result["generic_rejected"]
+        unsupported += result["unsupported"]
+        if result["outcome"] == "success":
             success += 1
-        elif drugs:
-            validation_status = "rejected"
-            status = "empty"
-            empty += 1
         else:
-            validation_status = "empty"
-            status = "empty"
             empty += 1
         record_ai_attempt(
-            conn, crime_id, digest, settings.get("model"), status, attempts, None,
+            conn, crime_id, digest, settings.get("model"), result["status"], attempts, None,
             source_system=source_system, source_module=source_module,
             raw_response=raw_response, parsed_response=parsed,
-            validation_status=validation_status, validation_errors=rejections or None,
+            validation_status=result["validation_status"], validation_errors=result["rejections"] or None,
         )
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM drug_extractions WHERE provenance = 'etl3_ai' AND crime_id = %s",
-                (crime_id,),
-            )
-        if rows:
-            upsert_rows(
-                conn, "drug_extractions", "extraction_id", rows, DRUG_COLUMNS,
-                run_id, "drug_extraction",
-            )
         _pace_after_request(settings, latencies)
         if processed % batch_size == 0:
             conn.commit()

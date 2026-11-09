@@ -272,6 +272,7 @@ def standardize_measurement(raw_quantity, raw_unit, drug_form=None, raw_drug_nam
     matching the old check_has_measurements fallback.
     """
     qty = _as_float(raw_quantity)
+    unit_given = bool(raw_unit and str(raw_unit).strip())
     unit = re.sub(r"[^a-z]", "", (raw_unit or "unknown").lower().strip())
     form = re.sub(r"[^a-z]", "", (drug_form or "unknown").lower().strip()) or "unknown"
     name = (raw_drug_name or "").lower().strip()
@@ -323,14 +324,22 @@ def standardize_measurement(raw_quantity, raw_unit, drug_form=None, raw_drug_nam
         out["count_total"] = qty
 
     if qty > 0 and out["weight_g"] is None and out["volume_ml"] is None and out["count_total"] is None:
-        if form in DRUG_FORM_SOLID:
-            out["weight_g"] = qty
-            out["weight_kg"] = qty / 1000.0
-        elif form in DRUG_FORM_LIQUID:
-            out["volume_ml"] = qty
-            out["volume_l"] = qty / 1000.0
-        else:
-            out["count_total"] = qty
+        # A unit was supplied but not one of the tables above (e.g. a novel
+        # phrase) -- drug_form is still some evidence, so fall back to it.
+        # When NO unit was given at all, do not guess one: inferring "grams"
+        # (or any other unit) from drug_form alone has silently turned a
+        # bare count -- e.g. "2 Mobile Phones" or "12 LSD blots" with no
+        # stated unit -- into a fabricated weight in real data. Per the
+        # source-grounded extraction rule, an absent unit stays unmeasured.
+        if unit_given:
+            if form in DRUG_FORM_SOLID:
+                out["weight_g"] = qty
+                out["weight_kg"] = qty / 1000.0
+            elif form in DRUG_FORM_LIQUID:
+                out["volume_ml"] = qty
+                out["volume_l"] = qty / 1000.0
+            else:
+                out["count_total"] = qty
 
     liquid_names = {
         "hash oil", "hashish oil", "weed oil", "cannabis oil",
