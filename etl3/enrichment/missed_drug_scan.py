@@ -93,6 +93,23 @@ def _has_local_seizure_evidence(text, term_pattern, quantity_spans):
     return False
 
 
+# "Methylenedioxymethamphetamine" (MDMA's own full chemical name) is
+# routinely hyphen- or space-split in Brief Facts -- "Methylenedioxy-
+# methamphetamine", "Methylene Di Oxy Methamphetamine", "Methylenedioxy-N-
+# methamphetamine" -- which puts a word boundary in front of
+# "methamphetamine" and makes it match on its own. This is never a second,
+# independently seized Methamphetamine; it is MDMA's own name. Observed
+# repeatedly (6+ crimes) during the Tier-2 manual reconciliation.
+_MDMA_CHEMICAL_NAME_PREFIX_RE = re.compile(
+    r"methylene[\s-]*d[ii]?[\s-]*oxy[\s-]*(?:n[\s-]*)?$", re.IGNORECASE,
+)
+
+
+def _is_mdma_chemical_name_split(text, match_start):
+    before = text[max(0, match_start - 40):match_start]
+    return bool(_MDMA_CHEMICAL_NAME_PREFIX_RE.search(before))
+
+
 def find_missing_drug_mentions(text, existing_rows, pattern, raw_to_std):
     """Compare KB-recognized drug mentions in ``text`` against what is
     already persisted for this crime.
@@ -109,7 +126,12 @@ def find_missing_drug_mentions(text, existing_rows, pattern, raw_to_std):
     consumption-only, suspected-only, or a background/alias reference) --
     and the sorted list of matched raw terms actually found in the text.
     """
-    hits = {m.group(1).lower() for m in pattern.finditer(text)}
+    hits = set()
+    for m in pattern.finditer(text):
+        term = m.group(1).lower()
+        if term == "methamphetamine" and _is_mdma_chemical_name_split(text, m.start()):
+            continue
+        hits.add(term)
     if not hits:
         return [], [], []
     mentioned_std = {raw_to_std[h] for h in hits}

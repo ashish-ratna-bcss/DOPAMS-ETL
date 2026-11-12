@@ -49,6 +49,32 @@ def test_zero_existing_rows_with_explicit_weight_is_confirmed():
     assert review == []
 
 
+def test_mdma_own_chemical_name_split_not_treated_as_methamphetamine():
+    """Real pattern (6+ crimes found during Tier-2 reconciliation): MDMA's
+    full chemical name is routinely hyphen/space-split in Brief Facts --
+    "MDMA (Methylenedioxy-methamphetamine)", "Methylene Di Oxy
+    Methamphetamine" -- which puts a word boundary before "methamphetamine"
+    and must never be read as a second, independently seized drug."""
+    pattern, raw_to_std = _vocab(("mdma", "MDMA"), ("methamphetamine", "Methamphetamine"))
+    text = "found in possession of a drug Methylene Di Oxy Methamphetamine short name as MDMA, weighing 5 grams."
+    confirmed, review, hits = find_missing_drug_mentions(
+        text, [("MDMA", "MDMA")], pattern, raw_to_std,
+    )
+    assert confirmed == [] and review == []
+    assert "methamphetamine" not in hits
+
+
+def test_standalone_methamphetamine_elsewhere_still_detected():
+    """A genuine standalone Methamphetamine mention, unrelated to MDMA's
+    chemical name, must still be caught."""
+    pattern, raw_to_std = _vocab(("mdma", "MDMA"), ("methamphetamine", "Methamphetamine"))
+    text = "Seized 2 Kgs of MDMA and separately 1 Kg of Methamphetamine powder from the accused."
+    confirmed, review, hits = find_missing_drug_mentions(
+        text, [("MDMA", "MDMA")], pattern, raw_to_std,
+    )
+    assert confirmed == ["Methamphetamine"]
+
+
 def test_second_distinct_drug_separately_itemized_is_confirmed():
     """Real case (crime 6464f5658413dec4487e9c03): MDMA and Cocaine already
     extracted; "ECSTASY PILLS (MDMA DRUG)-58...23 grams" is a separately
