@@ -25,8 +25,15 @@ from etl3.enrichment.kb import compact
 # appear as the accused's legal occupation ("Toddy Business") with no
 # adulteration seizure in the same FIR at all; the more specific adulterated/
 # spurious/unknown-toddy aliases are kept.
+# "silver" alone is excluded because, corpus-wide, it is almost always a
+# vehicle/phone/jewellery colour descriptor (373 crimes / 585 occurrences
+# checked), not the toddy-adulterant sense (1 crime: "Silver is marked M1").
+# A colour mention routinely sits within LOCAL_EVIDENCE_WINDOW of an
+# unrelated quantity (e.g. "...8.5 grams of Ganja, One...Silver colour
+# Car..."), which would otherwise satisfy _has_local_seizure_evidence as a
+# false positive.
 EXCLUDED_RAW_NAMES = frozenset({
-    "1ml", "urea", "toddy", "taddy", "toddy (adulterated/spurious)",
+    "1ml", "urea", "toddy", "taddy", "toddy (adulterated/spurious)", "silver",
     "kallu packets", "gudumba", "eeetha kallu", "unknown thati kallu",
     "white colour liquid",
     "white colored drug", "white color powder", "white colour powder",
