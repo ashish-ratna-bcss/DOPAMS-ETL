@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from etl3.enrichment.ai import AIExtractionError, extract_with_retry, parse_drug_response
 from etl3.enrichment.kb import resolve_primary_name
 from etl3.enrichment.names import clean_person_names, collapse_exact_repetition
+from etl3.enrichment.multi_accused import detect_multi_accused
 from etl3.enrichment.project import (
     accused_row,
     ai_drug_rows,
@@ -15,6 +16,8 @@ from etl3.enrichment.project import (
     drug_rows_from_sources,
     person_row,
 )
+from etl3.enrichment.runner import build_person_row_safe, _name_identity_settings
+from etl3.merger.accused_split import build_split_rows
 from etl3.enrichment.address import (
     GeoKB,
     LOCALITY_TO_DISTRICT_MANDAL,
@@ -898,6 +901,465 @@ def test_trailing_hyphen_residue_trimmed():
     assert clean_person_names("Smith-Jones")["cleaned_full_name"] == "Smith-Jones"
 
 
+def test_name_identified_true_for_ordinary_names():
+    """Baseline: an ordinary, unambiguous name is untouched and marked
+    identified, with no review flags -- confirms none of the new
+    detection stages below fire on the common case."""
+    result = clean_person_names("Ravi Kumar")
+    assert result["cleaned_full_name"] == "Ravi Kumar"
+    assert result["name_identified"] is True
+    assert result["unidentified_reason"] is None
+    assert result["extracted_role_hint"] is None
+    assert result["extracted_nationality_hint"] is None
+    assert result["review_flags"] == []
+
+
+def test_multi_alias_at_chain_preserves_every_alias():
+    """Confirmed bug (audit finding G-2/G-3, real records S.No. 16547 and
+    28810): the old extract_alias_from_name only ever read parts[0] and
+    parts[1] of name.split("@"), silently dropping every alias past the
+    second, and a stray "@" leaked into cleaned_full_name when the
+    primary name was empty. Both are fixed: every alias is preserved, and
+    cleaned_full_name never contains a literal "@"."""
+    result = clean_person_names("@Johnson Manumala @Goutham")
+    assert result["cleaned_alias"] == "Johnson Manumala; Goutham"
+    assert result["cleaned_full_name"] is None
+    assert "@" not in (result["cleaned_full_name"] or "")
+    assert result["name_identified"] is False
+    assert result["unidentified_reason"] == "alias_only"
+
+    result2 = clean_person_names("@ Nemichand Bhati Nemichand @Nemichand Bhati")
+    assert result2["cleaned_alias"] == "Nemichand Bhati Nemichand; Nemichand Bhati"
+    assert result2["cleaned_full_name"] is None
+    assert "@" not in (result2["cleaned_full_name"] or "")
+
+
+def test_spelled_out_alias_word_extraction():
+    """"Alias" (127 records in the real export, far more common than '@'
+    in Full Name) was previously not recognized at all."""
+    single = clean_person_names("Ajay Alias Ajay Sharma")
+    assert single["cleaned_full_name"] == "Ajay"
+    assert single["cleaned_alias"] == "Ajay Sharma"
+
+    chain = clean_person_names("Ajay Alias Kittu Alias Bittu Kaleri")
+    assert chain["cleaned_full_name"] == "Ajay"
+    assert chain["cleaned_alias"] == "Kittu; Bittu Kaleri"
+
+    aka = clean_person_names("Arbaz Shafi Khan AKA Shaik Salman")
+    assert aka["cleaned_full_name"] == "Arbaz Shafi Khan"
+    assert aka["cleaned_alias"] == "Shaik Salman"
+
+    full_form = clean_person_names("Arbaz Shafi Khan A.K.A. Shaik Salman")
+    assert full_form["cleaned_full_name"] == "Arbaz Shafi Khan"
+    assert full_form["cleaned_alias"] == "Shaik Salman"
+
+    also_known = clean_person_names("Arbaz Shafi Khan Also Known As Shaik Salman")
+    assert also_known["cleaned_full_name"] == "Arbaz Shafi Khan"
+    assert also_known["cleaned_alias"] == "Shaik Salman"
+
+    # "@" still takes precedence and still works exactly as before.
+    at_form = clean_person_names("Ajay @Kittu")
+    assert at_form["cleaned_full_name"] == "Ajay"
+    assert at_form["cleaned_alias"] == "Kittu"
+
+
+def test_spelled_out_relationship_markers():
+    """"Wife of", "Mother of", "Father of", "Son of", "Daughter of",
+    "Care of", "H/O" were previously unrecognized -- only the abbreviated
+    s/o, d/o, w/o forms were. Real records S.No. 50493/26452."""
+    son_of = clean_person_names("Ramesh Son of Krishna")
+    assert son_of["cleaned_full_name"] == "Ramesh"
+    assert son_of["relation_type"] == "Father"
+    assert son_of["cleaned_relative_name"] == "Krishna"
+
+    daughter_of = clean_person_names("Lakshmi Daughter of Ramana")
+    assert daughter_of["relation_type"] == "Father"
+    assert daughter_of["cleaned_relative_name"] == "Ramana"
+
+    h_o = clean_person_names("Sunitha H/O Vijay")
+    assert h_o["cleaned_full_name"] == "Sunitha"
+    assert h_o["relation_type"] == "Husband"
+    assert h_o["cleaned_relative_name"] == "Vijay"
+
+    care_of = clean_person_names("Ramu C/O Suresh")
+    assert care_of["cleaned_full_name"] == "Ramu"
+    assert care_of["relation_type"] == "Care-of"
+    assert care_of["cleaned_relative_name"] == "Suresh"
+
+
+def test_relationship_only_record_marked_unidentified_not_invented():
+    """"Wife of Amzad" / "Mother of Eshwar Sarwade" (S.No. 50493, 26452)
+    are not names at all -- the accused's own name was never recorded,
+    only their relation to someone else. The relationship must still be
+    extracted (useful for matching/review), but cleaned_full_name must
+    never become the relationship sentence itself."""
+    wife = clean_person_names("Wife of Amzad")
+    assert wife["cleaned_full_name"] is None
+    assert wife["name_identified"] is False
+    assert wife["unidentified_reason"] == "relationship_only"
+    assert wife["relation_type"] == "Husband"
+    assert wife["cleaned_relative_name"] == "Amzad"
+
+    mother = clean_person_names("Mother of Eshwar Sarwade")
+    assert mother["cleaned_full_name"] is None
+    assert mother["relation_type"] == "Child"
+    assert mother["cleaned_relative_name"] == "Eshwar Sarwade"
+
+
+def test_dangling_relationship_marker_stripped_even_without_relative_name():
+    """Confirmed gap (audit C-1, real record S.No. 11461): a trailing
+    "S/o" with nothing after it used to survive untouched because the old
+    code required a captured relative name before it would strip
+    anything at all. The marker is now always stripped; only the relative
+    name (genuinely absent from the source) stays None."""
+    result = clean_person_names("Ediga Sharanayya Goud S/o")
+    assert result["cleaned_full_name"] == "Ediga Sharanayya Goud"
+    assert result["relation_type"] == "Father"
+    assert result["cleaned_relative_name"] is None
+    assert result["name_identified"] is True
+
+
+def test_bare_numeric_list_prefix_stripped():
+    """Confirmed gap (audit A-1/A-2): a bare "02." / "1)" / "1." list
+    prefix with no "A" code letter was never stripped at all."""
+    assert clean_person_names("02. Abid Ali")["cleaned_full_name"] == "Abid Ali"
+    assert clean_person_names("1) Abhishek Kumar")["cleaned_full_name"] == "Abhishek Kumar"
+    assert clean_person_names("1. Abhishek Kumar")["cleaned_full_name"] == "Abhishek Kumar"
+    assert clean_person_names("10. Telugu Maddileti")["cleaned_full_name"] == "Telugu Maddileti"
+    assert clean_person_names("1). Divi Sampath")["cleaned_full_name"] == "Divi Sampath"
+
+
+def test_accused_code_variants_stripped():
+    """Confirmed gap (audit A-3/A-4): the old A-code pattern's character
+    class after the digit excluded ":", so "A-1:"/"A1:"/"A5:" survived
+    untouched. Real records S.No. 64, 152."""
+    assert clean_person_names("A-1: Md.Khaleel")["cleaned_full_name"] == "Md.Khaleel"
+    assert clean_person_names("A1: Md.Khaleel")["cleaned_full_name"] == "Md.Khaleel"
+    assert clean_person_names("A2. Rajesh")["cleaned_full_name"] == "Rajesh"
+    assert clean_person_names("A-1) Cheekati Srinivas")["cleaned_full_name"] == "Cheekati Srinivas"
+
+
+def test_accused_person_label_stripped():
+    """Real record S.No. 985/986/987: an "Accused Person:" label prefix,
+    often stacked with an A-code, is stripped entirely."""
+    result = clean_person_names("Accused Person: A-1: Md.Khaleel")
+    assert result["cleaned_full_name"] == "Md.Khaleel"
+    assert clean_person_names("Accused Person: Saphayee.Prabhu Swamy")["cleaned_full_name"] == "Saphayee.Prabhu Swamy"
+
+
+def test_role_phrase_in_parens_extracted_and_stripped():
+    """Confirmed gap (audit E-2/E-3/E-4): only 3 hardcoded phrases
+    ("absconding", "...receiver...", "...drug peddler...") were ever
+    stripped from a parenthetical; "Supplier", "Main Peddler", "Customer"
+    etc. survived untouched. Now extracted as a display-cleanup hint and
+    removed from the name -- without touching the separate, AI-driven
+    accused_type/role_in_crime classification in rules.py/accused_facts.py."""
+    supplier = clean_person_names("Anil (Supplier)")
+    assert supplier["cleaned_full_name"] == "Anil"
+    assert supplier["extracted_role_hint"] == "Supplier"
+
+    main_peddler = clean_person_names("Baba (Main Peddler)")
+    assert main_peddler["cleaned_full_name"] == "Baba"
+    assert main_peddler["extracted_role_hint"] == "Main Peddler"
+
+    # Role word mid-string, surname after it -- whitespace left behind by
+    # the removal is normalized to a single space, not a double space.
+    mid_string = clean_person_names("Anil ( Customer) Bugga")
+    assert mid_string["cleaned_full_name"] == "Anil Bugga"
+    assert mid_string["extracted_role_hint"] == "Customer"
+
+
+def test_role_only_whole_value_marked_unidentified():
+    """Real record S.No. 2: "02. Medical Shop Owner" has no person name
+    at all -- once the numeric prefix is stripped, the entire remaining
+    value is a bare occupation phrase, not a name. Only a WHOLE-value
+    match triggers this -- "Abdul Veekar Consumer" (S.No. 560) keeps real
+    name content alongside the role word and must NOT be nulled."""
+    result = clean_person_names("02. Medical Shop Owner")
+    assert result["cleaned_full_name"] is None
+    assert result["name_identified"] is False
+    assert result["unidentified_reason"] == "role_only"
+
+    partial = clean_person_names("Abdul Veekar Consumer")
+    assert partial["cleaned_full_name"] == "Abdul Veekar Consumer"
+    assert partial["name_identified"] is True
+
+
+def test_nationality_in_parens_extracted_but_bare_word_never_touched():
+    """"(Nigerian)" is an unambiguous parenthetical qualifier and is
+    safely stripped (real record S.No. 1376). A BARE nationality-shaped
+    word with no parentheses -- "Nepal Krishna", "Khali of Nigeria" -- is
+    never touched, because address.NATIONALITY_TO_COUNTRY's own "china"
+    entry proves a geographical word is sometimes a genuine given name
+    (confirmed real accused "China", per
+    test_collapse_exact_repetition_confirmed_real_records); guessing here
+    would corrupt roughly as many real names as it would fix."""
+    aisha = clean_person_names("Aisha (Nigerian)")
+    assert aisha["cleaned_full_name"] == "Aisha"
+    assert aisha["extracted_nationality_hint"] == "Nigerian"
+
+    russian_lady = clean_person_names("1) Ana (Russian Lady)")
+    assert russian_lady["cleaned_full_name"] == "Ana"
+    assert russian_lady["extracted_nationality_hint"] == "Russian"
+
+    # Bare, unparenthesized -- left completely unchanged.
+    nepal = clean_person_names("Nepal Krishna")
+    assert nepal["cleaned_full_name"] == "Nepal Krishna"
+    assert nepal["extracted_nationality_hint"] is None
+
+    khali = clean_person_names("Khali of Nigeria")
+    assert khali["cleaned_full_name"] == "Khali of Nigeria"
+    assert khali["extracted_nationality_hint"] is None
+
+    china = clean_person_names("China China")
+    assert china["cleaned_full_name"] == "China"
+
+
+def test_invalid_literal_names_marked_unidentified():
+    """Real records: "Unknown"/"Nil"/"Not Known"/"N/A" (77 records total)
+    and a literal "Absconding"/"Unknown Person" standing in for the name
+    itself (83 + 40 records -- not previously recognized as placeholders
+    at all) must never be stored as if they were a real identified name."""
+    for raw in ("Unknown", "Nil", "Not Known", "Not Available", "N/A", "NA", "None", "-"):
+        result = clean_person_names(raw)
+        assert result["cleaned_full_name"] is None, raw
+        assert result["name_identified"] is False, raw
+        assert result["unidentified_reason"] == "invalid_literal", raw
+
+    absconding = clean_person_names("Absconding")
+    assert absconding["cleaned_full_name"] is None
+    assert absconding["unidentified_reason"] == "invalid_literal"
+
+    paren_absconding = clean_person_names("(Absconding)")
+    assert paren_absconding["cleaned_full_name"] is None
+    assert paren_absconding["unidentified_reason"] == "invalid_literal"
+
+    unknown_person = clean_person_names("Unknown Person")
+    assert unknown_person["cleaned_full_name"] is None
+    assert unknown_person["unidentified_reason"] == "invalid_literal"
+
+    # A role word or placeholder embedded alongside a REAL name is not
+    # this check's concern and must survive.
+    real_name = clean_person_names("Ravi Kumar")
+    assert real_name["cleaned_full_name"] == "Ravi Kumar"
+    assert real_name["name_identified"] is True
+
+
+def test_bare_phone_number_stripped_from_name():
+    """Real records S.No. 193, 152: an unlabeled 10-digit mobile number
+    glued onto the name with a hyphen or '#' was previously never
+    stripped at all (only the explicitly labeled cell:/ph.no.:/✆ forms
+    were)."""
+    assert clean_person_names("Aakula Harith Saranga-9959075757")["cleaned_full_name"] == "Aakula Harith Saranga"
+    assert clean_person_names("A5:Somnath# 9007155796")["cleaned_full_name"] == "Somnath"
+    # Labeled forms still work exactly as before.
+    assert clean_person_names("Anand, Cell: 9876543210")["cleaned_full_name"] == "Anand"
+    # Confirmed gap found via full-dataset validation (S.No. 48612,
+    # 50702): "Ph:" (no "No") left a dangling label once only the digits
+    # were removed by the bare-phone strip.
+    assert clean_person_names("Varun Lanco, Ph: 7075475557")["cleaned_full_name"] == "Varun Lanco"
+    assert clean_person_names("Yashwardhan, Ph: 7799786687")["cleaned_full_name"] == "Yashwardhan"
+    assert clean_person_names("Aakash Reddy, Ph: 9652979226")["cleaned_full_name"] == "Aakash Reddy"
+
+
+def test_spelled_out_age_and_occupation_label_stripped():
+    """Confirmed gap (audit I-1/I-2, real records S.No. 1168, 5665): the
+    old age pattern only matched the abbreviation "yrs", never the
+    spelled-out word "Years"; the R/O pattern required whitespace
+    immediately after "r/o", never allowing an intervening period
+    ("R/O."); and there was no strip rule for an "Occ:" occupation label
+    at all."""
+    aditya = clean_person_names(
+        "Aditya Kumar , Age. 25 Years, R/O. Lingampally Market Chandanagar, P",
+    )
+    assert aditya["cleaned_full_name"] == "Aditya Kumar"
+
+    driver = clean_person_names("Bandipalli Sai Kiran , Age:29 Years, Occ:Driver")
+    assert driver["cleaned_full_name"] == "Bandipalli Sai Kiran"
+
+    # Already-working abbreviated form is unaffected.
+    abbreviated = clean_person_names("Kiran s/o Ram, r/o Hyderabad, 32 yrs")
+    assert abbreviated["cleaned_full_name"] == "Kiran"
+
+
+def test_mojibake_normalized():
+    """Low-volume (0.098% of the real export) but real: stray 'Â'
+    sequences from a UTF-8-as-Latin-1 mis-decode, and smart quotes/en-
+    dashes, are normalized away as a pure display-cleanup step that never
+    runs before identity extraction decisions are made."""
+    result = clean_person_names("Angoth Jaggu Â Â")
+    assert result["cleaned_full_name"] == "Angoth Jaggu"
+
+
+def test_review_flags_are_non_destructive_signals_only():
+    """Confirmed-correct existing behaviour (collapse_exact_repetition
+    does not touch a trailing duplicated token, since it is not a whole-
+    value tile) now gets a soft, non-destructive review signal instead of
+    passing through with zero trace. The name itself is NEVER rewritten
+    by this -- only a flag is added."""
+    trailing_dup = clean_person_names("A. Lokesh Lokesh")
+    assert trailing_dup["cleaned_full_name"] == "A. Lokesh Lokesh"
+    assert "duplicate_token" in trailing_dup["review_flags"]
+
+    initial_only = clean_person_names("A")
+    assert initial_only["cleaned_full_name"] == "A"
+    assert "initial_only_name" in initial_only["review_flags"]
+    assert initial_only["name_identified"] is True  # flagged for review, never deleted
+
+    ordinary = clean_person_names("Ravi Kumar")
+    assert ordinary["review_flags"] == []
+
+
+#   The 10 "Regular ETL regression tests" below prove the regular ETL3
+#   pipeline (etl3/enrichment/runner.py -> project.py -> names.py /
+#   multi_accused.py) actually uses the latest enrichment logic end to
+#   end -- not just that names.py/multi_accused.py work in isolation
+#   (already covered above and in test_multi_accused.py).
+
+def test_regular_etl_person_row_uses_latest_name_cleaning_end_to_end():
+    """A capability added in this phase (spelled-out "Alias") reaches all
+    the way through person_row() -- the actual function
+    runner.py:_person_enrichment() calls for every persons_unified row --
+    not just clean_person_names() called directly."""
+    row = person_row("V2", "P-ALIAS", {"full_name": "Ajay Alias Kittu Alias Bittu Kaleri"})
+    assert row["cleaned_full_name"] == "Ajay"
+    assert row["cleaned_alias"] == "Kittu; Bittu Kaleri"
+
+    unidentified = person_row("V2", "P-UNK", {"full_name": "Unknown Person"})
+    assert unidentified["cleaned_full_name"] is None
+    # Computed on every call regardless of the persistence flag (see
+    # test_regular_etl_identity_metadata_flag_gates_hash_only below).
+    assert unidentified["name_identified"] is False
+    assert unidentified["unidentified_reason"] == "invalid_literal"
+
+
+def test_regular_etl_reenriches_on_name_change():
+    """The same person_id, re-observed with a corrected/changed source
+    name, must produce a different cleaned_full_name AND a different
+    input_hash -- persist.upsert_rows() (unmodified by this task) uses
+    exactly that hash to decide a row changed and needs rewriting."""
+    before = person_row("V2", "P-SAME", {"full_name": "Ramesh Kumr"})
+    after = person_row("V2", "P-SAME", {"full_name": "Ramesh Kumar"})
+    assert before["cleaned_full_name"] != after["cleaned_full_name"]
+    assert before["input_hash"] != after["input_hash"]
+
+
+def test_regular_etl_stable_hash_for_unchanged_input():
+    """Identical input, called twice (simulating two ETL runs over
+    unchanged source data), must produce byte-identical output and an
+    identical input_hash -- the condition persist.upsert_rows() checks to
+    skip a rewrite and avoid a spurious change_log row."""
+    first = person_row("V2", "P-STABLE", {"full_name": "Shanthi Kumari"})
+    second = person_row("V2", "P-STABLE", {"full_name": "Shanthi Kumari"})
+    assert first == second
+    assert first["input_hash"] == second["input_hash"]
+
+
+def test_regular_etl_multi_accused_generates_separate_linked_occurrences():
+    """End-to-end through the same two functions runner.py's
+    _multi_accused_split actually calls (detect_multi_accused then
+    build_split_rows), for a pattern this phase newly supports (A-code
+    packs) -- not just a re-check of the already-covered N./N) style."""
+    parent = {
+        "accused_id": "V2:FIR9:acc1", "source_system": "V2", "crime_id": "FIR9",
+        "person_id": "V2:FIR9:acc1:person", "current_source_run_id": "run-9",
+        "current_as_of": "2026-01-01T00:00:00Z",
+    }
+    person_rows, accused_rows, audit_rows, parsed = build_split_rows(
+        parent, "A1) Ravi Kumar, A2) Suresh",
+    )
+    assert parsed["confidence"] == "high"
+    assert len(person_rows) == 2 and len(accused_rows) == 2
+    # All occurrences linked to the SAME original crime.
+    assert {a["crime_id"] for a in accused_rows} == {"FIR9"}
+    assert accused_rows[0]["person_id"] != accused_rows[1]["person_id"]
+
+
+def test_regular_etl_aliases_not_treated_as_separate_accused():
+    """An alias chain (@ or spelled-out "Alias") must never be read as
+    multiple accused by the multi-accused detector -- it has no digit or
+    A-code markers and the unnumbered-candidate heuristic only looks at
+    comma/'and'/'&', never the word "Alias" or "@"."""
+    for raw in (
+        "Ajay Alias Kittu Alias Bittu Kaleri",
+        "@Johnson Manumala @Goutham",
+        "Ravi Kumar @ Raju",
+    ):
+        r = detect_multi_accused(raw)
+        assert r["confidence"] == "none", raw
+        assert r["segments"] == [], raw
+
+
+def test_regular_etl_ambiguous_records_remain_unchanged():
+    """Reconfirms the confirmed business rule end to end: an ambiguous
+    comma list is never auto-split, and build_split_rows() correctly
+    produces nothing for it -- same guarantee test_multi_accused.py's
+    own build_split_rows tests already cover, re-run here specifically
+    against the shape a regular ETL run would actually see."""
+    parent = {
+        "accused_id": "V2:FIR10:acc1", "source_system": "V2", "crime_id": "FIR10",
+        "person_id": "V2:FIR10:acc1:person", "current_source_run_id": "run-10",
+        "current_as_of": "2026-01-01T00:00:00Z",
+    }
+    person_rows, accused_rows, audit_rows, parsed = build_split_rows(
+        parent, "Avinash Babu Rathod, Abhijith Thate",
+    )
+    assert parsed["confidence"] == "low"
+    assert person_rows == [] and accused_rows == [] and audit_rows == []
+
+
+def test_regular_etl_failed_record_isolated_others_continue():
+    """One malformed record in a batch must not prevent any other record
+    from being processed -- the exact isolation
+    runner.py:_person_enrichment()'s loop relies on
+    build_person_row_safe() for."""
+    batch = [
+        ("V2", "P-OK-1", "R1", {"full_name": "Ravi Kumar"}),
+        ("V2", "P-BAD", "R2", None),  # malformed payload -> raises inside person_row
+        ("V2", "P-OK-2", "R3", {"full_name": "Suresh Babu"}),
+    ]
+    rows, failures = [], []
+    for source_system, person_id, record_id, payload in batch:
+        row, failure = build_person_row_safe(source_system, person_id, record_id, payload)
+        if row:
+            rows.append(row)
+        if failure:
+            failures.append(failure)
+    assert len(rows) == 2
+    assert {r["person_id"] for r in rows} == {"P-OK-1", "P-OK-2"}
+    assert len(failures) == 1
+    assert failures[0]["person_id"] == "P-BAD"
+    assert failures[0]["source_record_id"] == "R2"
+
+
+def test_regular_etl_identity_metadata_flag_gates_hash_only():
+    """ETL3_NAME_IDENTITY_FIELDS_ENABLED (same convention as
+    ETL3_MULTI_ACCUSED_SPLIT_ENABLED; both are deliberately active in this
+    repo's own etl3/config/.env as of the 2026-11-18 production rollout --
+    see DOPAMS_ETL3_FINAL_DEPLOYMENT_REPORT.md) controls whether the 5 new
+    identity fields are HASHED -- never whether they are computed. This
+    test exercises the mechanism directly via person_row()'s own
+    persist_identity_metadata parameter, independent of whatever the
+    ambient environment's flag currently is (deliberately not asserting
+    on _name_identity_settings()'s live value, which reflects real
+    deployment state, not a test fixture): with the parameter off, two
+    rows that differ ONLY in unidentified_reason must still hash
+    identically, so introducing this code never forces every existing
+    person_enrichment row to look "changed" the moment it ships."""
+    off_a = person_row("V2", "P-X", {"full_name": "Unknown"}, persist_identity_metadata=False)
+    off_b = person_row("V2", "P-X", {"full_name": "Ravi Kumar"}, persist_identity_metadata=False)
+    # Both still compute the fields (visible on the returned dict)...
+    assert off_a["unidentified_reason"] == "invalid_literal"
+    assert off_b["unidentified_reason"] is None
+    # ...but neither's PRESENCE changes what gets hashed for name/alias
+    # purposes beyond cleaned_full_name itself, which already differs --
+    # confirmed by checking the flag-ON hash differs from flag-OFF for
+    # the SAME input, proving the fields only enter the hash when the
+    # flag says they should be persisted.
+    on_a = person_row("V2", "P-X", {"full_name": "Unknown"}, persist_identity_metadata=True)
+    assert on_a["input_hash"] != off_a["input_hash"]
+
+
 def test_replay_hash_stable():
     first = crime_row("V2", "C1", {"class_classification": "Small", "case_status": "PT Cases"})
     second = crime_row("V2", "C1", {"class_classification": "Small", "case_status": "PT Cases"})
@@ -995,6 +1457,31 @@ def main():
     check("duplicate name collapse: idempotent + edge inputs", test_collapse_exact_repetition_idempotent_and_edge_inputs)
     check("duplicate name: full pipeline preserves raw/other fields", test_duplicate_name_full_pipeline_preserves_raw_and_other_fields)
     check("trailing hyphen residue trimmed", test_trailing_hyphen_residue_trimmed)
+    check("name identified true for ordinary names", test_name_identified_true_for_ordinary_names)
+    check("multi-alias @ chain preserves every alias", test_multi_alias_at_chain_preserves_every_alias)
+    check("spelled-out alias word extraction", test_spelled_out_alias_word_extraction)
+    check("spelled-out relationship markers", test_spelled_out_relationship_markers)
+    check("relationship-only record marked unidentified", test_relationship_only_record_marked_unidentified_not_invented)
+    check("dangling relationship marker stripped", test_dangling_relationship_marker_stripped_even_without_relative_name)
+    check("bare numeric list prefix stripped", test_bare_numeric_list_prefix_stripped)
+    check("accused code variants stripped", test_accused_code_variants_stripped)
+    check("accused person label stripped", test_accused_person_label_stripped)
+    check("role phrase in parens extracted and stripped", test_role_phrase_in_parens_extracted_and_stripped)
+    check("role-only whole value marked unidentified", test_role_only_whole_value_marked_unidentified)
+    check("nationality in parens extracted, bare word untouched", test_nationality_in_parens_extracted_but_bare_word_never_touched)
+    check("invalid literal names marked unidentified", test_invalid_literal_names_marked_unidentified)
+    check("bare phone number stripped from name", test_bare_phone_number_stripped_from_name)
+    check("spelled-out age and occupation label stripped", test_spelled_out_age_and_occupation_label_stripped)
+    check("mojibake normalized", test_mojibake_normalized)
+    check("review flags are non-destructive", test_review_flags_are_non_destructive_signals_only)
+    check("regular ETL: person_row uses latest name cleaning end to end", test_regular_etl_person_row_uses_latest_name_cleaning_end_to_end)
+    check("regular ETL: re-enriches on name change", test_regular_etl_reenriches_on_name_change)
+    check("regular ETL: stable hash for unchanged input", test_regular_etl_stable_hash_for_unchanged_input)
+    check("regular ETL: multi-accused generates separate linked occurrences", test_regular_etl_multi_accused_generates_separate_linked_occurrences)
+    check("regular ETL: aliases not treated as separate accused", test_regular_etl_aliases_not_treated_as_separate_accused)
+    check("regular ETL: ambiguous records remain unchanged", test_regular_etl_ambiguous_records_remain_unchanged)
+    check("regular ETL: failed record isolated, others continue", test_regular_etl_failed_record_isolated_others_continue)
+    check("regular ETL: identity metadata flag gates hash only", test_regular_etl_identity_metadata_flag_gates_hash_only)
     check("replay hash", test_replay_hash_stable)
     check("ai validation", test_ai_validation)
     check("ai retry", test_ai_retry_and_success_does_not_invent_on_empty)

@@ -111,6 +111,70 @@ def _crime_enrichment(conn, run_id):
     )
 
 
+def _name_identity_settings():
+    """Feature flag gating whether the name_identified/unidentified_reason/
+    extracted_role_hint/extracted_nationality_hint/review_flags signals
+    from etl3.enrichment.names.clean_person_names() are persisted to
+    person_enrichment.
+
+    Disabled by default (ETL3_NAME_IDENTITY_FIELDS_ENABLED != '1') -- the
+    exact same convention _multi_accused_settings()/migration 018 already
+    established. Requires migration 022_person_enrichment_identity_fields.sql
+    to already be applied; enabling the flag before that migration is
+    applied will fail loudly (unknown column) on the next _person_enrichment
+    run, not silently -- same convention the split feature itself follows.
+    """
+    enabled = (os.environ.get("ETL3_NAME_IDENTITY_FIELDS_ENABLED") or "0").strip() == "1"
+    return {"enabled": enabled}
+
+
+def _v2_person_payload(v2_payloads, record_id, full_name, alias, relative_name,
+                       nationality, present_address_text, permanent_address_text):
+    payload = dict(v2_payloads.get(record_id) or {})
+    if not payload.get("full_name"):
+        payload["full_name"] = full_name
+    if not payload.get("alias"):
+        payload["alias"] = alias
+    if not payload.get("relative_name"):
+        payload["relative_name"] = relative_name
+    if not payload.get("nationality"):
+        payload["nationality"] = nationality
+    if not payload.get("present_address_text") and present_address_text:
+        payload["present_address_text"] = present_address_text
+    if not payload.get("permanent_address_text") and permanent_address_text:
+        payload["permanent_address_text"] = permanent_address_text
+    return payload
+
+
+def build_person_row_safe(source_system, person_id, record_id, payload, geo_kb=None,
+                          persist_identity_metadata=False):
+    """person_row(), isolated: returns (row_or_None, failure_or_None), never
+    raises. One bad record must never abort the whole batch (per the ETL3
+    regular-pipeline error-handling requirement) -- the caller gets back
+    either a complete row or a small, loggable failure dict naming exactly
+    which record failed and why; every OTHER record is unaffected either
+    way. Nothing is ever partially written for the failed record: a
+    raised exception here means no row is returned for it at all, so
+    `rows` for the batch simply has no entry for that person_id.
+
+    Pulled out of _person_enrichment's loop as its own pure function
+    specifically so this isolation behaviour is unit-testable without a
+    database connection (etl3/tests/test_enrichment.py exercises it
+    directly with a payload engineered to make person_row raise).
+    """
+    try:
+        row = person_row(
+            source_system, person_id, payload, geo_kb=geo_kb,
+            persist_identity_metadata=persist_identity_metadata,
+        )
+        return row, None
+    except Exception as exc:
+        return None, {
+            "person_id": person_id, "source_system": source_system,
+            "source_record_id": record_id, "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def _person_enrichment(conn, run_id, geo_kb=None):
     people = _pairs(
         conn,
@@ -125,25 +189,18 @@ def _person_enrichment(conn, run_id, geo_kb=None):
         record_id: payload
         for record_id, payload in _latest(conn, "persons_source", "V2")
     }
+    persist_identity_metadata = _name_identity_settings()["enabled"]
     rows = []
+    failures = []
     for (
         person_id, source_system, record_id, full_name, alias, relative_name,
         nationality, present_address_text, permanent_address_text,
     ) in people:
         if source_system == "V2":
-            payload = dict(v2_payloads.get(record_id) or {})
-            if not payload.get("full_name"):
-                payload["full_name"] = full_name
-            if not payload.get("alias"):
-                payload["alias"] = alias
-            if not payload.get("relative_name"):
-                payload["relative_name"] = relative_name
-            if not payload.get("nationality"):
-                payload["nationality"] = nationality
-            if not payload.get("present_address_text") and present_address_text:
-                payload["present_address_text"] = present_address_text
-            if not payload.get("permanent_address_text") and permanent_address_text:
-                payload["permanent_address_text"] = permanent_address_text
+            payload = _v2_person_payload(
+                v2_payloads, record_id, full_name, alias, relative_name,
+                nationality, present_address_text, permanent_address_text,
+            )
         else:
             # V1 has no persons_source; domicile/address come from unified text.
             payload = {
@@ -154,17 +211,33 @@ def _person_enrichment(conn, run_id, geo_kb=None):
                 "present_address_text": present_address_text,
                 "permanent_address_text": permanent_address_text,
             }
-        row = person_row(source_system, person_id, payload, geo_kb=geo_kb)
+        row, failure = build_person_row_safe(
+            source_system, person_id, record_id, payload, geo_kb=geo_kb,
+            persist_identity_metadata=persist_identity_metadata,
+        )
         if row:
             rows.append(row)
-    return upsert_rows(
+        if failure:
+            failures.append(failure)
+    if failures:
+        print(
+            f"[person_enrichment] {len(failures)} record(s) failed and were "
+            f"skipped (every other record still processed normally): "
+            f"{failures[:5]}{' ...' if len(failures) > 5 else ''}",
+        )
+    stats = upsert_rows(
         conn, "person_enrichment", "person_id", rows,
         ["person_id", "source_system", "domicile_classification", "domicile_method",
          "nationality", "surname", "relation_type", "gender_source", "address_resolution",
          "raw_full_name", "cleaned_full_name", "cleaned_given_name",
-         "cleaned_alias", "cleaned_relative_name", "input_hash"],
+         "cleaned_alias", "cleaned_relative_name", "input_hash"]
+        + (["name_identified", "unidentified_reason", "extracted_role_hint",
+            "extracted_nationality_hint", "review_flags"] if persist_identity_metadata else []),
         run_id, "person_enrichment",
     )
+    stats["failed"] = len(failures)
+    stats["failed_records"] = failures[:20]
+    return stats
 
 
 def _accused_status_index(conn):

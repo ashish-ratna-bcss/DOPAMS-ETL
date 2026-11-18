@@ -115,7 +115,7 @@ def _prefer_country(raw, kb_country, geo_kb):
     return recognized_country(kb_country, geo_kb)
 
 
-def person_row(source_system, person_id, payload, geo_kb=None):
+def person_row(source_system, person_id, payload, geo_kb=None, persist_identity_metadata=False):
     """Build person enrichment: domicile, resolved nationality, KB address.
 
     Domicile precedence:
@@ -220,7 +220,43 @@ def person_row(source_system, person_id, payload, geo_kb=None):
     }
     if address is not None:
         body["address_resolution"] = address
+
+    # Name-identity / role / nationality signals from clean_person_names
+    # (see DOPAMS_ETL3_NAME_CLEANING_EDGE_CASE_AUDIT.md and the follow-up
+    # implementation tasks). person_enrichment has no columns for them
+    # until migration 022_person_enrichment_identity_fields.sql is
+    # reviewed and applied -- so whether they are hashed (and therefore
+    # persisted) is controlled by `persist_identity_metadata`, which
+    # etl3.enrichment.runner wires to the ETL3_NAME_IDENTITY_FIELDS_ENABLED
+    # env flag (default off), the exact same gating convention already
+    # used for ETL3_MULTI_ACCUSED_SPLIT_ENABLED/migration 018.
+    #
+    # The flag must stay off until the migration is applied: upsert_rows
+    # only ever writes the columns runner.py's column list names, so an
+    # extra key on this dict is harmless on its own -- but if these keys
+    # were hashed unconditionally, every existing row's input_hash would
+    # change the moment this code ships (even though no actually-
+    # persisted column changed), forcing every row to look "changed" and
+    # triggering a pointless mass rewrite + change_log entry per person.
+    # Gating the hash by the same flag that gates the column list keeps
+    # the two permanently in lockstep: a row's hash only reflects these
+    # fields once they are actually being written.
+    if names is not None and persist_identity_metadata:
+        body["name_identified"] = names["name_identified"]
+        body["unidentified_reason"] = names["unidentified_reason"]
+        body["extracted_role_hint"] = names["extracted_role_hint"]
+        body["extracted_nationality_hint"] = names["extracted_nationality_hint"]
+        body["review_flags"] = names["review_flags"]
     body["input_hash"] = _hash(body)
+    if names is not None and not persist_identity_metadata:
+        # Not hashed (see above), but still returned on every call so
+        # tests, the standalone backfill script, and any offline
+        # validation can already exercise and inspect them.
+        body["name_identified"] = names["name_identified"]
+        body["unidentified_reason"] = names["unidentified_reason"]
+        body["extracted_role_hint"] = names["extracted_role_hint"]
+        body["extracted_nationality_hint"] = names["extracted_nationality_hint"]
+        body["review_flags"] = names["review_flags"]
     return body
 
 

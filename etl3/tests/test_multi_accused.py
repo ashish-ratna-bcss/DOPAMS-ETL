@@ -116,10 +116,17 @@ def test_initials_not_mistaken_for_markers():
     assert detect_multi_accused("K. Vamsi Krishna")["confidence"] == "none"
 
 
-def test_accused_code_style_markers_not_split():
-    r = detect_multi_accused("A1) Ravi Kumar, A2) Suresh")
-    assert r["confidence"] == "none"
+def test_single_accused_code_reference_still_not_split():
+    """Extended behaviour (DOPAMS_ETL3_NAME_CLEANING_EDGE_CASE_AUDIT.md /
+    follow-up implementation task): accused-code markers are now split
+    evidence under the SAME 2+-marker guard already proven safe for the
+    plain N./N) style -- but a SINGLE accused-code reference to its own
+    name (one marker, never two) still never qualifies, exactly as
+    before. This is the one assertion from the pre-extension test that
+    stays true unconditionally."""
     assert detect_multi_accused("A-1")["confidence"] == "none"
+    assert detect_multi_accused("A-1: Cheekati Srinivas")["confidence"] == "none"
+    assert detect_multi_accused("A5: Somnath")["confidence"] == "none"
 
 
 def test_phone_and_house_number_digits_not_mistaken_for_markers():
@@ -132,6 +139,102 @@ def test_empty_and_none_input():
         r = detect_multi_accused(value)
         assert r["confidence"] == "none"
         assert r["segments"] == []
+
+
+# ---------------------------------------------------------------------------
+# detect_multi_accused: accused-code (A-N) markers as split evidence
+# (extended per DOPAMS_ETL3_NAME_CLEANING_EDGE_CASE_AUDIT.md finding B-5 /
+# the follow-up implementation task's explicit requirement to support
+# "A1. Person A, A2. Person B" and "A-1: Person A, A-2: Person B").
+# ---------------------------------------------------------------------------
+
+def test_a_code_markers_split_at_high_confidence_when_unambiguous():
+    r = detect_multi_accused("A1) Ravi Kumar, A2) Suresh")
+    assert r["confidence"] == "high"
+    assert r["method"] == "a_code_pack_v1"
+    assert [s["raw_text"] for s in r["segments"]] == ["Ravi Kumar", "Suresh"]
+    assert [s["label_number"] for s in r["segments"]] == [1, 2]
+
+    colon_form = detect_multi_accused("A-1: Person A, A-2: Person B")
+    assert colon_form["confidence"] == "high"
+    assert [s["raw_text"] for s in colon_form["segments"]] == ["Person A", "Person B"]
+
+    three_way = detect_multi_accused("A1. Ravi Kumar, A2. Suresh Babu, A3. Mohan Rao")
+    assert three_way["confidence"] == "high"
+    assert len(three_way["segments"]) == 3
+    assert three_way["segments"][2]["raw_text"] == "Mohan Rao"
+
+
+def test_a_code_missing_leading_marker_downgrades_to_low_not_lost():
+    """Real production shapes (S.No. 63, 68): the FIRST accused in the
+    list has no A-code at all ("Bishan Singh"), only the second/third
+    onward do ("A2.", "A3."). Auto-splitting from A2 would silently drop
+    "Bishan Singh" entirely -- so this stays "low" and non-destructive,
+    but the found segments are still surfaced (not silently discarded)
+    so a reviewer can see exactly what WAS found."""
+    r = detect_multi_accused(
+        "Bishan Singh, A2. Karnati Sharath Kumar, A3. Badari Sai Reddy",
+    )
+    assert r["confidence"] == "low"
+    assert r["segments"] == []
+    assert "missing_leading_marker" in r["warnings"]
+    assert r["candidate_segments"] == ["Karnati Sharath Kumar", "Badari Sai Reddy"]
+
+    four_way_and = detect_multi_accused(
+        "Dudekula Moulali, A2. Rajesh, A3. Boddu Omkar and A4. Subramanya Raj Kumar",
+    )
+    assert four_way_and["confidence"] == "low"
+    assert "missing_leading_marker" in four_way_and["warnings"]
+    assert four_way_and["candidate_segments"] == ["Rajesh", "Boddu Omkar", "Subramanya Raj Kumar"]
+
+
+def test_n_dot_paren_punctuation_variant_now_detected():
+    """Confirmed gap (audit B-3, real record S.No. 10): "1)." -- a
+    close-paren immediately followed by a period -- was invisible to the
+    old single-character punctuation class. Four unambiguous, comma-
+    separated, sequential-from-1 names must now split at high
+    confidence."""
+    r = detect_multi_accused(
+        "1). Divi Sampath, 2). Syed Ameer Ali, 3). Bebri Koushal Naik, 4). Kattimani Mandira",
+    )
+    assert r["confidence"] == "high"
+    assert [s["raw_text"] for s in r["segments"]] == [
+        "Divi Sampath", "Syed Ameer Ali", "Bebri Koushal Naik", "Kattimani Mandira",
+    ]
+    assert [s["label_number"] for s in r["segments"]] == [1, 2, 3, 4]
+
+
+def test_space_separated_numbered_list_flagged_low_not_lost():
+    """Confirmed gap (audit B-2, real record S.No. 9): a numbered list
+    with NO punctuation separator between items at all -- "1. Name 2.
+    Name 3. Name 4. Name" -- was previously completely invisible (not
+    even flagged "low"). The weak (bare-whitespace) marker boundary now
+    detects it, but -- being a strictly weaker signal than a comma/
+    semicolon/"and" boundary -- the result is capped at "low", never
+    auto-split, with every segment still surfaced for review."""
+    r = detect_multi_accused(
+        "1. Bontha Chandramouli 2. Bathula Santhosh Reddy 3. Thodusu Mallesh 4. K.Anil",
+    )
+    assert r["confidence"] == "low"
+    assert r["segments"] == []
+    assert "weak_space_boundary" in r["warnings"]
+    assert r["candidate_segments"] == [
+        "Bontha Chandramouli", "Bathula Santhosh Reddy", "Thodusu Mallesh", "K.Anil",
+    ]
+
+
+def test_weak_boundary_never_promotes_to_high_even_when_otherwise_perfect():
+    """A single weak-boundary marker anywhere in an otherwise textbook-
+    perfect sequential pack (strictly 1,2,3, every segment plausible)
+    still caps the whole result at "low" -- the guard is applied
+    unconditionally, not just when it happens to be the only problem."""
+    r = detect_multi_accused("1) Ravi Kumar 2) Suresh Babu")
+    assert r["confidence"] == "low"
+    assert "weak_space_boundary" in r["warnings"]
+
+    # But a comma/semicolon/"and"-bounded pack is completely unaffected.
+    strong = detect_multi_accused("1) Ravi Kumar, 2) Suresh Babu")
+    assert strong["confidence"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +486,14 @@ def main():
     check("trailer_address_text helper", test_trailer_address_text_helper)
     check("single leading index not split", test_single_leading_index_not_split)
     check("initials not mistaken for markers", test_initials_not_mistaken_for_markers)
-    check("accused-code markers not split", test_accused_code_style_markers_not_split)
+    check("single accused-code reference still not split", test_single_accused_code_reference_still_not_split)
     check("phone/house-number digits not mistaken", test_phone_and_house_number_digits_not_mistaken_for_markers)
     check("empty and none input", test_empty_and_none_input)
+    check("A-code markers split at high confidence", test_a_code_markers_split_at_high_confidence_when_unambiguous)
+    check("A-code missing leading marker downgrades to low", test_a_code_missing_leading_marker_downgrades_to_low_not_lost)
+    check("'N).' punctuation variant now detected", test_n_dot_paren_punctuation_variant_now_detected)
+    check("space-separated numbered list flagged low", test_space_separated_numbered_list_flagged_low_not_lost)
+    check("weak boundary never promotes to high", test_weak_boundary_never_promotes_to_high_even_when_otherwise_perfect)
     check("non-sequential numbers low confidence", test_non_sequential_numbers_low_confidence)
     check("duplicate marker numbers low confidence", test_duplicate_marker_numbers_low_confidence)
     check("out of order numbers low confidence", test_out_of_order_numbers_low_confidence)

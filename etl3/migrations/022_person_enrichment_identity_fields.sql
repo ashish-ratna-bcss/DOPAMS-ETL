@@ -1,0 +1,84 @@
+-- Name-identity/role/nationality signals from etl3.enrichment.names.
+-- clean_person_names(), per DOPAMS_ETL3_NAME_CLEANING_EDGE_CASE_AUDIT.md
+-- and the follow-up implementation tasks. These are METADATA about the
+-- existing cleaned_full_name column, not new identity facts:
+--
+--   name_identified             -- false when cleaned_full_name is null
+--                                  because the source had nothing but a
+--                                  placeholder ("Unknown"), a role/
+--                                  occupation phrase with no name
+--                                  ("Medical Shop Owner"), or a
+--                                  relationship/alias description with
+--                                  no primary name ("Wife of Amzad",
+--                                  "@Johnson Manumala @Goutham").
+--   unidentified_reason         -- one of: invalid_literal, role_only,
+--                                  nationality_only, relationship_only,
+--                                  alias_only, empty, unrecoverable, or
+--                                  null when name_identified is true.
+--   extracted_role_hint         -- a parenthetical occupation/role word
+--                                  pulled out of the name for DISPLAY
+--                                  cleanup only ("Anil (Supplier)" ->
+--                                  "Supplier"). Never written to, and
+--                                  never read from, the AI-driven
+--                                  accused_type/role_in_crime
+--                                  classification in rules.py/
+--                                  accused_facts.py, which remains the
+--                                  sole authority for a crime's
+--                                  accused-role metadata.
+--   extracted_nationality_hint  -- a parenthetical nationality mention
+--                                  pulled out of the name for display
+--                                  cleanup only ("Aisha (Nigerian)" ->
+--                                  "Nigerian"). Never written to, and
+--                                  never read from, domicile
+--                                  classification -- resolve_name_country
+--                                  in address.py derives that completely
+--                                  independently and continues to.
+--   review_flags                -- non-destructive signals on a value
+--                                  deliberately left unchanged (an
+--                                  initial-only name, a trailing
+--                                  duplicated token) -- never a reason
+--                                  to rewrite cleaned_full_name itself.
+--                                  JSONB (a JSON array of strings), not
+--                                  TEXT[]: etl3.enrichment.persist._db_value()
+--                                  already wraps any Python list in
+--                                  psycopg2's Json() adapter for every
+--                                  other jsonb column in this codebase
+--                                  (e.g. address_resolution); a native
+--                                  TEXT[] column would need a second,
+--                                  special-cased code path there for
+--                                  this one column alone.
+--
+-- Every column is nullable and purely additive -- no existing column,
+-- constraint, or index is altered or dropped, and every existing row/
+-- query against person_enrichment is unaffected until something
+-- actually starts writing to these columns.
+--
+-- NOT applied by anything in this commit. The write path IS already
+-- fully wired, feature-flagged the same way migration 018's split
+-- feature is (disabled by default, fails loudly rather than silently if
+-- enabled before this migration is applied):
+--   - etl3/enrichment/project.py:person_row() takes
+--     persist_identity_metadata (default False); when True, the five
+--     fields are computed into `body` BEFORE input_hash is hashed, so a
+--     genuine future change to one of them is correctly detected as a
+--     change; when False (today), they are still computed and returned
+--     every call, just excluded from the hash.
+--   - etl3/enrichment/runner.py:_name_identity_settings() reads
+--     ETL3_NAME_IDENTITY_FIELDS_ENABLED (default "0"); _person_enrichment()
+--     passes that flag straight through to person_row() and only adds
+--     "name_identified", "unidentified_reason", "extracted_role_hint",
+--     "extracted_nationality_hint", "review_flags" to the upsert_rows()
+--     column list when it is "1".
+-- Turning this on in a real environment is therefore just:
+--   1. Review and apply this migration (run_migration.py
+--      022_person_enrichment_identity_fields.sql) on a disposable
+--      database first, same as every other migration here.
+--   2. Set ETL3_NAME_IDENTITY_FIELDS_ENABLED=1 for the next ETL3 run.
+-- Until both are done, nothing about today's behaviour changes at all.
+
+ALTER TABLE person_enrichment
+    ADD COLUMN IF NOT EXISTS name_identified            BOOLEAN,
+    ADD COLUMN IF NOT EXISTS unidentified_reason         VARCHAR(30),
+    ADD COLUMN IF NOT EXISTS extracted_role_hint          VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS extracted_nationality_hint    VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS review_flags               JSONB;

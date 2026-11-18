@@ -44,3 +44,7 @@ build/
 # Misc
 .temp
 *.log
+
+# Operator-local backfill state (etl3/run_name_enrichment_backfill.py) --
+# environment-specific resume checkpoints, never shared/committed.
+etl3/.backfill_name_enrichment_checkpoint*.json
