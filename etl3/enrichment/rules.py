@@ -239,6 +239,8 @@ def resolve_drug_category(primary_name: Optional[str]):
     if not primary_name:
         return None
     name = primary_name.lower().strip()
+    if name == "unidentified substance":
+        return "Unidentified"
     if name in ("ganja", "charas", "hashish", "hash oil", "bhang"):
         return "Cannabis"
     if name in (

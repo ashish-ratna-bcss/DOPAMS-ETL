@@ -30,6 +30,15 @@ _KB_PATH = Path(__file__).resolve().parent / "drug_mappings.json"
 SIMILARITY_THRESHOLD = 0.35
 TIER_IGNORED_GENERIC = "ignored_generic"
 
+# Sentinel standard_name for a seizure that is physically described (colour,
+# texture, form) but never explicitly named in the source. Distinct from
+# TIER_IGNORED_GENERIC: an ignored generic term (pills/tablets/liquid/white
+# alone) carries no identifying detail at all and the row is dropped, while
+# an appearance-based KB alias ("white powder", "white paste", ...) still
+# describes a real seized item worth keeping -- just with an unresolved
+# identity, pending future charge-sheet/FSL confirmation.
+UNIDENTIFIED_SUBSTANCE = "Unidentified Substance"
+
 
 def compact(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())

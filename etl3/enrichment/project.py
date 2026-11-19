@@ -333,6 +333,12 @@ def _drug_row(extraction_id, crime_id, source_system, provenance, source_record_
          and KB did not resolve (never overrides a real KB hit)
       3. unresolved (NULL) — never invent from a generic raw term
 
+    Exception: when raw_name resolves only to the UNIDENTIFIED_SUBSTANCE
+    placeholder (an appearance-only KB alias such as "white powder"), a
+    source-validated preferred_primary naming a real drug elsewhere in the
+    text wins over the placeholder (e.g. "white powder identified as
+    Cocaine" -> Cocaine, not Unidentified Substance).
+
     Generic/ignored raw terms return kb_match_tier=ignored_generic with
     primary_drug_name NULL (row omitted when both name and quantity empty).
     """
@@ -366,6 +372,18 @@ def _drug_row(extraction_id, crime_id, source_system, provenance, source_record_
                     tier = pref_tier
         else:
             primary = _text(preferred_primary)
+    elif primary == drug_kb.UNIDENTIFIED_SUBSTANCE and preferred_primary and drug_kb_obj is not None:
+        # An appearance-only placeholder yields to a real, source-validated
+        # explicit identification named elsewhere in the same text.
+        pref_std, pref_tier = drug_kb.resolve_primary_name(
+            preferred_primary, drug_kb_obj.items, drug_kb=drug_kb_obj,
+        )
+        if (
+            pref_std
+            and pref_std != drug_kb.UNIDENTIFIED_SUBSTANCE
+            and pref_tier != drug_kb.TIER_IGNORED_GENERIC
+        ):
+            primary, tier = pref_std, pref_tier
 
     # Final guard: ignored primary (e.g. alcohol) drops the row.
     if drug_kb_obj is not None and primary is not None and drug_kb_obj.is_ignored(primary):
