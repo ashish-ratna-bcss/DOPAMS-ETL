@@ -220,10 +220,11 @@ def parse_drug_response(text: str) -> dict:
     An empty drugs list is valid and means the text had no seizure to store.
     Entries with a null/blank raw_drug_name never become a drug row (a name
     is never invented), but when such an item still carries real seizure
-    evidence (a quantity, unit, or worth) it is kept in ``ambiguous`` for
-    audit/manual-review rather than silently discarded -- this is what lets
-    a crime be classified "Manual review" instead of "No drug Found" when
-    the source describes a seizure of an only-suspected substance.
+    evidence (a quantity, unit, or worth) it is kept in ``ambiguous`` rather
+    than silently discarded. ``ai_drug_rows`` (project.py) turns a surviving
+    ``ambiguous`` item into an "Unidentified Substance" row -- a physical
+    seizure of an only-suspected substance is "Drug found", never "No drug
+    Found" and never a separate "Manual review" status.
     """
     raw = "" if text is None else str(text)
     if not raw.strip():

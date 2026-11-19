@@ -526,8 +526,47 @@ def _collapse_duplicate_unmeasured_items(checked_items):
     return result
 
 
+def _unidentified_substance_row(extraction_id, crime_id, source_system, source_record_id,
+                                 quantity, unit, worth, drug_form=None, source_sentence=""):
+    """Row for a physical substance seized but never given any descriptive
+    name at all -- an ``ambiguous`` AI item (raw_drug_name null) that still
+    carries real quantity/worth/unit evidence of a seizure.
+
+    Final classification Rule B: a physical seizure with an unidentified
+    substance is "Unidentified Substance" (status "Drug found"), never
+    "No drug Found" and never a "Manual review" placeholder status -- there
+    is no such status in this project's classification.
+    """
+    measured = standardize_measurement(
+        quantity, unit, drug_form=drug_form, raw_drug_name=None,
+        seizure_worth=worth or 0, source_sentence=source_sentence,
+    )
+    return {
+        "extraction_id": extraction_id,
+        "crime_id": crime_id,
+        "source_system": source_system,
+        "provenance": "etl3_ai",
+        "source_record_id": source_record_id,
+        "raw_drug_name": None,
+        "primary_drug_name": drug_kb.UNIDENTIFIED_SUBSTANCE,
+        "drug_form": measured["drug_form"],
+        "drug_category": resolve_drug_category(drug_kb.UNIDENTIFIED_SUBSTANCE),
+        "raw_quantity": _num(quantity),
+        "raw_unit": measured["raw_unit"],
+        "weight_g": measured["weight_g"],
+        "weight_kg": measured["weight_kg"],
+        "volume_ml": measured["volume_ml"],
+        "volume_l": measured["volume_l"],
+        "count_total": measured["count_total"],
+        "seizure_worth": _num(worth),
+        "is_commercial": None,
+        "confidence_score": None,
+        "kb_match_tier": "unidentified_no_name",
+    }
+
+
 def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=None,
-                 source_text=None):
+                 source_text=None, ambiguous_items=None):
     """Turn a validated model payload into drug rows.
 
     Each AI drug must pass ignore-list + source-evidence validation before KB
@@ -537,9 +576,16 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
     this runs before extraction_id ordinals are assigned, so re-running the
     same response is idempotent (same reduced ordinal set every time).
 
+    ``ambiguous_items`` (parsed["ambiguous"]) are items the model described
+    with real seizure evidence (quantity/worth/unit) but no name at all.
+    Each is checked with the same no-physical-seizure gate used for named
+    items (against its own quoted source_sentence / the full source text);
+    evidence that survives becomes an "Unidentified Substance" row (Rule B),
+    never a separate ambiguous/manual-review outcome.
+
     Returns AiDrugRows (list subclass) with ``.rejections`` for audit.
     """
-    from etl3.enrichment.ai import validate_ai_drug_item
+    from etl3.enrichment.ai import _has_no_physical_seizure_evidence, validate_ai_drug_item
 
     rows = []
     rejections = []
@@ -582,6 +628,20 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
         row["confidence_score"] = conf
         rows.append(row)
         ordinal += 1
+
+    for amb in ambiguous_items or []:
+        sentence = amb.get("source_sentence") or ""
+        if _has_no_physical_seizure_evidence(sentence, source_text):
+            rejections.append({"raw_drug_name": None, "reason": "NO_PHYSICAL_SEIZURE"})
+            continue
+        row = _unidentified_substance_row(
+            f"{source_system}:ai:{crime_id}:{ordinal}", crime_id, source_system, crime_id,
+            amb.get("raw_quantity"), amb.get("raw_unit"), amb.get("seizure_worth"),
+            source_sentence=sentence,
+        )
+        rows.append(row)
+        ordinal += 1
+
     apply_commercial_flags(rows)
     for row in rows:
         row["input_hash"] = _measurement_hash(row)

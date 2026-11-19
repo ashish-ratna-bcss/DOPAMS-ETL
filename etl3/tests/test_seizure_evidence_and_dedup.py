@@ -360,3 +360,103 @@ def test_all_rejected_named_items_yield_no_rows_for_status_fallthrough():
     rows = ai_drug_rows("C7", "V2", URINE_TEST_ONLY_ITEMS, kb.items, drug_kb_obj=kb, source_text=URINE_TEST_ONLY_TEXT)
     assert list(rows) == []
     assert len(rows.rejections) == len(URINE_TEST_ONLY_ITEMS)
+
+
+# ---------------------------------------------------------------------------
+# 13. Ambiguous (no name at all) seizure with real evidence becomes
+#     "Unidentified Substance" -- final classification Rule B. Grounded in
+#     the real SNo 5210/5290 pattern (see test_brief_facts_accuracy.py):
+#     model proposes no name whatsoever, only a quantity and worth.
+# ---------------------------------------------------------------------------
+SUSPECTED_BUNDLE_TEXT = (
+    "On receiving credible information the police intercepted the accused "
+    "and recovered one gunny bag. On opening it, it was found to contain a "
+    "white crystalline substance suspected to be a narcotic drug. On "
+    "weighing, the substance was found to be 46 Kgs, estimated worth "
+    "Rs. 9,20,000, which was seized and sealed in the presence of panch witnesses."
+)
+SUSPECTED_BUNDLE_AMBIGUOUS = [
+    {
+        "raw_quantity": 46, "raw_unit": "kg", "seizure_worth": 920000,
+        "source_sentence": (
+            "On weighing, the substance was found to be 46 Kgs, estimated "
+            "worth Rs. 9,20,000, which was seized and sealed in the presence "
+            "of panch witnesses."
+        ),
+    },
+]
+
+
+def test_ambiguous_evidence_becomes_unidentified_substance_row():
+    kb = _kb()
+    rows = ai_drug_rows(
+        "C8", "V2", [], kb.items, drug_kb_obj=kb, source_text=SUSPECTED_BUNDLE_TEXT,
+        ambiguous_items=SUSPECTED_BUNDLE_AMBIGUOUS,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["raw_drug_name"] is None
+    assert row["primary_drug_name"] == "Unidentified Substance"
+    assert row["drug_category"] == "Unidentified"
+    assert row["raw_quantity"] == 46
+    assert row["weight_kg"] == 46
+    assert row["seizure_worth"] == 920000
+    assert rows.rejections == []
+
+
+def test_ambiguous_evidence_rejected_when_only_consumption_or_urine_test():
+    kb = _kb()
+    text = (
+        "He confessed he is addicted to consumption of about 5 grams of a "
+        "narcotic substance daily, procured from unknown persons. A drug "
+        "testing kit showed positive."
+    )
+    ambiguous = [
+        {
+            "raw_quantity": 5, "raw_unit": "grams", "seizure_worth": 0,
+            "source_sentence": (
+                "He confessed he is addicted to consumption of about 5 grams "
+                "of a narcotic substance daily, procured from unknown persons."
+            ),
+        },
+    ]
+    rows = ai_drug_rows(
+        "C9", "V2", [], kb.items, drug_kb_obj=kb, source_text=text,
+        ambiguous_items=ambiguous,
+    )
+    assert list(rows) == []
+    assert len(rows.rejections) == 1
+    assert rows.rejections[0]["reason"] == REASON_NO_PHYSICAL_SEIZURE
+
+
+def test_ambiguous_evidence_alongside_a_named_drug_both_kept_as_separate_rows():
+    kb = _kb()
+    text = (
+        "Police seized 10 grams of Ganja from accused A. They also "
+        "recovered an unmarked gunny bag of unidentified narcotic powder "
+        "which, on weighing, was found to be 2 Kgs and was seized."
+    )
+    drugs = [
+        {
+            "raw_drug_name": "Ganja", "primary_drug_name": "Ganja", "raw_quantity": 10.0,
+            "raw_unit": "grams", "seizure_worth": 0.0, "is_commercial": False,
+            "confidence_score": 90, "source_sentence": "Police seized 10 grams of Ganja from accused A.",
+        },
+    ]
+    ambiguous = [
+        {
+            "raw_quantity": 2, "raw_unit": "kg", "seizure_worth": 0,
+            "source_sentence": (
+                "They also recovered an unmarked gunny bag of unidentified "
+                "narcotic powder which, on weighing, was found to be 2 Kgs "
+                "and was seized."
+            ),
+        },
+    ]
+    rows = ai_drug_rows(
+        "C10", "V2", drugs, kb.items, drug_kb_obj=kb, source_text=text,
+        ambiguous_items=ambiguous,
+    )
+    assert len(rows) == 2
+    by_primary = {r["primary_drug_name"] for r in rows}
+    assert by_primary == {"Ganja", "Unidentified Substance"}

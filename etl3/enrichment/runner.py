@@ -67,7 +67,6 @@ DRUG_FINDING_COLUMNS = ["crime_id", "source_system", "status", "method", "input_
 # accuracy spec). "No drug Found" uses the mandated exact casing.
 DRUG_FOUND = "Drug found"
 NO_DRUG_FOUND = "No drug Found"
-MANUAL_REVIEW = "Manual review"
 
 ACCUSED_COLUMNS = [
     "accused_id", "source_system", "accused_category", "role_in_crime",
@@ -1126,13 +1125,13 @@ def _finalize_drug_extraction(conn, run_id, crime_id, source_system, parsed, row
     while bypassing the crime-level classification, and "No drug Found" is
     only ever written here -- never as a fabricated drug_extractions row.
 
-    Precedence: a confirmed drug (``rows`` non-empty) always wins, even
-    alongside leftover ambiguous evidence for a second, unconfirmed item --
-    the crime has a drug, full stop. Otherwise, any ambiguous item (a
-    seizure described but the substance only suspected, never named) means
-    "Manual review", never "No drug Found". Only when nothing was proposed,
-    or everything proposed was rejected, with no ambiguous residue, is the
-    crime "No drug Found".
+    Only two crime-level outcomes exist: "Drug found" (``rows`` non-empty --
+    this already includes "Unidentified Substance" rows built by
+    ``ai_drug_rows`` from physically-evidenced but unnamed ``ambiguous``
+    items) and "No drug Found" (``rows`` empty, whether because nothing was
+    proposed or everything proposed -- named or ambiguous -- was rejected
+    for lacking physical seizure evidence). There is no "Manual review" or
+    other intermediate status.
     """
     drugs = parsed.get("drugs") or []
     ambiguous = parsed.get("ambiguous") or []
@@ -1149,11 +1148,7 @@ def _finalize_drug_extraction(conn, run_id, crime_id, source_system, parsed, row
         validation_status = "partial" if rejections else "accepted"
         status, outcome = "success", "success"
         finding_status, finding_method = DRUG_FOUND, "ai_source_supported"
-    elif ambiguous:
-        validation_status = "rejected" if drugs else "empty"
-        status, outcome = "empty", "empty"
-        finding_status, finding_method = MANUAL_REVIEW, "ambiguous_suspected_substance"
-    elif drugs:
+    elif drugs or ambiguous:
         validation_status = "rejected"
         status, outcome = "empty", "empty"
         finding_status, finding_method = NO_DRUG_FOUND, "all_proposed_items_rejected"
@@ -1243,6 +1238,7 @@ def process_drug_for_crime(
     rows = ai_drug_rows(
         crime_id, source_system, drugs, kb_items,
         drug_kb_obj=drug_kb_obj, source_text=text,
+        ambiguous_items=parsed.get("ambiguous"),
     )
     result = _finalize_drug_extraction(conn, run_id, crime_id, source_system, parsed, rows)
     record_ai_attempt(
@@ -1985,6 +1981,7 @@ def run_ai_extraction(conn, run_id, kb_items, client=None, settings=None, drug_k
         rows = ai_drug_rows(
             crime_id, source_system, drugs, kb_items,
             drug_kb_obj=drug_kb_obj, source_text=text,
+            ambiguous_items=parsed.get("ambiguous"),
         )
         result = _finalize_drug_extraction(conn, run_id, crime_id, source_system, parsed, rows)
         rejected += len(result["rejections"])
