@@ -32,6 +32,7 @@ REASON_EMPTY_RESPONSE = "EMPTY_RESPONSE"
 REASON_INVALID_QUANTITY = "INVALID_QUANTITY"
 REASON_INVALID_UNIT = "INVALID_UNIT"
 REASON_NON_DRUG_PROPERTY = "NON_DRUG_PROPERTY"
+REASON_NO_PHYSICAL_SEIZURE = "NO_PHYSICAL_SEIZURE"
 
 # Documented generics not always present on kb.drug_ignore_list. Used only as a
 # secondary code-level guard for AI validation; KB ignore list remains primary
@@ -486,7 +487,26 @@ def _compound_chain_sums(text, mentions):
     return sums
 
 
-def _semantic_quantity_match(qty_value, unit_norm, text):
+def _distinct_same_unit_sum_candidate(unit_norm, unit_table, pattern, sentence_text):
+    """Sum of 2+ same-unit mentions within the model's own quoted evidence
+    sentence for this item -- e.g. "P-1 is 6 grams, P-2 is 8 grams, P-3 is
+    7 grams, P-4 is 7 grams &P-5 is 7 grams" (-> 35). Scoped to the item's
+    own source_sentence, never the full document: the model's own choice
+    to quote exactly these mentions together is what establishes they
+    belong to one seizure of one substance, per task safety requirement.
+    Returns None when fewer than 2 same-unit mentions are present.
+    """
+    if not sentence_text:
+        return None
+    mentions = _unit_mentions(_normalize_fractions(str(sentence_text)), unit_table, pattern)
+    factor = unit_table.get(unit_norm)
+    same_unit = [m for m in mentions if m[3] == factor]
+    if len(same_unit) < 2:
+        return None
+    return sum(m[2] for m in same_unit)
+
+
+def _semantic_quantity_match(qty_value, unit_norm, text, source_sentence=None):
     """Unit-aware weight/volume match, or None when ``unit_norm`` isn't one.
 
     None tells the caller to fall back to the legacy literal-substring
@@ -495,21 +515,25 @@ def _semantic_quantity_match(qty_value, unit_norm, text):
     text = _normalize_fractions(text)
     if unit_norm in _WEIGHT_UNIT_TO_GRAMS:
         base = qty_value * _WEIGHT_UNIT_TO_GRAMS[unit_norm]
-        mentions = _unit_mentions(text, _WEIGHT_UNIT_TO_GRAMS, _WEIGHT_MENTION_RE)
+        unit_table, pattern = _WEIGHT_UNIT_TO_GRAMS, _WEIGHT_MENTION_RE
     elif unit_norm in _VOLUME_UNIT_TO_ML:
         base = qty_value * _VOLUME_UNIT_TO_ML[unit_norm]
-        mentions = _unit_mentions(text, _VOLUME_UNIT_TO_ML, _VOLUME_MENTION_RE)
+        unit_table, pattern = _VOLUME_UNIT_TO_ML, _VOLUME_MENTION_RE
     else:
         return None
+    mentions = _unit_mentions(text, unit_table, pattern)
     candidates = (
         [m[2] for m in mentions]
         + _compound_chain_sums(text, mentions)
         + _each_multiplier_candidates(text, mentions)
     )
+    distinct_sum = _distinct_same_unit_sum_candidate(unit_norm, unit_table, pattern, source_sentence)
+    if distinct_sum is not None:
+        candidates.append(distinct_sum)
     return any(_approx_equal(base, c) for c in candidates)
 
 
-def source_mentions_quantity(quantity, source_text, unit=None) -> bool:
+def source_mentions_quantity(quantity, source_text, unit=None, source_sentence=None) -> bool:
     """True when the numeric quantity is evidenced in the source text.
 
     When ``unit`` is a recognised weight or volume unit, both the candidate
@@ -517,7 +541,10 @@ def source_mentions_quantity(quantity, source_text, unit=None) -> bool:
     common base unit (grams or millilitres) and compared numerically. This
     also recognises split/mixed-unit phrasing such as "21 Kgs 499 grams" or
     "1 Kg and 500 grams", which a model may combine into a single decimal
-    (21.499 kg) that never appears as a literal substring of the source.
+    (21.499 kg) that never appears as a literal substring of the source;
+    and, when ``source_sentence`` (the model's own quoted evidence for this
+    item) is supplied, a sum of 2+ distinct same-unit weights within that
+    one sentence (e.g. several individually weighed packets of one drug).
 
     Falls back to the original literal-substring heuristic for counts,
     worth-like numbers, or when no usable unit is supplied, so existing
@@ -535,7 +562,7 @@ def source_mentions_quantity(quantity, source_text, unit=None) -> bool:
     qty_dec = _to_decimal(qty)
     unit_norm = re.sub(r"[^a-z]", "", str(unit or "").lower().strip())
     if qty_dec is not None and unit_norm:
-        semantic = _semantic_quantity_match(qty_dec, unit_norm, text)
+        semantic = _semantic_quantity_match(qty_dec, unit_norm, text, source_sentence)
         if semantic is not None:
             return semantic
     candidates = {str(quantity).strip(), str(qty), f"{qty:g}"}
@@ -558,6 +585,54 @@ def is_code_level_generic(name) -> bool:
         return True
     c = compact(text)
     return c in {compact(t) for t in CODE_LEVEL_GENERIC_TERMS}
+
+
+# A deterministic backstop for the prompt's own rule ("skip consumed
+# quantities, urine-test results... when nothing was seized") -- the model
+# does not reliably follow it. Fires only when this item's own quantity
+# and worth are already empty, so a real seizure elsewhere in the same
+# response (its own positive quantity) is never touched.
+_CONSUMPTION_ADMISSION_RE = re.compile(
+    r"\b(?:consuming|consumed|addicted to|habituated to)\b", re.IGNORECASE,
+)
+_URINE_TEST_RE = re.compile(
+    r"\burine\b|\burinat\w*|\bdrug testing kit\b", re.IGNORECASE,
+)
+_NO_POSSESSION_DENIAL_RE = re.compile(
+    r"not\s+having\s+any\s+(?:drug|contraband|narcotic)s?|"
+    r"no\s+(?:drug|contraband|narcotic)s?\s+in\s+(?:his|her|their|my)?\s*(?:personal\s+)?possession|"
+    r"not\s+(?:in\s+)?possession\s+of\s+any\s+(?:drug|contraband|narcotic)",
+    re.IGNORECASE,
+)
+_PHYSICAL_RECOVERY_RE = re.compile(
+    r"\bseiz\w*|\brecover\w*|\bweigh\w*|"
+    r"found\b[^.]{0,30}\b(?:packet|cover|bag|box|pouch|sachet|grams?|kgs?|kilograms?)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_no_physical_seizure_evidence(item_source_sentence, full_source_text) -> bool:
+    """True when this item's own evidence describes consumption/admission/
+    urine-test/explicit no-possession language, with nothing in that same
+    quoted sentence indicating an actual physical recovery.
+
+    The no-possession denial is checked against the full text (it is
+    standard Section 50 NDPS Act boilerplate that may sit in a different
+    sentence from the one the model quoted for this item), but the
+    recovery-language guard is checked only against this item's own quoted
+    sentence -- so a different item's real, separately-quoted seizure in
+    the same response is never affected.
+    """
+    sentence = str(item_source_sentence or "")
+    full_text = str(full_source_text or "")
+    has_signal = bool(
+        _CONSUMPTION_ADMISSION_RE.search(sentence)
+        or _URINE_TEST_RE.search(sentence)
+        or _NO_POSSESSION_DENIAL_RE.search(full_text)
+    )
+    if not has_signal:
+        return False
+    return not _PHYSICAL_RECOVERY_RE.search(sentence)
 
 
 def validate_ai_drug_item(item, source_text, drug_kb_obj=None):
@@ -608,7 +683,9 @@ def validate_ai_drug_item(item, source_text, drug_kb_obj=None):
         "source_sentence": (item or {}).get("source_sentence") or "",
         "worth_scope": (item or {}).get("worth_scope"),
     }
-    if qty not in (None, "", 0, 0.0) and source_text and not source_mentions_quantity(qty, source_text, unit=unit):
+    if qty not in (None, "", 0, 0.0) and source_text and not source_mentions_quantity(
+        qty, source_text, unit=unit, source_sentence=out["source_sentence"],
+    ):
         out["raw_quantity"] = None
         out["quantity_reject"] = REASON_INVALID_QUANTITY
     if unit and source_text:
@@ -637,6 +714,13 @@ def validate_ai_drug_item(item, source_text, drug_kb_obj=None):
         text_digits = re.sub(r"\D", "", str(source_text))
         if digits and digits not in text_digits:
             out["seizure_worth"] = 0
+
+    if (
+        out["raw_quantity"] in (None, "", 0, 0.0)
+        and out["seizure_worth"] in (None, "", 0, 0.0)
+        and _has_no_physical_seizure_evidence(out["source_sentence"], source_text)
+    ):
+        return {"reject_reason": REASON_NO_PHYSICAL_SEIZURE, "raw_drug_name": raw_text}
     return out
 
 

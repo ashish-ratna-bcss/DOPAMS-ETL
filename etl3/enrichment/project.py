@@ -480,12 +480,62 @@ class AiDrugRows(list):
         self.rejections = list(rejections or [])
 
 
+def _has_positive_measure(checked):
+    for key in ("raw_quantity", "seizure_worth"):
+        value = checked.get(key)
+        if value not in (None, "", 0, 0.0):
+            return True
+    return False
+
+
+def _collapse_duplicate_unmeasured_items(checked_items):
+    """Collapse multiple proposed items for the same substance that all
+    lack a positive quantity/worth into one, preserving every quoted
+    source sentence for provenance.
+
+    Any item that carries a positive measure is left completely untouched
+    -- it is never merged with anything, so separately evidenced physical
+    seizures of the same drug (different quantities) always stay as their
+    own rows. Only the purely duplicate, unmeasured mentions (the model
+    re-proposing the same name from several near-identical sentences with
+    no distinguishing quantity) are reduced to one.
+    """
+    groups = {}
+    order = []
+    for checked in checked_items:
+        key = drug_kb.compact(checked.get("raw_drug_name") or "")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(checked)
+
+    result = []
+    for key in order:
+        group = groups[key]
+        measured = [c for c in group if _has_positive_measure(c)]
+        unmeasured = [c for c in group if not _has_positive_measure(c)]
+        result.extend(measured)
+        if not unmeasured:
+            continue
+        keeper = max(unmeasured, key=lambda c: c.get("confidence_score") or 0)
+        sentences = [c.get("source_sentence") for c in unmeasured if c.get("source_sentence")]
+        if len(sentences) > 1:
+            keeper = dict(keeper)
+            keeper["source_sentence"] = " | ".join(dict.fromkeys(sentences))
+        result.append(keeper)
+    return result
+
+
 def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=None,
                  source_text=None):
     """Turn a validated model payload into drug rows.
 
     Each AI drug must pass ignore-list + source-evidence validation before KB
-    normalization. Empty / fully rejected input yields no rows.
+    normalization. Empty / fully rejected input yields no rows. Multiple
+    validated items for the same substance with no positive quantity/worth
+    are then collapsed to one (see _collapse_duplicate_unmeasured_items) --
+    this runs before extraction_id ordinals are assigned, so re-running the
+    same response is idempotent (same reduced ordinal set every time).
 
     Returns AiDrugRows (list subclass) with ``.rejections`` for audit.
     """
@@ -493,7 +543,7 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
 
     rows = []
     rejections = []
-    ordinal = 0
+    checked_items = []
     for item in parsed_drugs or []:
         checked = validate_ai_drug_item(item, source_text, drug_kb_obj=drug_kb_obj)
         if checked.get("reject_reason"):
@@ -502,6 +552,12 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
                 "reason": checked["reject_reason"],
             })
             continue
+        checked_items.append(checked)
+
+    checked_items = _collapse_duplicate_unmeasured_items(checked_items)
+
+    ordinal = 0
+    for checked in checked_items:
         row = _drug_row(
             f"{source_system}:ai:{crime_id}:{ordinal}",
             crime_id, source_system, "etl3_ai", crime_id,
@@ -518,7 +574,7 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
                 "reason": "GENERIC_IGNORED",
             })
             continue
-        if item.get("is_commercial") or checked.get("is_commercial"):
+        if checked.get("is_commercial"):
             row["is_commercial"] = True
         conf = _num(checked.get("confidence_score"))
         if conf is not None and conf >= 1:
