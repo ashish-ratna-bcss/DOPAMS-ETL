@@ -30,6 +30,7 @@ from etl3.merger.accused_split import (
     existing_active_children,
     supersede_children,
     supersede_parent_if_unset,
+    unsupersede_parent_if_set,
     write_split_rows,
 )
 from etl3.enrichment.ai import (
@@ -579,6 +580,53 @@ def _load_parent_accused_for_split(conn):
     return rows
 
 
+def _load_existing_crime_rosters(conn):
+    """{crime_id: [(accused_id, full_name), ...]} for every non-split,
+    non-superseded accused currently on that crime -- the comparison set
+    etl3.merger.accused_overlap.find_crime_overlaps uses so a packed
+    segment that already matches an existing, independently-coded accused
+    on the SAME crime (the FIR 869/2026 pattern) is withheld rather than
+    split into a third representation. An accused with no linkable/usable
+    name is simply not useful as a comparison target and is skipped --
+    name_overlap_score would never match it anyway.
+    """
+    persons = _person_payloads(conn)
+    rosters = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT accused_id, source_system, crime_id, person_id
+            FROM accused_unified
+            WHERE derived_from_accused_id IS NULL AND split_superseded_at IS NULL
+            """,
+        )
+        for accused_id, source_system, crime_id, person_id in cur.fetchall():
+            person = persons.get((source_system, person_id)) if person_id else None
+            full_name = (person or {}).get("full_name")
+            if not full_name:
+                continue
+            rosters.setdefault(crime_id, []).append((accused_id, full_name))
+    return rosters
+
+
+def _load_parents_with_active_children(conn):
+    """Set of parent accused_ids that currently have at least one active
+    (non-superseded) split child. Used only so the shrink-to-single-name
+    reconciliation path (see _multi_accused_split) can skip the
+    per-parent existing_active_children lookup for the overwhelming
+    majority of parents that never had any children to begin with --
+    one cheap batched query instead of one query per parent candidate.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT derived_from_accused_id FROM accused_unified
+            WHERE derived_from_accused_id IS NOT NULL AND split_superseded_at IS NULL
+            """,
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
 def _multi_accused_split(conn, run_id):
     """Additive, feature-flagged stage: split a high-confidence packed
     accused name into REAL additional persons_unified / accused_unified
@@ -605,6 +653,38 @@ def _multi_accused_split(conn, run_id):
     type classification, and AI brief-facts enrichment all happen via the
     EXISTING, unmodified _person_enrichment / _accused_enrichment / AI
     roster pipeline on this or a later run -- nothing here duplicates that.
+
+    Crime-level duplicate guard: before a segment becomes a real child, it
+    is checked (via build_split_rows' existing_crime_accused parameter,
+    sourced from _load_existing_crime_rosters) against every OTHER
+    non-split, non-superseded accused already on the SAME crime_id. An
+    overlapping segment is withheld -- never split, never auto-linked --
+    and logged instead (see etl3.merger.accused_split._log_overlap_withheld).
+    There is no persisted review queue for this: it is re-evaluated fresh
+    on every run, so a later run that no longer reproduces a given overlap
+    (the conflicting record was itself retired, or the text changed enough
+    to clear it) simply splits the segment normally -- no manual unblock
+    step exists or is needed.
+
+    Parent visibility is intentionally asymmetric and this is NOT a bug
+    (see DOPAMS_ETL3_ACCUSED_RECONCILIATION_IMPLEMENTATION_REPORT.md
+    section 4.1.1): a parent is marked split_superseded_at ONLY the first
+    time it actually produces at least one real child (accused_rows
+    non-empty) -- never merely because every one of its segments was
+    withheld as an overlap. A fully-withheld (complete-overlap) parent's
+    own accused_unified row is deliberately left visible, exactly as
+    CCTNS V2 itself reported it; superseding it on an unconfirmed overlap
+    would be an implicit identity decision this code is never allowed to
+    make on its own.
+
+    Single-name reconciliation: if a pack's source text stops parsing as
+    a multi-accused pack at all (confidence "none", zero segments -- e.g.
+    a 2-segment pack shrinks to one remaining name; detect_multi_accused's
+    2+-marker minimum is never weakened to detect this), any real split
+    children it previously produced are retired (never deleted) and the
+    parent itself -- now the correct, sole live representation again -- is
+    un-superseded so it becomes visible again, via
+    _load_parents_with_active_children/unsupersede_parent_if_set.
     """
     settings = _multi_accused_settings()
     if not settings["enabled"]:
@@ -614,33 +694,73 @@ def _multi_accused_split(conn, run_id):
     high_confidence = 0
     low_confidence = 0
     parents_split = 0
+    parents_fully_held_as_overlap = 0
+    parents_unsplit = 0
+    parents_reconciled_to_single_name = 0
     children_superseded = 0
+    segments_withheld_as_overlap = 0
     person_rows_all = []
     accused_rows_all = []
     audit_rows_all = []
 
+    existing_crime_rosters = _load_existing_crime_rosters(conn)
+    parents_with_active_children = _load_parents_with_active_children(conn)
+
     for parent in _load_parent_accused_for_split(conn):
         candidates += 1
+        crime_roster = [
+            (acc_id, name)
+            for acc_id, name in existing_crime_rosters.get(parent["crime_id"], [])
+            if acc_id != parent["accused_id"]
+        ]
         person_rows, accused_rows, audit_rows, parse_result = build_split_rows(
-            parent, parent["full_name"],
+            parent, parent["full_name"], existing_crime_accused=crime_roster,
         )
+
         if parse_result["confidence"] == "low":
             low_confidence += 1
             continue
-        if not accused_rows:
+        if not parse_result["segments"]:
+            if parent["accused_id"] in parents_with_active_children:
+                # The source no longer parses as a pack at all (see the
+                # single-name-reconciliation docstring above), but real
+                # children from an earlier run still exist -- retire them
+                # (never delete) via the same diff/supersede path every
+                # other reconciliation case uses, and make the parent
+                # visible again since it is now the correct sole
+                # representation.
+                existing_ids = existing_active_children(conn, parent["accused_id"])
+                children_superseded += supersede_children(conn, existing_ids)
+                if unsupersede_parent_if_set(conn, parent["accused_id"]):
+                    parents_unsplit += 1
+                parents_reconciled_to_single_name += 1
             continue
-        high_confidence += 1
 
+        # Segments withheld as a crime-level overlap are simply absent
+        # from accused_rows (see build_split_rows) -- the difference
+        # against the segments the parser found is exactly how many were
+        # withheld this run, for visibility in the stats below.
+        withheld_this_parent = len(parse_result["segments"]) - len(accused_rows)
+        segments_withheld_as_overlap += withheld_this_parent
+
+        # Runs even when accused_rows ends up empty this time (every
+        # segment withheld as an overlap) -- a previously-created real
+        # child whose segment now overlaps a newly-relevant existing
+        # accused must still be retired, never left as a stale duplicate.
         new_child_ids = [row["accused_id"] for row in accused_rows]
         existing_ids = existing_active_children(conn, parent["accused_id"])
         to_supersede = diff_superseded_children(existing_ids, new_child_ids)
         children_superseded += supersede_children(conn, to_supersede)
-        if supersede_parent_if_unset(conn, parent["accused_id"]):
-            parents_split += 1
 
-        person_rows_all.extend(person_rows)
-        accused_rows_all.extend(accused_rows)
-        audit_rows_all.extend(audit_rows)
+        if accused_rows:
+            high_confidence += 1
+            if supersede_parent_if_unset(conn, parent["accused_id"]):
+                parents_split += 1
+            person_rows_all.extend(person_rows)
+            accused_rows_all.extend(accused_rows)
+            audit_rows_all.extend(audit_rows)
+        elif withheld_this_parent:
+            parents_fully_held_as_overlap += 1
 
     write_stats = write_split_rows(
         conn, person_rows_all, accused_rows_all, audit_rows_all,
@@ -652,7 +772,11 @@ def _multi_accused_split(conn, run_id):
         "high_confidence_packs": high_confidence,
         "low_confidence_packs": low_confidence,
         "parents_newly_split": parents_split,
+        "parents_fully_held_as_overlap": parents_fully_held_as_overlap,
+        "parents_unsplit": parents_unsplit,
+        "parents_reconciled_to_single_name": parents_reconciled_to_single_name,
         "children_superseded": children_superseded,
+        "segments_withheld_as_overlap": segments_withheld_as_overlap,
         "write_stats": write_stats,
     }
 

@@ -430,6 +430,30 @@ def test_build_split_rows_idempotent_rerun_same_ids():
     assert [a["input_hash"] for a in first_audit] == [a["input_hash"] for a in second_audit]
 
 
+def test_build_split_rows_withholds_segment_that_overlaps_existing_crime_accused():
+    """FIR 869/2026 fix: a segment whose text overlaps an existing,
+    non-split, non-superseded accused on the SAME crime is withheld --
+    never split, never auto-linked to that existing accused (see
+    etl3.merger.accused_overlap). Withholding is logged, not persisted
+    anywhere -- see accused_split._log_overlap_withheld."""
+    existing_crime_accused = [("acc-existing", "Ravi Kumar")]
+
+    person_rows, accused_rows, audit_rows, parsed = build_split_rows(
+        _parent(), "1) Ravi Kumar, 2) Mohan Rao",
+        existing_crime_accused=existing_crime_accused,
+    )
+    assert parsed["confidence"] == "high"
+    assert len(accused_rows) == 1  # only segment 2 ("Mohan Rao") was built
+    assert person_rows[0]["full_name"] == "Mohan Rao"
+
+    # No existing_crime_accused given (the default) -> nothing to overlap
+    # against, both segments build exactly as before this parameter existed.
+    person_rows2, accused_rows2, audit_rows2, parsed2 = build_split_rows(
+        _parent(), "1) Ravi Kumar, 2) Mohan Rao",
+    )
+    assert len(accused_rows2) == 2
+
+
 def test_split_child_id_changes_when_segment_text_corrected():
     before = split_child_id("acc1", 1, "Abhishek Kumar")
     after_typo_fix = split_child_id("acc1", 1, "Abhishek Kumarr")
@@ -512,6 +536,7 @@ def main():
     check("build_split_rows: never fabricate from others", test_build_split_rows_never_fabricates_from_others)
     check("build_split_rows: shared address applies to all", test_build_split_rows_shared_address_applies_identically_to_all)
     check("build_split_rows: idempotent rerun", test_build_split_rows_idempotent_rerun_same_ids)
+    check("build_split_rows: withholds segment overlapping existing crime accused", test_build_split_rows_withholds_segment_that_overlaps_existing_crime_accused)
     check("split_child_id changes on text correction", test_split_child_id_changes_when_segment_text_corrected)
     check("build_split_rows: unlinked parent person handled", test_build_split_rows_unlinked_parent_person_still_gets_own_split_person)
     check("diff: keeps unchanged, supersedes changed", test_diff_keeps_unchanged_supersedes_changed)

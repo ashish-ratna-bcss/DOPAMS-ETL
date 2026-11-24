@@ -26,15 +26,35 @@ person are produced later, if at all, by the pre-existing, unmodified
 etl3.identity.person_matching candidate generator, which already treats
 every persons_unified row the same way regardless of how it was created,
 and which never auto-confirms a match.
+
+Crime-level duplicate guard (added after FIR 869/2026 showed CCTNS V2
+itself can carry the same people both as separate, independently-coded
+accused AND as one combined-pack record on the same crime): before a
+segment becomes a real child, it is checked against every OTHER already-
+existing, non-split, non-superseded accused on the SAME crime_id via
+etl3.merger.accused_overlap. A segment that overlaps is withheld -- never
+auto-split, never auto-linked to the existing record -- and logged instead
+(see _log_overlap_withheld below). This is deliberately NOT a persisted
+review queue: there is no process or owner to triage one, so the evidence
+goes to the application log (searchable, same as every other diagnostic
+signal this pipeline already emits) rather than a new stateful table. A
+withheld segment is re-evaluated fresh on every run; if the overlap stops
+reproducing (the conflicting record is retired, or the text changes), the
+segment is simply split normally on that later run -- no manual unblock
+step exists or is needed.
 """
 import hashlib
+import logging
 import re
 
 from etl3.enrichment.multi_accused import detect_multi_accused
+from etl3.merger.accused_overlap import find_crime_overlaps
 
 PARSER_VERSION = "multi_accused_v1"
 
 _SPLIT_MARKER = ":split:"
+
+logger = logging.getLogger(__name__)
 
 
 def _norm_for_id(text):
@@ -68,7 +88,23 @@ def split_child_id(parent_id, segment_index, raw_segment_text):
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
 
 
-def build_split_rows(parent, raw_full_name):
+def _log_overlap_withheld(parent, segment, overlap):
+    """The only record a withheld segment gets: an application log line
+    with enough evidence (parent/crime/segment text, the existing accused
+    it overlaps, and the match basis/score) for someone grepping logs or
+    change-tracking this run to see why no child was created. Never
+    writes to the database -- see the module docstring for why there is
+    no persisted review queue."""
+    logger.warning(
+        "multi_accused_split: withheld segment %s (%r) of parent %s on crime %s -- "
+        "overlaps existing accused %s (%r), basis=%s score=%s",
+        segment["segment_index"], segment["raw_text"], parent["accused_id"],
+        parent.get("crime_id"), overlap["accused_id"], overlap["full_name"],
+        overlap["basis"], overlap["score"],
+    )
+
+
+def build_split_rows(parent, raw_full_name, existing_crime_accused=None):
     """Parse one accused's raw full name and build rows for a high-
     confidence pack only.
 
@@ -76,6 +112,20 @@ def build_split_rows(parent, raw_full_name):
     (may be None), current_source_run_id, current_as_of -- the parent's own
     already-current values, reused as-is for the children since their
     content is derived from that same source observation.
+
+    ``existing_crime_accused``: optional list of (accused_id, full_name)
+    for every OTHER non-split, non-superseded accused already on this
+    parent's own crime_id -- the caller's responsibility to scope
+    correctly (see etl3.merger.accused_overlap.find_crime_overlaps). When
+    given, a segment whose text overlaps one of these (exact-normalized,
+    exact-token-set-reordered, or strong fuzzy similarity -- see
+    accused_overlap.name_overlap_score) is withheld from
+    person_rows/accused_rows/audit_rows and logged instead (see
+    _log_overlap_withheld) -- nothing here ever assigns that existing
+    accused_id to the segment; withholding is the only action taken. When
+    omitted (None, the default), every high-confidence segment is built
+    exactly as before this parameter existed -- fully backward compatible
+    with every existing caller.
 
     Returns (person_rows, accused_rows, audit_rows, parse_result). All
     three row lists are empty unless the parse is "high" confidence --
@@ -101,10 +151,22 @@ def build_split_rows(parent, raw_full_name):
     shared_address_text = parse_result.get("shared_address_text")
     pack_hash = _pack_hash(raw_full_name)
 
+    overlaps = (
+        find_crime_overlaps(parse_result["segments"], existing_crime_accused)
+        if existing_crime_accused
+        else {}
+    )
+
     person_rows, accused_rows, audit_rows = [], [], []
     for segment in parse_result["segments"]:
         idx = segment["segment_index"]
         raw_text = segment["raw_text"]
+
+        overlap = overlaps.get(idx)
+        if overlap is not None:
+            _log_overlap_withheld(parent, segment, overlap)
+            continue
+
         child_key = split_child_id(parent_accused_id, idx, raw_text)
         person_id = f"{parent_person_id or parent_accused_id}{_SPLIT_MARKER}{child_key}"
         accused_id = f"{parent_accused_id}{_SPLIT_MARKER}{child_key}"
@@ -176,9 +238,8 @@ def diff_superseded_children(existing_child_accused_ids, new_child_accused_ids):
 
 # ---------------------------------------------------------------------------
 # Database-touching half. Requires migration 018 (the new nullable columns
-# and accused_split_audit table) to already be applied -- not executed
-# anywhere by this repository yet. Every write here is additive/upsert;
-# nothing is ever deleted.
+# and accused_split_audit table) to already be applied. Every write here
+# is additive/upsert; nothing is ever deleted.
 # ---------------------------------------------------------------------------
 
 def existing_active_children(conn, parent_accused_id):
@@ -232,6 +293,33 @@ def supersede_parent_if_unset(conn, parent_accused_id):
             """
             UPDATE accused_unified SET split_superseded_at = now()
             WHERE accused_id = %s AND split_superseded_at IS NULL
+            """,
+            (parent_accused_id,),
+        )
+        return cur.rowcount
+
+
+def unsupersede_parent_if_set(conn, parent_accused_id):
+    """Reverse of supersede_parent_if_unset -- used ONLY when a pack's
+    source text has stopped parsing as a multi-accused pack at all (e.g.
+    a 2-segment pack's text shrank to a single remaining name;
+    detect_multi_accused correctly requires 2+ markers to recognize a
+    pack, and that rule is never touched here) and its real split
+    children have just been retired by the same reconciliation pass (see
+    etl3.enrichment.runner._multi_accused_split's shrink-to-single-name
+    branch). The parent's own persons_unified/accused_unified row is
+    never frozen by split_superseded_at -- the ordinary, unmodified
+    merger keeps its content current regardless of that flag -- so once
+    it stops being a pack, it is once again the correct, sole live
+    representation of this accused and must become visible to DOPAMS-BE
+    and the AI roster again, exactly like any other ordinary accused row.
+    Idempotent: a rerun that finds nothing to unset is a no-op.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE accused_unified SET split_superseded_at = NULL
+            WHERE accused_id = %s AND split_superseded_at IS NOT NULL
             """,
             (parent_accused_id,),
         )
