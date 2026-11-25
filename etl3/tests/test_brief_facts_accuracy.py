@@ -17,12 +17,15 @@ Covers:
   - The "N <items> each <weight>" multiplicative pattern ("5 Ganja packets
     each one 100 grams", "19 packets (each packet wg about 10 grams)").
   - Ambiguous suspected-substance seizures (quantity/worth stated, identity
-    only "suspected"/generic -- SNo 5210/5290 pattern) are kept for manual
-    review, never silently dropped and never collapsed into "No drug Found".
-  - The crime-level "Drug found" / "No drug Found" / "Manual review"
-    classification (runner._finalize_drug_extraction), including that a
-    confirmed drug always wins over leftover ambiguous residue, and that
-    "No drug Found" is never written as a fabricated drug_extractions row.
+    only "suspected"/generic -- SNo 5210/5290 pattern) are never silently
+    dropped and never collapsed into "No drug Found": ai_drug_rows turns
+    the surviving evidence into an "Unidentified Substance" row (see
+    test_seizure_evidence_and_dedup.py), which is "Drug found".
+  - The crime-level "Drug found" / "No drug Found" classification
+    (runner._finalize_drug_extraction) is strictly two-valued -- there is no
+    "Manual review" or other intermediate status. A confirmed drug always
+    wins over leftover ambiguous residue, and "No drug Found" is never
+    written as a fabricated drug_extractions row.
 
 Run directly (``python etl3/tests/test_brief_facts_accuracy.py``) or via
 pytest; both work, matching this repo's other etl3/tests/test_*.py files.
@@ -238,7 +241,7 @@ def test_ambiguous_with_unit_only_also_kept():
 
 
 # ---------------------------------------------------------------------------
-# Crime-level classification: Drug found / No drug Found / Manual review.
+# Crime-level classification: Drug found / No drug Found (no third status).
 # ---------------------------------------------------------------------------
 
 def _fake_conn():
@@ -303,7 +306,15 @@ def test_finalize_no_drug_found_when_only_property_items_rejected():
     assert result["drug_finding_status"] == R.NO_DRUG_FOUND
 
 
-def test_finalize_manual_review_for_ambiguous_suspected_substance():
+def test_finalize_no_drug_found_when_ambiguous_evidence_was_not_converted_to_a_row():
+    """_finalize_drug_extraction no longer special-cases ``ambiguous`` --
+    that conversion (ambiguous evidence -> "Unidentified Substance" row,
+    see test_seizure_evidence_and_dedup.py) happens upstream in
+    ai_drug_rows. If a caller ever passes empty ``rows`` alongside
+    non-empty ``ambiguous`` (e.g. the evidence failed the no-physical-
+    seizure gate, or a caller bypassed ai_drug_rows entirely), this layer
+    must still resolve to "No drug Found", never invent a "Manual review"
+    status -- there is no such status in this project's classification."""
     from etl3.enrichment import runner as R
 
     conn = _fake_conn()
@@ -313,9 +324,10 @@ def test_finalize_manual_review_for_ambiguous_suspected_substance():
         result = R._finalize_drug_extraction(
             conn, "run", "C1", "V2", {"drugs": [], "ambiguous": ambiguous}, rows,
         )
-    assert result["drug_finding_status"] == R.MANUAL_REVIEW
+    assert result["drug_finding_status"] == R.NO_DRUG_FOUND
     finding_calls = [c for c in upsert.call_args_list if c.args[1] == "drug_finding_status"]
-    assert finding_calls[0].args[3][0]["status"] == "Manual review"
+    assert finding_calls[0].args[3][0]["status"] == "No drug Found"
+    assert not hasattr(R, "MANUAL_REVIEW")
 
 
 def test_finalize_confirmed_drug_wins_over_leftover_ambiguous_item():

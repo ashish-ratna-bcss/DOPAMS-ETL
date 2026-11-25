@@ -38,13 +38,32 @@ SCHEMA_FILE = Path(__file__).resolve().parent.parent.parent / "dopams_cctns" / "
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # ETL3_UNIFIED_SCHEMA.sql already reflects migration 001's base tables (its
 # own header says it supersedes the original schema.sql the same way 001
-# does) -- apply it once, then every INCREMENTAL migration 002..018 on top,
+# does) -- apply it once, then every INCREMENTAL migration 002..022 on top,
 # in numeric order, exactly as a real deployment would. 017 is itself
 # still-uncommitted WIP for an unrelated nationality feature, but the
 # CURRENT runner.py/project.py code already requires its columns to run
 # _person_enrichment at all, so it must be applied here too.
+#
+# 019_backend_read_contract_cleaned_names.sql is deliberately EXCLUDED:
+# confirmed (2026-11-20, while validating the accused-overlap work) never
+# applied on the real server (DOPAMS-BE reads persons_unified/
+# person_enrichment directly and never needed it), AND provably
+# incompatible with 020_backend_read_contract_split_filter.sql's
+# `CREATE OR REPLACE VIEW be_read.accused` when both run in sequence --
+# Postgres refuses "cannot drop columns from view" because 020's column
+# list doesn't carry 019's additions forward. Applying both here would
+# test a migration state that has never existed on the real database and
+# is provably broken; excluding 019 here mirrors production's actual
+# state and is the only way this script (and any other disposable-DB
+# validation) can reach migration 018/020-022 at all. This is a real,
+# pre-existing migration-chain defect, unrelated to the multi-accused
+# split feature itself.
 MIGRATIONS = sorted(
-    (p for p in MIGRATIONS_DIR.glob("0*.sql") if not p.name.startswith("001_")),
+    (
+        p for p in MIGRATIONS_DIR.glob("0*.sql")
+        if not p.name.startswith("001_")
+        and p.name != "019_backend_read_contract_cleaned_names.sql"
+    ),
     key=lambda p: p.name,
 )
 

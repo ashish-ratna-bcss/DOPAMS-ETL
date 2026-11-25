@@ -333,6 +333,12 @@ def _drug_row(extraction_id, crime_id, source_system, provenance, source_record_
          and KB did not resolve (never overrides a real KB hit)
       3. unresolved (NULL) — never invent from a generic raw term
 
+    Exception: when raw_name resolves only to the UNIDENTIFIED_SUBSTANCE
+    placeholder (an appearance-only KB alias such as "white powder"), a
+    source-validated preferred_primary naming a real drug elsewhere in the
+    text wins over the placeholder (e.g. "white powder identified as
+    Cocaine" -> Cocaine, not Unidentified Substance).
+
     Generic/ignored raw terms return kb_match_tier=ignored_generic with
     primary_drug_name NULL (row omitted when both name and quantity empty).
     """
@@ -366,6 +372,18 @@ def _drug_row(extraction_id, crime_id, source_system, provenance, source_record_
                     tier = pref_tier
         else:
             primary = _text(preferred_primary)
+    elif primary == drug_kb.UNIDENTIFIED_SUBSTANCE and preferred_primary and drug_kb_obj is not None:
+        # An appearance-only placeholder yields to a real, source-validated
+        # explicit identification named elsewhere in the same text.
+        pref_std, pref_tier = drug_kb.resolve_primary_name(
+            preferred_primary, drug_kb_obj.items, drug_kb=drug_kb_obj,
+        )
+        if (
+            pref_std
+            and pref_std != drug_kb.UNIDENTIFIED_SUBSTANCE
+            and pref_tier != drug_kb.TIER_IGNORED_GENERIC
+        ):
+            primary, tier = pref_std, pref_tier
 
     # Final guard: ignored primary (e.g. alcohol) drops the row.
     if drug_kb_obj is not None and primary is not None and drug_kb_obj.is_ignored(primary):
@@ -462,20 +480,116 @@ class AiDrugRows(list):
         self.rejections = list(rejections or [])
 
 
+def _has_positive_measure(checked):
+    for key in ("raw_quantity", "seizure_worth"):
+        value = checked.get(key)
+        if value not in (None, "", 0, 0.0):
+            return True
+    return False
+
+
+def _collapse_duplicate_unmeasured_items(checked_items):
+    """Collapse multiple proposed items for the same substance that all
+    lack a positive quantity/worth into one, preserving every quoted
+    source sentence for provenance.
+
+    Any item that carries a positive measure is left completely untouched
+    -- it is never merged with anything, so separately evidenced physical
+    seizures of the same drug (different quantities) always stay as their
+    own rows. Only the purely duplicate, unmeasured mentions (the model
+    re-proposing the same name from several near-identical sentences with
+    no distinguishing quantity) are reduced to one.
+    """
+    groups = {}
+    order = []
+    for checked in checked_items:
+        key = drug_kb.compact(checked.get("raw_drug_name") or "")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(checked)
+
+    result = []
+    for key in order:
+        group = groups[key]
+        measured = [c for c in group if _has_positive_measure(c)]
+        unmeasured = [c for c in group if not _has_positive_measure(c)]
+        result.extend(measured)
+        if not unmeasured:
+            continue
+        keeper = max(unmeasured, key=lambda c: c.get("confidence_score") or 0)
+        sentences = [c.get("source_sentence") for c in unmeasured if c.get("source_sentence")]
+        if len(sentences) > 1:
+            keeper = dict(keeper)
+            keeper["source_sentence"] = " | ".join(dict.fromkeys(sentences))
+        result.append(keeper)
+    return result
+
+
+def _unidentified_substance_row(extraction_id, crime_id, source_system, source_record_id,
+                                 quantity, unit, worth, drug_form=None, source_sentence=""):
+    """Row for a physical substance seized but never given any descriptive
+    name at all -- an ``ambiguous`` AI item (raw_drug_name null) that still
+    carries real quantity/worth/unit evidence of a seizure.
+
+    Final classification Rule B: a physical seizure with an unidentified
+    substance is "Unidentified Substance" (status "Drug found"), never
+    "No drug Found" and never a "Manual review" placeholder status -- there
+    is no such status in this project's classification.
+    """
+    measured = standardize_measurement(
+        quantity, unit, drug_form=drug_form, raw_drug_name=None,
+        seizure_worth=worth or 0, source_sentence=source_sentence,
+    )
+    return {
+        "extraction_id": extraction_id,
+        "crime_id": crime_id,
+        "source_system": source_system,
+        "provenance": "etl3_ai",
+        "source_record_id": source_record_id,
+        "raw_drug_name": None,
+        "primary_drug_name": drug_kb.UNIDENTIFIED_SUBSTANCE,
+        "drug_form": measured["drug_form"],
+        "drug_category": resolve_drug_category(drug_kb.UNIDENTIFIED_SUBSTANCE),
+        "raw_quantity": _num(quantity),
+        "raw_unit": measured["raw_unit"],
+        "weight_g": measured["weight_g"],
+        "weight_kg": measured["weight_kg"],
+        "volume_ml": measured["volume_ml"],
+        "volume_l": measured["volume_l"],
+        "count_total": measured["count_total"],
+        "seizure_worth": _num(worth),
+        "is_commercial": None,
+        "confidence_score": None,
+        "kb_match_tier": "unidentified_no_name",
+    }
+
+
 def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=None,
-                 source_text=None):
+                 source_text=None, ambiguous_items=None):
     """Turn a validated model payload into drug rows.
 
     Each AI drug must pass ignore-list + source-evidence validation before KB
-    normalization. Empty / fully rejected input yields no rows.
+    normalization. Empty / fully rejected input yields no rows. Multiple
+    validated items for the same substance with no positive quantity/worth
+    are then collapsed to one (see _collapse_duplicate_unmeasured_items) --
+    this runs before extraction_id ordinals are assigned, so re-running the
+    same response is idempotent (same reduced ordinal set every time).
+
+    ``ambiguous_items`` (parsed["ambiguous"]) are items the model described
+    with real seizure evidence (quantity/worth/unit) but no name at all.
+    Each is checked with the same no-physical-seizure gate used for named
+    items (against its own quoted source_sentence / the full source text);
+    evidence that survives becomes an "Unidentified Substance" row (Rule B),
+    never a separate ambiguous/manual-review outcome.
 
     Returns AiDrugRows (list subclass) with ``.rejections`` for audit.
     """
-    from etl3.enrichment.ai import validate_ai_drug_item
+    from etl3.enrichment.ai import _has_no_physical_seizure_evidence, validate_ai_drug_item
 
     rows = []
     rejections = []
-    ordinal = 0
+    checked_items = []
     for item in parsed_drugs or []:
         checked = validate_ai_drug_item(item, source_text, drug_kb_obj=drug_kb_obj)
         if checked.get("reject_reason"):
@@ -484,6 +598,12 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
                 "reason": checked["reject_reason"],
             })
             continue
+        checked_items.append(checked)
+
+    checked_items = _collapse_duplicate_unmeasured_items(checked_items)
+
+    ordinal = 0
+    for checked in checked_items:
         row = _drug_row(
             f"{source_system}:ai:{crime_id}:{ordinal}",
             crime_id, source_system, "etl3_ai", crime_id,
@@ -500,7 +620,7 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
                 "reason": "GENERIC_IGNORED",
             })
             continue
-        if item.get("is_commercial") or checked.get("is_commercial"):
+        if checked.get("is_commercial"):
             row["is_commercial"] = True
         conf = _num(checked.get("confidence_score"))
         if conf is not None and conf >= 1:
@@ -508,6 +628,20 @@ def ai_drug_rows(crime_id, source_system, parsed_drugs, kb_items, drug_kb_obj=No
         row["confidence_score"] = conf
         rows.append(row)
         ordinal += 1
+
+    for amb in ambiguous_items or []:
+        sentence = amb.get("source_sentence") or ""
+        if _has_no_physical_seizure_evidence(sentence, source_text):
+            rejections.append({"raw_drug_name": None, "reason": "NO_PHYSICAL_SEIZURE"})
+            continue
+        row = _unidentified_substance_row(
+            f"{source_system}:ai:{crime_id}:{ordinal}", crime_id, source_system, crime_id,
+            amb.get("raw_quantity"), amb.get("raw_unit"), amb.get("seizure_worth"),
+            source_sentence=sentence,
+        )
+        rows.append(row)
+        ordinal += 1
+
     apply_commercial_flags(rows)
     for row in rows:
         row["input_hash"] = _measurement_hash(row)
