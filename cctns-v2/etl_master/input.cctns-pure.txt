@@ -1,11 +1,15 @@
 # Master ETL Process Configuration File — CCTNS-PURE MODE
 #
-# API load only: fetch, minimal technical transform, upsert.
-# Class, case-status mapping, domicile, name cleanup, brief-facts extraction,
-# drug standardization, and address lookup are not in this job.
-# ETL-3 writes those derived fields on dopams_cctns and does not write this database.
+# This is the AI-free variant of input.txt: it runs ONLY the steps that pull
+# CCTNS V2 source data into DOPAMS (fetch -> minimal technical transform ->
+# upsert). It intentionally excludes the brief_facts_ai step (Order 22 in
+# input.txt), which performs LLM extraction and AI-based dedup into its own
+# separate `brief_facts_ai` table.
 #
 # Run with:  python3 master_etl.py --pure-cctns
+# Architecture: CCTNS source sync only (fetch → minimal transform → upsert).
+# External GeoKB / etl-address enrichment is intentionally EXCLUDED here;
+# keep that in input.txt (non-pure) as an optional separate enrichment path.
 # (--pure-cctns also forces ADDRESS_DISABLE_LLM=1 and PERSON_GENDER_LLM_ENABLED=false
 #  for this run so any residual AI fallbacks in remaining modules stay off.)
 #
@@ -23,93 +27,137 @@
 
 [Order 1]
 hierarchy
-cd /home/eagle/DOPAMS-ETL/etl-hierarchy
+cd /home/eagle/dopams-cctns/cctns-v2/etl-hierarchy
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_hierarchy.py
 
 [Order 2]
 crimes
-cd /home/eagle/DOPAMS-ETL/etl-crimes
+cd /home/eagle/dopams-cctns/cctns-v2/etl-crimes
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_crimes.py
 
 [Order 3]
+class_classification
+cd /home/eagle/dopams-cctns/cctns-v2/section-wise-case-clarification
+source /home/eagle/DOPAMS-ETL/venv/bin/activate
+python3 process_sections.py
+
+
+[Order 4]
+case_status
+cd /home/eagle/dopams-cctns/cctns-v2/etl_case_status
+source /home/eagle/DOPAMS-ETL/venv/bin/activate
+python3 update_crimes.py
+
+[Order 5]
 accused
-cd /home/eagle/DOPAMS-ETL/etl-accused
+cd /home/eagle/dopams-cctns/cctns-v2/etl-accused
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_accused.py
 
-[Order 4]
+[Order 6]
 persons
-cd /home/eagle/DOPAMS-ETL/etl-persons
+cd /home/eagle/dopams-cctns/cctns-v2/etl-persons
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_persons.py
 
-[Order 5]
+[Order 7]
+Domicile classification
+cd /home/eagle/dopams-cctns/cctns-v2/domicile_classification
+source /home/eagle/DOPAMS-ETL/venv/bin/activate
+python3 domicile_classifier.py
+
+[Order 8]
+fix_person_names
+cd /home/eagle/dopams-cctns/cctns-v2/fix_fullname
+source /home/eagle/DOPAMS-ETL/venv/bin/activate
+python3 fix_person_names.py
+
+[Order 9]
+full_name_fix
+cd /home/eagle/dopams-cctns/cctns-v2/fix_fullname
+source /home/eagle/DOPAMS-ETL/venv/bin/activate
+python3 fix_all_fullnames.py
+
+[Order 10]
+name_fix
+cd /home/eagle/dopams-cctns/cctns-v2/fix_fullname
+source /home/eagle/DOPAMS-ETL/venv/bin/activate
+python3 fix_name_field.py
+
+[Order 11]
+surname_fix
+cd /home/eagle/dopams-cctns/cctns-v2/fix_fullname
+source /home/eagle/DOPAMS-ETL/venv/bin/activate
+python3 fix_surname_field.py
+
+
+[Order 12]
 properties
-cd /home/eagle/DOPAMS-ETL/etl-properties
+cd /home/eagle/dopams-cctns/cctns-v2/etl-properties
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_properties.py
 
-[Order 6]
+[Order 13]
 IR
-cd /home/eagle/DOPAMS-ETL/etl-ir
+cd /home/eagle/dopams-cctns/cctns-v2/etl-ir
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 ir_etl.py
 
 
-[Order 7]
+[Order 14]
 Disposal
-cd /home/eagle/DOPAMS-ETL/etl-disposal
+cd /home/eagle/dopams-cctns/cctns-v2/etl-disposal
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_disposal.py
 
-[Order 8]
+[Order 15]
 arrests
-cd /home/eagle/DOPAMS-ETL/etl_arrests
+cd /home/eagle/dopams-cctns/cctns-v2/etl_arrests
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_arrests.py
 
-[Order 9]
+[Order 16]
 mo_seizures
-cd /home/eagle/DOPAMS-ETL/etl_mo_seizures
+cd /home/eagle/dopams-cctns/cctns-v2/etl_mo_seizures
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_mo_seizure.py
 
 
-[Order 10]
+[Order 17]
 chargesheets
-cd /home/eagle/DOPAMS-ETL/etl_chargesheets
+cd /home/eagle/dopams-cctns/cctns-v2/etl_chargesheets
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_chargesheets.py
 
-[Order 11]
+[Order 18]
 updated_chargesheet
-cd /home/eagle/DOPAMS-ETL/etl_updated_chargesheet
+cd /home/eagle/dopams-cctns/cctns-v2/etl_updated_chargesheet
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_update_chargesheet.py
 
 
-[Order 12]
+[Order 19]
 fsl_case_property
-cd /home/eagle/DOPAMS-ETL/etl_fsl_case_property
+cd /home/eagle/dopams-cctns/cctns-v2/etl_fsl_case_property
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 etl_fsl_case_property.py
 
-[Order 13]
+[Order 20]
 update_file_id
-cd /home/eagle/DOPAMS-ETL/etl-files/etl_pipeline_files
+cd /home/eagle/dopams-cctns/cctns-v2/etl-files/etl_pipeline_files
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 main_standalone.py
 
-[Order 14]
+[Order 21]
 files_download_media_server
-cd /home/eagle/DOPAMS-ETL/etl-files/etl_files_media_server
+cd /home/eagle/dopams-cctns/cctns-v2/etl-files/etl_files_media_server
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 -m etl_files_media_server.main
 
-[Order 15]
+[Order 22]
 update_file_extentions
-cd /home/eagle/DOPAMS-ETL/etl-files/update_file_urls_with_extensions
+cd /home/eagle/dopams-cctns/cctns-v2/etl-files/update_file_urls_with_extensions
 source /home/eagle/DOPAMS-ETL/venv/bin/activate
 python3 update_file_urls_with_extensions.py

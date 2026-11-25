@@ -19,7 +19,10 @@ ACCUSED_API_URL = os.environ.get("ACCUSED_API_URL")
 ALFRESCO_DOWNLOAD_API_URL = os.environ.get("ALFRESCO_DOWNLOAD_API_URL")
 
 # --- Media Storage Configuration ---
-MEDIA_BASE_DIR = os.environ.get("MEDIA_BASE_DIR", "/home/tganb/dopams/media_cctnsv1")
+# Tomcat serves this shared root at http://192.168.103.106:8080/files/.
+# Keeping V1 downloads here makes their existing attach_path directly usable
+# by media_unified.resolved_relative_path and the DOPAMS file proxy.
+MEDIA_BASE_DIR = os.environ.get("MEDIA_BASE_DIR", "/data-drive/etl-files")
 try:
     MEDIA_DOWNLOAD_CONCURRENCY = int(os.environ.get("MEDIA_DOWNLOAD_CONCURRENCY", "5"))
 except ValueError:

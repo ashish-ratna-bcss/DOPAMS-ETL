@@ -26,8 +26,8 @@ from dags.cctnsv1_dag_common import (
 DAG_DOC = """
 ## CCTNS V1 — daily sync: Media Attachments (**05:00 IST**)
 
-Discovers and downloads document attachments from Alfresco into the server disk:
-`/home/tganb/dopams/media_cctnsv1/<attach_path>/<dms_file_name>`
+Discovers and downloads document attachments from Alfresco into the shared
+Tomcat file root: `/data-drive/etl-files/<attach_path>/<dms_file_name>`
 
 | Task | Description |
 |------|-------------|
