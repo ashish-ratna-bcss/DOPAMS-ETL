@@ -223,6 +223,32 @@ def ordering_ts(value, *, now=None):
     return ts
 
 
+def _load_bulk_exclusions(conn):
+    """{source_system: [(range_start, range_end), ...]} from
+    bulk_event_exclusions -- a tiny, operator-curated table (see
+    etl3/diagnostics/_register_known_bulk_events.py), loaded once per
+    UnifiedBatchWriter instance rather than per row. Empty today (the
+    documented 2026-08-24 administrative bulk timestamp update has never
+    actually been registered here -- see that script), so this is
+    currently a no-op everywhere it is called; it only starts affecting
+    classification once an operator explicitly runs that script."""
+    windows = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT source_system, range_start, range_end FROM bulk_event_exclusions")
+        for source_system, start, end in cur.fetchall():
+            windows.setdefault(source_system, []).append((start, end))
+    return windows
+
+
+def _is_in_bulk_window(source_system, ts, exclusions):
+    if ts is None:
+        return False
+    for start, end in exclusions.get(source_system, []):
+        if start <= ts <= end:
+            return True
+    return False
+
+
 class UnifiedBatchWriter:
     """Batches all upserts + change_log entries for one *_unified table into
     a single load, single bulk upsert, and single bulk change_log insert."""
@@ -238,6 +264,7 @@ class UnifiedBatchWriter:
         self._obs_ids = {}
         self._column_types = _load_column_types(conn, unified_table)
         self._existing = self._load_existing()
+        self._bulk_exclusions = _load_bulk_exclusions(conn)
 
     def _load_existing(self):
         with self.conn.cursor() as cur:
@@ -298,7 +325,20 @@ class UnifiedBatchWriter:
             if _values_differ(old_value, new_value):
                 any_change = True
                 if incoming_ts is not None:
-                    classification = "initial_observation" if existing is None else "business_change"
+                    if existing is None:
+                        classification = "initial_observation"
+                    elif _is_in_bulk_window(source_system, incoming_ts, self._bulk_exclusions):
+                        # A registered administrative/maintenance bulk
+                        # timestamp update (e.g. 2026-08-24) touched this
+                        # field's VALUE, not just its timestamp -- flagged
+                        # as such rather than business_change so a
+                        # reader of change_log isn't misled into thinking
+                        # this was a genuine source-driven correction.
+                        # Only ever affects FUTURE observations; no
+                        # existing change_log row is rewritten by this.
+                        classification = "administrative_bulk_excluded"
+                    else:
+                        classification = "business_change"
                     self._pending_change_log.append((
                         self.entity, pk_value, field,
                         None if old_value is None else str(old_value),
