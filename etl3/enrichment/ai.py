@@ -766,41 +766,82 @@ def _ollama_chat(host, model, timeout, prompt: str, *, response_format=None) -> 
     )
     gate = _ollama_gate()
     gate.acquire()
-    try:
+    released = threading.Event()
+
+    def _release_once():
+        # Idempotent release: either the worker thread's own completion or
+        # the outer hard-deadline timeout may call this, but never both.
+        if not released.is_set():
+            released.set()
+            gate.release()
+
+    import queue
+
+    result_q: "queue.Queue" = queue.Queue(maxsize=1)
+
+    def _worker():
         t0 = time.monotonic()
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
-        except TimeoutError as exc:
-            with _LAST_LATENCY_LOCK:
-                _LAST_LATENCY_SEC = time.monotonic() - t0
-            raise AIExtractionError("timeout", str(exc)) from exc
-        except urllib.error.HTTPError as exc:
-            with _LAST_LATENCY_LOCK:
-                _LAST_LATENCY_SEC = time.monotonic() - t0
-            body_text = ""
             try:
-                body_text = exc.read().decode("utf-8", "replace")[:500]
-            except Exception:
-                pass
-            msg = f"HTTP {exc.code}: {body_text or exc.reason}"
-            if _is_oom_error(msg):
-                raise AIExtractionError("error", f"oom_non_retryable: {msg}") from exc
-            raise AIExtractionError("error", msg) from exc
-        except urllib.error.URLError as exc:
-            with _LAST_LATENCY_LOCK:
-                _LAST_LATENCY_SEC = time.monotonic() - t0
-            reason = getattr(exc, "reason", exc)
-            if isinstance(reason, TimeoutError):
-                raise AIExtractionError("timeout", str(exc)) from exc
-            msg = str(exc)
-            if _is_oom_error(msg):
-                raise AIExtractionError("error", f"oom_non_retryable: {msg}") from exc
-            raise AIExtractionError("error", msg) from exc
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    payload_out = json.loads(response.read().decode("utf-8"))
+                result_q.put(("ok", payload_out, time.monotonic() - t0))
+            except TimeoutError as exc:
+                result_q.put(("timeout", str(exc), time.monotonic() - t0))
+            except urllib.error.HTTPError as exc:
+                body_text = ""
+                try:
+                    body_text = exc.read().decode("utf-8", "replace")[:500]
+                except Exception:
+                    pass
+                msg = f"HTTP {exc.code}: {body_text or exc.reason}"
+                result_q.put(("http_error", msg, time.monotonic() - t0))
+            except urllib.error.URLError as exc:
+                reason = getattr(exc, "reason", exc)
+                kind = "timeout" if isinstance(reason, TimeoutError) else "url_error"
+                result_q.put((kind, str(exc), time.monotonic() - t0))
+            except Exception as exc:  # defensive: never let the worker die silently
+                result_q.put(
+                    ("url_error", f"{type(exc).__name__}: {exc}", time.monotonic() - t0)
+                )
+        finally:
+            _release_once()
+
+    t_start = time.monotonic()
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    # Hard outer deadline on top of the socket-level `timeout`. A stuck
+    # request that never raises TimeoutError (observed: server accepts the
+    # connection but a request is never actually processed -- no exception,
+    # no bytes, no GPU activity) would otherwise hold this slot and the
+    # caller's DB transaction open indefinitely. This guarantees the caller
+    # gets control back within roughly `timeout` seconds either way.
+    hard_deadline = max(5.0, float(timeout)) + 15.0
+    try:
+        kind, payload_or_msg, elapsed = result_q.get(timeout=hard_deadline)
+    except queue.Empty:
+        _release_once()
         with _LAST_LATENCY_LOCK:
-            _LAST_LATENCY_SEC = time.monotonic() - t0
-    finally:
-        gate.release()
+            _LAST_LATENCY_SEC = time.monotonic() - t_start
+        raise AIExtractionError(
+            "timeout",
+            f"no response within hard deadline of {hard_deadline:.0f}s "
+            f"(configured timeout={timeout}s); request may still be running "
+            f"server-side and was abandoned client-side",
+        )
+
+    with _LAST_LATENCY_LOCK:
+        _LAST_LATENCY_SEC = elapsed
+
+    if kind == "ok":
+        response_payload = payload_or_msg
+    elif kind == "timeout":
+        raise AIExtractionError("timeout", payload_or_msg)
+    elif _is_oom_error(payload_or_msg):
+        raise AIExtractionError("error", f"oom_non_retryable: {payload_or_msg}")
+    else:
+        raise AIExtractionError("error", payload_or_msg)
+
     return (
         (response_payload.get("message") or {}).get("content")
         or response_payload.get("response")

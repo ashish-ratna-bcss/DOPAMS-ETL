@@ -143,6 +143,17 @@ def resolve_ai_settings() -> dict:
     # Completion token cap. Empty/0 = unlimited. Do NOT set a low value
     # (e.g. 512): multi-accused JSON regularly exceeds that and truncates.
     num_predict_raw = _env_get("ETL3_AI_NUM_PREDICT")
+    # Optional comma-separated per-worker Ollama hosts for true per-GPU
+    # parallelism (one full model copy per GPU, no cross-GPU pipeline split).
+    # Worker i uses worker_hosts[i % len(worker_hosts)]. Falls back to a
+    # single-host list [host] when unset, preserving prior behaviour.
+    worker_hosts_raw = _env_get("OLLAMA_WORKER_HOSTS")
+    if worker_hosts_raw.strip():
+        worker_hosts = [
+            h.strip().rstrip("/") for h in worker_hosts_raw.split(",") if h.strip()
+        ]
+    else:
+        worker_hosts = [host] if host else []
     mode = ai_mode()
     limit = int(limit_raw)
     if mode == "backfill":
@@ -169,6 +180,7 @@ def resolve_ai_settings() -> dict:
         "health_cooldown_sec": max(5.0, float(cooldown_raw)),
         "parallel": max(1, int(parallel_raw)),
         "num_predict": num_predict,
+        "worker_hosts": worker_hosts,
     }
 
 
