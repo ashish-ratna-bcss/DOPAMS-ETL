@@ -51,3 +51,13 @@ etl3/.backfill_name_enrichment_checkpoint*.json
 
 testing_UI/server/cache/
 cache/
+
+# Pre-edit safety backups made during live server operations -- never
+# shared/committed, kept locally only for rollback.
+*.bak-*
+*.bak_*
+
+# Resumable progress/report state from cctns-v2/etl-files/backfill_v2_media_to_minio.py --
+# regenerated on every run, environment-specific, never shared/committed.
+cctns-v2/etl-files/backfill_v2_progress.json
+cctns-v2/etl-files/backfill_v2_reconciliation.json
