@@ -19,10 +19,19 @@ ACCUSED_API_URL = os.environ.get("ACCUSED_API_URL")
 ALFRESCO_DOWNLOAD_API_URL = os.environ.get("ALFRESCO_DOWNLOAD_API_URL")
 
 # --- Media Storage Configuration ---
-# Tomcat serves this shared root at http://192.168.103.106:8080/files/.
-# Keeping V1 downloads here makes their existing attach_path directly usable
-# by media_unified.resolved_relative_path and the DOPAMS file proxy.
-MEDIA_BASE_DIR = os.environ.get("MEDIA_BASE_DIR", "/data-drive/etl-files")
+# Downloaded Alfresco attachments are uploaded directly to the shared MinIO
+# bucket (DOPAMS-BE's object-store.ts reads the same bucket for serving
+# media). The object key is <attach_path>/<dms_file_name> -- identical in
+# shape to the relative path this ETL has always recorded, so
+# media_unified.resolved_relative_path and the DOPAMS file proxy need no
+# change. Write access must use a credential distinct from the backend's
+# existing read-only FILE_SERVER_ACCESS_KEY/SECRET_KEY.
+MINIO_ENDPOINT_URL = os.environ.get("MINIO_ENDPOINT_URL", "http://192.168.103.106:9000")
+MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "files")
+MINIO_REGION = os.environ.get("MINIO_REGION", "us-east-1")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "")
+
 try:
     MEDIA_DOWNLOAD_CONCURRENCY = int(os.environ.get("MEDIA_DOWNLOAD_CONCURRENCY", "5"))
 except ValueError:

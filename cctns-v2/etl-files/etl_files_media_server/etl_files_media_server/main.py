@@ -5,26 +5,28 @@ DOPAMAS ETL - Files Media Server Downloader
 Process name: etl_files_media_server
 
 Reads file metadata from the `files` table and downloads actual files
-from the DOPAMAS files API into the Tomcat media server folder structure.
+from the DOPAMAS files API, uploading them directly to the shared MinIO
+bucket -- no local file is written.
 
 Key behavior:
 - Uses DB_CONFIG from config.py (same .env-driven connection).
 - Uses only the files API endpoint (API_CONFIG['files_url'] or base_url + /files).
 - Table name is taken from env: FILES_TABLE (default: "files").
-- For each row with a non-null file_id, determines destination folder based on:
+- For each row with a non-null file_id, determines the object key's folder
+  (first path segment) based on:
     * source_type: crime, person, property, interrogation
     * source_field: FIR_COPY, MEDIA, INTERROGATION_REPORT, DOPAMS_DATA, IDENTITY_DETAILS
-- Saves files into:
-    base: /mnt/shared-etl-files  (from FILES_MEDIA_BASE_PATH env var)
-    crime/FIR_COPY                  -> crimes/
-    person/IDENTITY_DETAILS         -> person/identitydetails/
-    person/MEDIA                    -> person/media/
-    property/MEDIA                  -> property/
-    interrogation/MEDIA             -> interrogations/media/
-    interrogation/INTERROGATION_REPORT -> interrogations/interrogationreport/
-    interrogation/DOPAMS_DATA       -> interrogations/dopamsdata/
-- File name: {file_id}.{ext}, where ext is derived from Content-Type (fallback: .pdf).
-- Idempotency on disk: if file already exists, it is skipped.
+- Uploads to MinIO bucket MINIO_BUCKET (default "files") under key:
+    crime/FIR_COPY                  -> crimes/{file_id}.{ext}
+    person/IDENTITY_DETAILS         -> person/identitydetails/{file_id}.{ext}
+    person/MEDIA                    -> person/media/{file_id}.{ext}
+    property/MEDIA                  -> property/{file_id}.{ext}
+    interrogation/MEDIA             -> interrogations/media/{file_id}.{ext}
+    interrogation/INTERROGATION_REPORT -> interrogations/interrogationreport/{file_id}.{ext}
+    interrogation/DOPAMS_DATA       -> interrogations/dopamsdata/{file_id}.{ext}
+- Extension is derived from Content-Type (fallback: .pdf).
+- Idempotency: if the object already exists in MinIO (checked via HEAD/list,
+  no local disk involved), the download is skipped.
 - Files API rate limit: 10 requests per minute (enforced by sleeping between requests).
 
 FIX LOG:
@@ -68,6 +70,9 @@ if PARENT_DIR_STR not in sys.path:
     sys.path.insert(0, PARENT_DIR_STR)
 
 from config import DB_CONFIG, API_CONFIG, LOG_CONFIG
+# Absolute (not relative) import so this still works when main.py is run as
+# a direct script, not only via `python -m etl_files_media_server.main`.
+from etl_files_media_server.object_store import IterStream, assert_v2_key, get_object_store
 
 
 # -----------------------------------------------------------------------------
@@ -77,8 +82,9 @@ from config import DB_CONFIG, API_CONFIG, LOG_CONFIG
 # Table name for files metadata
 FILES_TABLE = first_env("FILES_TABLE", default="files")
 
-# Base path on the Tomcat media server - ALWAYS read from env
-BASE_MEDIA_PATH = first_env("FILES_MEDIA_BASE_PATH", default="/mnt/shared-etl-files")
+# MinIO bucket objects are uploaded to (same bucket DOPAMS-BE reads for
+# serving files). Credentials/endpoint are read by object_store.ObjectStore.
+MINIO_BUCKET = first_env("MINIO_BUCKET", default="files")
 
 # Files API rate limit - read from env so .env controls it without a code change.
 # Default 5 RPM → 12 s per request slot.
@@ -160,7 +166,8 @@ FILES_BASE_URL = build_files_base_url()
 
 def map_destination_subdir(source_type: str, source_field: str) -> Optional[str]:
     """
-    Map (source_type, source_field) to a relative subdirectory under BASE_MEDIA_PATH.
+    Map (source_type, source_field) to the MinIO object key's folder prefix
+    (first path segment(s)).
     Returns None if the combination is unsupported and should be skipped.
 
     NOTE: source_field is normalised to UPPER CASE before comparison, so the DB
@@ -238,51 +245,9 @@ def extension_from_response(resp: requests.Response) -> str:
     return ".pdf"
 
 
-def ensure_directory(path: str) -> None:
+def build_object_key(file_id: str, source_type: str, source_field: str, resp: requests.Response) -> Optional[str]:
     """
-    Ensure a directory exists and has correct permissions.
-    Creates directory with permissions 775 so both owner and group can write.
-    """
-    try:
-        if os.path.exists(path):
-            if os.access(path, os.W_OK):
-                return
-            else:
-                try:
-                    os.chmod(path, 0o775)
-                    if not os.access(path, os.W_OK):
-                        raise PermissionError(f"Directory {path} exists but is not writable even after chmod")
-                except PermissionError:
-                    logger.error(f"❌ Permission denied: Directory {path} exists but is not writable")
-                    logger.error(f"   Directory owner: {os.stat(path).st_uid}")
-                    logger.error(f"   Current user: {os.getuid()}")
-                    logger.error(f"   Current group: {os.getgid()}")
-                    logger.error(f"   Solution: Ensure user is in tomcat group and directory has group write permissions")
-                    raise
-        else:
-            os.makedirs(path, mode=0o775, exist_ok=True)
-            if os.path.exists(path):
-                try:
-                    os.chmod(path, 0o775)
-                except PermissionError:
-                    if not os.access(path, os.W_OK):
-                        raise
-    except PermissionError as e:
-        logger.error(f"❌ Permission denied creating directory {path}: {e}")
-        logger.error(f"   Directory owner: {os.stat(path).st_uid if os.path.exists(path) else 'N/A'}")
-        logger.error(f"   Current user: {os.getuid()}")
-        logger.error(f"   Current group: {os.getgid()}")
-        logger.error(f"   Solution: Add your user to tomcat group or run with sudo")
-        raise
-    except Exception as e:
-        logger.warning(f"⚠️  Could not set directory permissions for {path}: {e}")
-        if not os.path.exists(path):
-            os.makedirs(path, exist_ok=True)
-
-
-def build_destination_path(file_id: str, source_type: str, source_field: str, resp: requests.Response) -> Optional[str]:
-    """
-    Build the absolute destination path for a file.
+    Build the MinIO object key for a file: <subdir>/<file_id><ext>.
     Returns None if the (source_type, source_field) combination is unsupported.
     """
     subdir = map_destination_subdir(source_type, source_field)
@@ -290,9 +255,9 @@ def build_destination_path(file_id: str, source_type: str, source_field: str, re
         return None
 
     ext = extension_from_response(resp)
-    dest_dir = os.path.join(BASE_MEDIA_PATH, subdir)
-    ensure_directory(dest_dir)
-    return os.path.join(dest_dir, f"{file_id}{ext}")
+    key = f"{subdir}/{file_id}{ext}".replace(os.sep, "/")
+    assert_v2_key(key)
+    return key
 
 
 # -----------------------------------------------------------------------------
@@ -300,7 +265,7 @@ def build_destination_path(file_id: str, source_type: str, source_field: str, re
 # -----------------------------------------------------------------------------
 
 class FilesMediaServerETL:
-    """ETL process to download files from API and save to Tomcat media folders."""
+    """ETL process to download files from the source API and upload them to MinIO."""
 
     def __init__(self, repair: bool = False) -> None:
         self.db_conn: Optional[psycopg2.extensions.connection] = None
@@ -319,7 +284,7 @@ class FilesMediaServerETL:
             "skipped_no_mapping": 0,
             "skipped_null_file_id": 0,
             "skipped_already_downloaded": 0,
-            "skipped_exists_on_disk": 0,
+            "skipped_exists_in_minio": 0,
             "resumed_from": None,
         }
         # Batch DB updates to reduce commit overhead
@@ -582,30 +547,19 @@ class FilesMediaServerETL:
         """Build the files API URL for a given file_id."""
         return f"{FILES_BASE_URL}/{file_id}"
 
-    def _find_existing_disk_path(self, file_id: str, source_type: str, source_field: str) -> Optional[str]:
+    def _find_existing_object(self, file_id: str, source_type: str, source_field: str) -> Optional[Tuple[str, int]]:
         """
-        Check whether this file_id is already on disk WITHOUT hitting the API.
+        Check whether this file_id is already uploaded to MinIO WITHOUT
+        hitting the source API. A ListObjectsV2(Prefix=...) call takes the
+        place of the old os.listdir()-based disk scan.
 
-        Returns the path string if the file exists and is non-empty, else None.
-        This replaces the old HEAD-request existence check, saving one API slot
-        per file (halving the effective request count for already-downloaded files).
+        Returns (key, size) if a non-empty object exists, else None.
         """
         subdir = map_destination_subdir(source_type, source_field)
         if subdir is None:
             return None
-        dest_dir = os.path.join(BASE_MEDIA_PATH, subdir)
-        if not os.path.isdir(dest_dir):
-            return None
-        prefix = f"{file_id}."
-        try:
-            for fname in os.listdir(dest_dir):
-                if fname.startswith(prefix):
-                    full = os.path.join(dest_dir, fname)
-                    if os.path.getsize(full) > 0:
-                        return full
-        except OSError:
-            pass
-        return None
+        prefix = f"{subdir}/{file_id}.".replace(os.sep, "/")
+        return get_object_store().find_by_prefix(prefix)
 
     def download_single_file(
         self,
@@ -616,18 +570,20 @@ class FilesMediaServerETL:
         """
         Download a single file by its metadata.
 
-        Disk-first existence check (no API HEAD request) → one GET per new file.
-        download_attempts is incremented once per real attempt loop iteration.
+        MinIO-first existence check (no source-API HEAD request) → one GET
+        per new file. download_attempts is incremented once per real
+        attempt loop iteration.
         """
-        # --- Fast path: already on disk (zero API cost) ---
-        existing_path = self._find_existing_disk_path(file_id, source_type, source_field)
-        if existing_path:
+        # --- Fast path: already in MinIO (zero source-API cost) ---
+        existing = self._find_existing_object(file_id, source_type, source_field)
+        if existing:
+            existing_key, existing_size = existing
             logger.info(
-                f"⏭️  File already exists on disk for file_id={file_id}: "
-                f"path={existing_path}, size={os.path.getsize(existing_path)} bytes (skipping download)"
+                f"⏭️  File already exists in MinIO for file_id={file_id}: "
+                f"key={existing_key}, size={existing_size} bytes (skipping download)"
             )
             self._mark_as_downloaded(file_id, success=True)
-            self.stats["skipped_exists_on_disk"] += 1
+            self.stats["skipped_exists_in_minio"] += 1
             return True
 
         url = self.build_file_url(file_id)
@@ -669,14 +625,14 @@ class FilesMediaServerETL:
                     stream=True,
                 ) as resp:
                     if resp.status_code == 200:
-                        dest_path = build_destination_path(
+                        key = build_object_key(
                             file_id=file_id,
                             source_type=source_type,
                             source_field=source_field,
                             resp=resp,
                         )
 
-                        if dest_path is None:
+                        if key is None:
                             logger.warning(
                                 f"⚠️  No destination mapping for "
                                 f"(source_type={source_type}, source_field={source_field}); "
@@ -694,55 +650,47 @@ class FilesMediaServerETL:
                             self._respect_rate_limit(start_time)
                             return False
 
-                        if os.path.exists(dest_path):
-                            existing_size = os.path.getsize(dest_path)
-                            if existing_size > 0:
-                                logger.info(
-                                    f"⏭️  File already exists on disk for file_id={file_id}: "
-                                    f"path={dest_path}, size={existing_size} bytes (skipping download)"
-                                )
-                                self._mark_as_downloaded(file_id, success=True)
-                                self.stats["skipped_exists_on_disk"] += 1
-                                self._respect_rate_limit(start_time)
-                                return True
-                            else:
-                                logger.warning(f"⚠️  File {dest_path} exists but is 0 bytes. Re-downloading...")
-                                os.remove(dest_path)
+                        store = get_object_store()
+                        exists, existing_size = store.object_exists(key)
+                        if exists and existing_size > 0:
+                            logger.info(
+                                f"⏭️  Object already exists in MinIO for file_id={file_id}: "
+                                f"key={key}, size={existing_size} bytes (skipping download)"
+                            )
+                            self._mark_as_downloaded(file_id, success=True)
+                            self.stats["skipped_exists_in_minio"] += 1
+                            self._respect_rate_limit(start_time)
+                            return True
 
-                        try:
-                            with open(dest_path, "wb") as f:
-                                for chunk in resp.iter_content(chunk_size=8192):
-                                    if chunk:
-                                        f.write(chunk)
-                            os.chmod(dest_path, 0o644)
-                        except PermissionError as e:
-                            logger.error(f"❌ Permission denied writing file {dest_path}: {e}")
-                            logger.error(f"   Directory: {os.path.dirname(dest_path)}")
-                            logger.error(f"   Directory exists: {os.path.exists(os.path.dirname(dest_path))}")
-                            logger.error(f"   Directory writable: {os.access(os.path.dirname(dest_path), os.W_OK)}")
-                            logger.error(f"   Current user: {first_env('USER', default='unknown')}")
-                            logger.error(f"   Current UID: {os.getuid()}")
-                            logger.error(f"   Solution: Run chmod -R 777 {BASE_MEDIA_PATH}")
-                            raise
+                        content_length_header = resp.headers.get("content-length")
+                        expected_size = (
+                            int(content_length_header)
+                            if content_length_header and content_length_header.isdigit() and int(content_length_header) > 0
+                            else None
+                        )
+                        stream = IterStream(resp.iter_content(chunk_size=65536))
+                        upload = store.upload_and_confirm(
+                            key,
+                            stream,
+                            content_type=resp.headers.get("Content-Type"),
+                            expected_size=expected_size,
+                        )
 
-                        new_size = os.path.getsize(dest_path)
-                        # Validate download completeness against Content-Length header
-                        expected_size = int(resp.headers.get('content-length', 0))
-                        if expected_size > 0 and new_size != expected_size:
-                            os.remove(dest_path)
+                        if not upload.ok:
+                            store.delete_object(key)  # best-effort cleanup of any partial object
                             logger.error(
-                                f"❌ Incomplete download file_id={file_id}: "
-                                f"got {new_size}/{expected_size} bytes, will retry..."
+                                f"❌ Upload to MinIO failed for file_id={file_id} key={key}: "
+                                f"{upload.error} (attempt {attempt}/{max_retries})"
                             )
                             if attempt < max_retries:
                                 sleep_for = SECONDS_PER_REQUEST * attempt
                                 self._respect_rate_limit(start_time, extra_sleep=sleep_for)
                                 continue
-                            else:
-                                raise ValueError(f"Incomplete download {file_id}: {new_size}/{expected_size} bytes")
+                            raise RuntimeError(f"Upload to MinIO failed for {file_id} key={key}: {upload.error}")
+
                         logger.info(
-                            f"✅ Downloaded file_id={file_id} to {dest_path}, "
-                            f"size={new_size} bytes"
+                            f"✅ Downloaded file_id={file_id}, uploaded to MinIO key={key}, "
+                            f"size={upload.size} bytes"
                         )
                         self._mark_as_downloaded(file_id, success=True)
                         self.stats["downloaded"] += 1
@@ -871,11 +819,18 @@ class FilesMediaServerETL:
         logger.info("=" * 80)
         logger.info(f"Using FILES_TABLE={FILES_TABLE}")
         logger.info(f"Files base URL: {FILES_BASE_URL}")
-        logger.info(f"Media base path: {BASE_MEDIA_PATH}")
+        logger.info(f"MinIO bucket: {MINIO_BUCKET}")
         logger.info(f"Rate limit: {FILES_API_MAX_RPM} requests per minute")
 
         if not self.connect_db():
             logger.error("Failed to connect to database. Exiting.")
+            return False
+
+        try:
+            get_object_store()  # fail fast if MinIO credentials aren't configured
+        except Exception as exc:
+            logger.error(f"❌ Failed to initialize MinIO object store: {exc}")
+            self.close_db()
             return False
 
         try:
@@ -884,7 +839,7 @@ class FilesMediaServerETL:
                 logger.error("Failed to set up download tracking columns. Exiting.")
                 return False
 
-            logger.info("🔄 Running database vs filesystem sync before starting downloads...")
+            logger.info("🔄 Running database vs MinIO sync before starting downloads...")
             try:
                 from .sync_files_state import sync
                 sync()
@@ -943,7 +898,7 @@ class FilesMediaServerETL:
             logger.info(f"Skipped (no mapping): {self.stats['skipped_no_mapping']}")
             logger.info(f"Skipped (NULL file_id in loop): {self.stats['skipped_null_file_id']}")
             logger.info(f"Skipped (already downloaded in DB): {self.stats['skipped_already_downloaded']}")
-            logger.info(f"Skipped (exists on disk): {self.stats['skipped_exists_on_disk']}")
+            logger.info(f"Skipped (exists in MinIO): {self.stats['skipped_exists_in_minio']}")
             if self.stats['resumed_from']:
                 logger.info(f"Resumed from file_id: {self.stats['resumed_from']}")
             logger.info("=" * 80)

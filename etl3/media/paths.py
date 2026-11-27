@@ -3,14 +3,24 @@
 V1 stores absolute host paths (historically under /home/tganb/...).
 V2 stores shared-storage-relative paths under FILES_MEDIA_BASE_PATH
 (/mnt/shared-etl-files) as recorded in file_media_bookkeeping.file_path.
+
+Both V1 and V2 now upload directly to a shared MinIO bucket instead of
+writing those paths to local/shared disk. resolved_relative_path (computed
+below, unchanged) is identical in shape to the MinIO object key, so
+availability is checked there FIRST via a HEAD request; the local
+filesystem check below is kept only as a fallback for any file that hasn't
+been migrated into MinIO yet (see the V2 backfill in the migration plan).
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
 from etl3.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 AVAILABILITY = (
@@ -97,11 +107,93 @@ _KNOWN_EXT_SET = {e.lower() for e in _V2_EXTS}
 _parent_exists_cache: dict[str, bool] = {}
 _root_exists_cache: dict[str, bool] = {}
 
+_minio_client = None
+_minio_client_failed = False
+
 
 def clear_dir_cache() -> None:
     """Reset parent/root existence caches between consolidation runs."""
     _parent_exists_cache.clear()
     _root_exists_cache.clear()
+
+
+def _minio_enabled() -> bool:
+    return bool(_env("MINIO_ACCESS_KEY") and _env("MINIO_SECRET_KEY"))
+
+
+def _get_minio_client():
+    """Lazy singleton boto3 S3 client. Read-only use (HEAD only) -- provision
+    a read-scoped credential here, separate from V1/V2's write-capable one,
+    even though the env var names are the same (each host has its own .env)."""
+    global _minio_client, _minio_client_failed
+    if _minio_client is None and not _minio_client_failed:
+        try:
+            import boto3
+            from botocore.client import Config
+
+            _minio_client = boto3.client(
+                "s3",
+                endpoint_url=_env("MINIO_ENDPOINT_URL", "http://192.168.103.106:9000"),
+                aws_access_key_id=_env("MINIO_ACCESS_KEY"),
+                aws_secret_access_key=_env("MINIO_SECRET_KEY"),
+                region_name=_env("MINIO_REGION", "us-east-1"),
+                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            )
+        except Exception:
+            _minio_client_failed = True
+    return _minio_client
+
+
+def minio_health_check() -> tuple[bool, str]:
+    """Cheap pre-flight check, meant to be called ONCE before a consolidation
+    run (mirrors the _ollama_tags_healthy() pattern in enrichment/runner.py) --
+    never per-row. MinIO being unconfigured is a fine, intentional degraded
+    mode (local-fallback-only) and reports healthy; MinIO being configured
+    but unreachable/misauthenticated is not, and the caller should abort the
+    run rather than let every per-row HEAD miss get silently reinterpreted
+    as "file is missing" by _minio_object_size() below."""
+    if not _minio_enabled():
+        return True, "MinIO not configured on this host -- local-filesystem-only fallback mode"
+    client = _get_minio_client()
+    if client is None:
+        return False, "MinIO credentials present but client failed to initialize"
+    bucket = _env("MINIO_BUCKET", "files")
+    try:
+        client.head_bucket(Bucket=bucket)
+        return True, f"MinIO reachable, bucket {bucket!r} accessible"
+    except Exception as exc:
+        return False, f"MinIO configured but health check failed: {exc}"
+
+
+def _minio_object_size(object_key: Optional[str]) -> tuple[bool, int]:
+    """HEAD `object_key` in the configured MinIO bucket. Never raises;
+    (False, 0) covers "not configured" and "not found" alike -- callers
+    fall back to the local filesystem check for either case, which is
+    correct for those two. Anything else (auth error, timeout, connection
+    refused, 5xx) is logged instead of swallowed silently, because a run
+    that keeps hitting this branch past the one-time minio_health_check()
+    at the top of run_media_consolidation() signals MinIO went down mid-run
+    -- the fallback-to-disk still happens (nothing better to do per-row),
+    but it must not happen invisibly."""
+    if not object_key or not _minio_enabled():
+        return False, 0
+    client = _get_minio_client()
+    if client is None:
+        return False, 0
+    bucket = _env("MINIO_BUCKET", "files")
+    try:
+        resp = client.head_object(Bucket=bucket, Key=object_key.lstrip("/"))
+        size = int(resp.get("ContentLength", 0))
+        return size > 0, size
+    except Exception as exc:
+        code = exc.response.get("Error", {}).get("Code", "") if hasattr(exc, "response") else ""
+        if code not in ("404", "NoSuchKey", "NotFound"):
+            logger.warning(
+                "MinIO HEAD %s failed with non-404 error (falling back to disk check, "
+                "but this is NOT a confirmed-missing result): %s",
+                object_key, exc,
+            )
+        return False, 0
 
 
 def _path_exists_dir(path: str) -> bool:
@@ -129,7 +221,16 @@ def _parent_exists(path: str) -> bool:
     return ok
 
 
-def _file_accessible(path: Optional[str]) -> tuple[bool, int]:
+def _file_accessible(path: Optional[str], object_key: Optional[str] = None) -> tuple[bool, int]:
+    # MinIO first: both V1 and V2 now upload directly there, and
+    # resolved_relative_path is already shaped exactly like the object key.
+    minio_ok, minio_size = _minio_object_size(object_key)
+    if minio_ok:
+        return True, minio_size
+
+    # Fallback: local/shared filesystem, for anything not yet migrated into
+    # MinIO (see the V2 backfill step in the migration plan) or if MinIO
+    # isn't configured on this host.
     if not path:
         return False, 0
     try:
@@ -221,13 +322,14 @@ def classify_v1_availability(payload: dict, paths: Optional[dict] = None) -> tup
         return "DOWNLOAD_FAILED", err or "download failed"
     if status in ("DOWNLOADED", "CACHED"):
         check_path = paths.get("resolved_absolute_path") or paths.get("source_local_path")
-        ok, size = _file_accessible(check_path)
+        ok, size = _file_accessible(check_path, object_key=paths.get("resolved_relative_path"))
         if ok:
             return "VERIFIED_ACCESSIBLE", f"readable file size={size}"
         # Remap attempt already embedded in resolve_v1_paths.
         detail = (
-            f"source status={status} but file inaccessible on this host; "
-            f"source_local_path={paths.get('source_local_path')!r}"
+            f"source status={status} but object/file inaccessible "
+            f"(checked MinIO key={paths.get('resolved_relative_path')!r} "
+            f"and source_local_path={paths.get('source_local_path')!r})"
         )
         return "BOOKKEEPING_DOWNLOADED_INACCESSIBLE", detail
     if paths.get("source_local_path") and ".." in str(paths.get("source_local_path")):
@@ -284,7 +386,7 @@ def classify_v2_availability(payload: dict, paths: Optional[dict] = None) -> tup
         return "EMPTY_AT_SOURCE", err or "source marked is_empty"
     if err_u.startswith("PERMANENT:") or "HTTP 400" in err_u or "HTTP 404" in err_u:
         return "DOWNLOAD_FAILED", err
-    if "MISSING ON DISK" in err_u:
+    if "MISSING IN MINIO" in err_u or "MISSING ON DISK" in err_u:
         return "BOOKKEEPING_DOWNLOADED_INACCESSIBLE", err
     if file_id is None and not is_empty and payload.get("has_field"):
         return "UNRESOLVED_FILE_ID", err or "file_id is null"
@@ -294,14 +396,16 @@ def classify_v2_availability(payload: dict, paths: Optional[dict] = None) -> tup
         if err:
             return "DOWNLOAD_FAILED", err
         return "PENDING", "not downloaded"
-    # is_downloaded True — verify on this host
+    # is_downloaded True — verify against MinIO first, local disk as fallback
     check_path = paths.get("resolved_absolute_path")
-    if check_path is None and paths.get("resolved_relative_path") is None and file_id:
+    object_key = paths.get("resolved_relative_path")
+    if check_path is None and object_key is None and file_id:
         return "INVALID_PATH", "downloaded but no resolvable path under V2_SHARED"
-    ok, size = _file_accessible(check_path)
+    ok, size = _file_accessible(check_path, object_key=object_key)
     if ok:
         return "VERIFIED_ACCESSIBLE", f"readable file size={size}"
     return (
         "BOOKKEEPING_DOWNLOADED_INACCESSIBLE",
-        f"is_downloaded=true but file inaccessible at {check_path!r}; {err}".strip(),
+        f"is_downloaded=true but object/file inaccessible "
+        f"(checked MinIO key={object_key!r} and path={check_path!r}); {err}".strip(),
     )

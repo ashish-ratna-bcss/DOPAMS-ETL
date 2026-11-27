@@ -6,7 +6,7 @@ THREAD-SAFE MULTI-THREADED VERSION with deadlock prevention and safe concurrent 
 
 This script:
 1. Reads file_path from the file_media_bookkeeping table
-2. Checks if the file exists on the filesystem
+2. Checks whether the object exists in MinIO
 3. Determines the actual file extension
 4. Updates file_url with the extension
 5. Processes all source types in PARALLEL using thread pool
@@ -18,19 +18,22 @@ IMPORTANT: The trigger auto_generate_file_paths is temporarily disabled
 to prevent it from overwriting the extensions.
 
 FIX LOG:
-- BASE_MEDIA_PATH now reads exclusively from FILES_MEDIA_BASE_PATH env var
-  (same as main.py), ensuring both scripts always use the same filesystem path.
-  Default fallback is '/mnt/shared-etl-files' to match the NFS mount.
 - Added explicit comment that source_field.upper() handles the mixed-case
   DB enum value 'uploadChargeSheet' correctly -> 'UPLOADCHARGESHEET'.
+- Extension discovery now queries MinIO (ListObjectsV2 by prefix) instead of
+  globbing a local directory -- there is no local file to glob once V1/V2
+  upload directly to MinIO. MINIO_* env vars (same names as main.py) replace
+  the old FILES_MEDIA_BASE_PATH.
 """
 
 import os
 import sys
-import glob
 import logging
 from pathlib import Path
 from typing import Optional, Tuple, List
+import boto3
+from botocore.client import Config
+from botocore.exceptions import BotoCoreError, ClientError
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
@@ -54,10 +57,7 @@ NUM_WORKER_THREADS = int(os.getenv("ETL_WORKER_THREADS", "8"))
 DB_POOL_SIZE = NUM_WORKER_THREADS + 1
 BATCH_COMMIT_SIZE = int(os.getenv("ETL_BATCH_COMMIT_SIZE", "100"))
 DB_OPERATION_TIMEOUT = int(os.getenv("ETL_DB_TIMEOUT", "30"))
-FILE_LOCK_TIMEOUT = int(os.getenv("ETL_FILE_LOCK_TIMEOUT", "10"))
-
 global_db_lock = RLock()
-file_system_lock = Lock()
 trigger_state_lock = Lock()
 stats_lock = Lock()
 shutdown_event = Event()
@@ -78,18 +78,40 @@ DB_CONFIG = {
     'keepalives_count': 5,
 }
 
-# Base path on the Tomcat media server (NFS mount).
-# Always read from FILES_MEDIA_BASE_PATH env var - same variable used by main.py -
-# so both scripts always look at the same filesystem path.
-BASE_MEDIA_PATH = os.getenv(
-    "FILES_MEDIA_BASE_PATH",
-    "/mnt/shared-etl-files"
-)
+# MinIO bucket objects are uploaded to by main.py -- same bucket/credentials
+# convention, read from the same env var names.
+MINIO_ENDPOINT_URL = os.getenv("MINIO_ENDPOINT_URL", "http://192.168.103.106:9000")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "files")
+MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
 
 BASE_FILE_URL = os.getenv(
     "FILES_BASE_URL",
     ""
 )
+
+_minio_client = None
+
+
+def get_minio_client():
+    """Lazy singleton boto3 S3 client, thread-safe for concurrent use."""
+    global _minio_client
+    if _minio_client is None:
+        if not MINIO_ACCESS_KEY or not MINIO_SECRET_KEY:
+            raise RuntimeError(
+                "MINIO_ACCESS_KEY / MINIO_SECRET_KEY are required "
+                "(write-capable MinIO credentials, matching main.py's)."
+            )
+        _minio_client = boto3.client(
+            "s3",
+            endpoint_url=MINIO_ENDPOINT_URL,
+            aws_access_key_id=MINIO_ACCESS_KEY,
+            aws_secret_access_key=MINIO_SECRET_KEY,
+            region_name=MINIO_REGION,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        )
+    return _minio_client
 
 # Processing order - all source types from DB source_type_enum
 PROCESSING_ORDER = ['crime', 'person', 'property', 'interrogation', 'mo_seizures', 'chargesheets', 'case_property']
@@ -212,7 +234,7 @@ connection_pool = None
 
 def map_destination_subdir(source_type: str, source_field: str) -> Optional[str]:
     """
-    Map (source_type, source_field) to a relative subdirectory under BASE_MEDIA_PATH.
+    Map (source_type, source_field) to the MinIO object key's folder prefix.
 
     Matches the logic from main.py exactly to ensure consistency.
     Returns None if the combination is unsupported and should be skipped.
@@ -265,55 +287,34 @@ def map_destination_subdir(source_type: str, source_field: str) -> Optional[str]
 
 def find_file_with_extension(file_id: str, subdir: str) -> Optional[Tuple[str, str]]:
     """
-    Find the actual file on filesystem and return (full_path, extension).
-    THREAD-SAFE: Uses filesystem lock to prevent concurrent access conflicts.
+    Find the object in MinIO under <subdir>/<file_id>.* and return
+    (object_key, extension). boto3's S3 client is thread-safe for
+    concurrent calls, so no filesystem-style lock is needed here.
     """
     if not file_id or not subdir:
         logger.debug(f"Invalid parameters: file_id={file_id}, subdir={subdir}")
         return None
 
-    acquired = file_system_lock.acquire(timeout=FILE_LOCK_TIMEOUT)
-    if not acquired:
-        logger.warning(f"Timeout acquiring filesystem lock for {file_id} - skipping")
+    prefix = f"{subdir}/{file_id}."
+    try:
+        resp = get_minio_client().list_objects_v2(Bucket=MINIO_BUCKET, Prefix=prefix, MaxKeys=1)
+    except (BotoCoreError, ClientError) as exc:
+        logger.warning(f"list_objects_v2 prefix={prefix} failed: {exc}")
         return None
 
-    try:
-        dir_path = os.path.join(BASE_MEDIA_PATH, subdir)
+    contents = resp.get("Contents") or []
+    if not contents:
+        logger.debug(f"No object found matching prefix: {prefix}")
+        return None
 
-        if not os.path.isdir(dir_path):
-            logger.debug(f"Directory does not exist: {dir_path}")
-            return None
+    object_key = contents[0]["Key"]
+    _, ext = os.path.splitext(object_key)
 
-        pattern = os.path.join(dir_path, f"{file_id}.*")
-        matches = glob.glob(pattern)
+    if not ext:
+        logger.warning(f"Object found but has no extension: {object_key}")
+        return None
 
-        if not matches:
-            try:
-                all_files = os.listdir(dir_path)
-                for f in all_files:
-                    if f.lower().startswith(file_id.lower()):
-                        matches = [os.path.join(dir_path, f)]
-                        logger.debug(f"Found file with case-insensitive match: {f}")
-                        break
-            except OSError as e:
-                logger.warning(f"Error listing directory {dir_path}: {e}")
-                return None
-
-        if not matches:
-            logger.debug(f"No files found matching pattern: {pattern}")
-            return None
-
-        file_path = matches[0]
-        _, ext = os.path.splitext(file_path)
-
-        if not ext:
-            logger.warning(f"File found but has no extension: {file_path}")
-            return None
-
-        return (file_path, ext)
-
-    finally:
-        file_system_lock.release()
+    return (object_key, ext)
 
 
 def update_file_url_with_extension(record_id: str, file_url: str, extension: str) -> bool:
@@ -404,13 +405,12 @@ def process_record_worker(record: dict, source_type: str, shared_stats: dict) ->
         result = find_file_with_extension(file_id, subdir)
 
         if not result:
-            full_search_path = os.path.join(BASE_MEDIA_PATH, subdir)
-            logger.debug(f"File not found on disk: file_id={file_id}, expected_dir={full_search_path}")
+            logger.debug(f"Object not found in MinIO: file_id={file_id}, expected_prefix={subdir}/{file_id}.")
             with stats_lock:
                 shared_stats['skipped'] += 1
-            return {'updated': False, 'error': 'File not found'}
+            return {'updated': False, 'error': 'Object not found'}
 
-        file_full_path, extension = result
+        object_key, extension = result
 
         url_without_query = file_url.split('?')[0] if '?' in file_url else file_url
         if url_without_query.endswith(extension):
@@ -546,19 +546,20 @@ def main():
     logger.info("Starting THREAD-SAFE file_url extension update process")
     logger.info(f"Configuration: {NUM_WORKER_THREADS} worker threads, batch size {BATCH_COMMIT_SIZE}")
     logger.info("="*70)
-    logger.info(f"Base media path: {BASE_MEDIA_PATH}")
+    logger.info(f"MinIO bucket: {MINIO_BUCKET}")
     logger.info(f"Base file URL: {BASE_FILE_URL}")
     logger.info("")
     logger.info("THREAD SAFETY:")
     logger.info("  ✓ Per-thread database connections (no shared cursor)")
     logger.info("  ✓ Deadlock prevention with operation timeouts")
     logger.info("  ✓ Atomic updates with optimistic locking")
-    logger.info("  ✓ Safe concurrent file system access with locking")
+    logger.info("  ✓ boto3 S3 client is natively thread-safe for concurrent reads")
     logger.info("="*70)
 
-    if not os.path.isdir(BASE_MEDIA_PATH):
-        logger.error(f"Base media path does not exist: {BASE_MEDIA_PATH}")
-        logger.error(f"Check that FILES_MEDIA_BASE_PATH is set correctly in your .env")
+    try:
+        get_minio_client()  # fail fast if MinIO credentials aren't configured
+    except Exception as exc:
+        logger.error(f"MinIO client initialization failed: {exc}")
         sys.exit(1)
 
     try:

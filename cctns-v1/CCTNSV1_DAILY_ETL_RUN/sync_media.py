@@ -86,14 +86,13 @@ def get_pending_media_items(conn, limit: Optional[int] = None) -> List[MediaItem
     return items
 
 
-def _process_single_item(item: MediaItem, base_dir: str) -> Dict[str, Any]:
+def _process_single_item(item: MediaItem) -> Dict[str, Any]:
     """
     Downloads/caches a single media item.
     """
     result = download_media_file(
         attach_path=item.attach_path,
         dms_file_name=item.dms_file_name,
-        base_dir=base_dir,
     )
     return {
         "item": item,
@@ -149,7 +148,6 @@ def update_media_status(conn, item: MediaItem, result: Dict[str, Any]) -> None:
 def run_media_sync(
     limit: Optional[int] = None,
     concurrency: Optional[int] = None,
-    base_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Full pipeline run for media synchronization:
@@ -180,13 +178,12 @@ def run_media_sync(
             }
 
         workers = concurrency or settings.MEDIA_DOWNLOAD_CONCURRENCY
-        target_dir = base_dir or settings.MEDIA_BASE_DIR
 
         logger.info(
-            "Starting media download for %d item(s) using %d worker(s) to %s",
+            "Starting media download for %d item(s) using %d worker(s) to MinIO bucket %s",
             total_pending,
             workers,
-            target_dir,
+            settings.MINIO_BUCKET,
         )
 
         counts = {
@@ -198,7 +195,7 @@ def run_media_sync(
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_item = {
-                executor.submit(_process_single_item, item, target_dir): item
+                executor.submit(_process_single_item, item): item
                 for item in pending_items
             }
 

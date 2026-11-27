@@ -5,6 +5,7 @@ from etl3.media.paths import (
     classify_v1_availability,
     classify_v2_availability,
     clear_dir_cache,
+    minio_health_check,
     resolve_v1_paths,
     resolve_v2_paths,
 )
@@ -115,6 +116,16 @@ def run_media_consolidation(conn, consolidation_run_id: str) -> dict:
     Re-evaluates filesystem accessibility on every run so BOOKKEEPING vs
     VERIFIED statuses stay honest on this host. Does not download files.
     """
+    minio_ok, minio_detail = minio_health_check()
+    if not minio_ok:
+        raise RuntimeError(
+            f"Refusing to run media consolidation: {minio_detail}. "
+            "A MinIO outage or bad credential would otherwise get silently "
+            "reinterpreted as every V1/V2 file being inaccessible -- fix "
+            "connectivity/credentials and re-run, do not retry blindly."
+        )
+    print(f"media_consolidate MinIO health check: {minio_detail}", flush=True)
+
     clear_dir_cache()
     stats = {"V1": None, "V2": None, "gaps_unresolved_parent": 0, "flush": {}}
 

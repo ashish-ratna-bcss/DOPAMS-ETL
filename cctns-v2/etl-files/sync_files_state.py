@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-Sync Script: Database vs Filesystem
-Checks for files marked as downloaded in DB but missing on disk.
-Resets is_downloaded = FALSE for missing files to allow re-download.
+Sync Script: Database vs MinIO
+Checks for files marked as downloaded in DB but missing from the MinIO
+object store. Resets is_downloaded = FALSE for missing files to allow
+re-download.
+
+This is a standalone duplicate of etl_files_media_server/sync_files_state.py
+(imported directly by main.py's CLI entrypoint via a sys.path insert, not via
+the package's relative import) -- kept in sync with it by hand, matching this
+codebase's existing pattern of duplicating map_destination_subdir() across
+main.py / update_file_urls_with_extensions.py / this file.
 """
 
 import os
@@ -17,7 +24,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]  # sync_files_state.py -> etl-f
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# Ensure the etl_files_media_server package (which holds object_store.py) is
+# importable from this standalone script too.
+_PACKAGE_DIR = Path(__file__).resolve().parent / "etl_files_media_server"
+if str(_PACKAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(_PACKAGE_DIR))
+
 from env_utils import first_env, load_repo_environment, resolve_db_config, resolve_table_name
+from etl_files_media_server.object_store import get_object_store
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -31,7 +45,6 @@ DB_CONFIG = {
     "password": _DB_RESOLVED["password"],
 }
 
-BASE_MEDIA_PATH = first_env("FILES_MEDIA_BASE_PATH", default="/mnt/shared-etl-files")
 FILES_TABLE = resolve_table_name("FILES_TABLE", "files")
 
 # Setup logger for sync script
@@ -103,7 +116,7 @@ def run_sync(logger=None):
     """
     if logger is None:
         logger = get_sync_logger()
-    
+
     if not validate_db_config(logger):
         return False
 
@@ -118,8 +131,16 @@ def run_sync(logger=None):
         logger.error(f"Error connecting to database: {e}")
         return False
 
-    logger.info(f"Base media path: {BASE_MEDIA_PATH}")
-    
+    try:
+        store = get_object_store()  # fail fast if MinIO credentials aren't configured
+    except Exception as e:
+        logger.error(f"Error initializing MinIO object store: {e}")
+        cursor.close()
+        conn.close()
+        return False
+
+    logger.info(f"MinIO bucket: {store.bucket}")
+
     # Fetch all files marked as downloaded
     sql = f"""
         SELECT id, source_type, source_field, file_id, file_url
@@ -128,40 +149,36 @@ def run_sync(logger=None):
     """
     cursor.execute(sql)
     rows = cursor.fetchall()
-    
+
     logger.info(f"Found {len(rows)} records marked as is_downloaded = TRUE")
-    
+
     missing_count = 0
     fixed_count = 0
-    
+
     for row in rows:
         db_id, source_type, source_field, file_id, file_url = row
-        
+
         subdir = map_destination_subdir(source_type, source_field)
         if not subdir:
             continue
-            
-        # Determine extension from file_url or fallback
-        ext = ".pdf"
-        if file_url and "." in file_url.split("/")[-1]:
-            ext = "." + file_url.split("/")[-1].split(".")[-1]
-            
-        file_path = os.path.join(BASE_MEDIA_PATH, subdir, f"{file_id}{ext}")
-        
-        if not os.path.exists(file_path):
+
+        prefix = f"{subdir}/{file_id}."
+        found = store.find_by_prefix(prefix)
+
+        if found is None:
             missing_count += 1
-            # logger.debug(f"Missing: {file_path}")
-            
+            # logger.debug(f"Missing in MinIO: {prefix}*")
+
             # Reset status in DB
             update_sql = f"""
                 UPDATE {FILES_TABLE}
                 SET is_downloaded = FALSE,
-                    download_error = 'Sync: File missing on disk at expected path'
+                    download_error = 'Sync: Object missing in MinIO at expected prefix'
                 WHERE id = %s
             """
             cursor.execute(update_sql, (db_id,))
             fixed_count += 1
-            
+
             if fixed_count % 100 == 0:
                 conn.commit()
                 logger.info(f"Fixed {fixed_count} records...")
@@ -172,13 +189,13 @@ def run_sync(logger=None):
     logger.info("📊 FILES SYNC VALIDATION SUMMARY")
     logger.info("=" * 80)
     logger.info(f"Total records checked: {len(rows)}")
-    logger.info(f"Missing from disk: {missing_count}")
+    logger.info(f"Missing from MinIO: {missing_count}")
     logger.info(f"DB records reset for re-download: {fixed_count}")
     logger.info("=" * 80)
-    
+
     cursor.close()
     conn.close()
-    
+
     return True
 
 if __name__ == "__main__":
