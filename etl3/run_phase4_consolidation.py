@@ -10,10 +10,13 @@ on crimes, optionally persons).
 
 Usage: python etl3/run_phase4_consolidation.py
 """
+import logging
 import sys
 import time
 import traceback
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -21,7 +24,7 @@ from etl3.db import connections
 from etl3.loaders import common
 from etl3.merger import current_state as cs
 from etl3.merger import field_maps
-from etl3.sync.run_lock import ConcurrentRunError, acquire, release
+from etl3.sync.run_lock import LOCK_KEY, ConcurrentRunError, acquire, release
 
 
 def _crime_id_v1(payload):
@@ -91,7 +94,13 @@ def run_with_run_log(conn, work):
                 conn.rollback()
                 release(conn)
             except Exception:
-                pass
+                logger.error(
+                    "Failed to release consolidation advisory lock (key=%s) even after "
+                    "rollback+retry. The lock will remain held until this connection is "
+                    "closed or the server reaps a dead session.",
+                    LOCK_KEY,
+                    exc_info=True,
+                )
 
 
 def _run_with_run_log(conn, work):

@@ -91,6 +91,17 @@ def get_unified_connection(readonly=False):
     (settings.EXPECTED_UNIFIED_DBNAME: dopams_cctns or dopams_cctns_v2) --
     the ONLY database ETL-3 ever writes to. `readonly=True` is available for
     reconciliation/reporting code paths that should never write.
+
+    This is the connection that holds the session-scoped consolidation
+    advisory lock (etl3/sync/run_lock.py, key 874533) for the duration of a
+    run. The server's own tcp_keepalives_idle is 7200s (confirmed on the
+    real host) -- if this process dies without a clean TCP close (killed,
+    OOM, network drop), the backend would otherwise sit as a zombie holding
+    the lock for up to ~2 hours before the server notices. The keepalive
+    overrides below are client-side libpq options that apply only to this
+    connection and shrink that detection window to well under a minute,
+    without changing the lock's semantics (still session-scoped, still
+    released explicitly via pg_advisory_unlock on the happy path).
     """
     cfg = settings.UNIFIED_DB
     conn = psycopg2.connect(
@@ -101,6 +112,11 @@ def get_unified_connection(readonly=False):
         password=cfg["password"],
         connect_timeout=15,
         application_name="etl3_unified",
+        keepalives=1,
+        keepalives_idle=20,
+        keepalives_interval=10,
+        keepalives_count=3,
+        options="-c idle_in_transaction_session_timeout=600000",
     )
     if readonly:
         conn.set_session(readonly=True, autocommit=False)
